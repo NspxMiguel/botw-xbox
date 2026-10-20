@@ -15,6 +15,7 @@ mingw_version=$(basename "$mingw_headers"/c++/*)
   -isystem "$mingw_headers/c++/$mingw_version/x86_64-w64-mingw32" \
   -isystem "$mingw_headers" -std=c++20 -DBOTW_PLATFORM_UWP=1 \
   -Wall -Wextra -Werror -fsyntax-only "$host_dir/audio.cpp" \
-  "$host_dir/controller.cpp" "$host_dir/launcher.cpp"
+  "$host_dir/controller.cpp" "$host_dir/launcher.cpp" \
+  "$host_dir/tests/art_tests.cc" "$host_dir/tests/art_view_syntax.cc"
 "$mingw_root/bin/x86_64-w64-mingw32-g++" -std=c++20 -DBOTW_PLATFORM_UWP=1 \
   -Wall -Wextra -Werror -fsyntax-only "$host_dir/audio.cpp"

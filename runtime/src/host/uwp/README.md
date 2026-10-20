@@ -13,9 +13,9 @@ Only this directory and the marked W3 blocks in the root CMakeLists.txt are chan
   L/R/C/LFE/Ls/Rs downmixed to stereo with the upstream coefficients, clipping and volume. Sixteen
   fixed buffers bound memory and queue latency; buffers remain alive through OnBufferEnd. No callback
   allocation, callback locks, or SDL dependency. Suspended/menu audio stops and incoming mixes drop.
-- Native UWP MessageDialog launcher pages (system theme, controller focus and accessibility), folder
-  picker, fps/volume/button-layout settings, a mods folder and persisted auto-launch setup. UI strings
-  use the small English/Portuguese table, selected by the system language. No custom CSS/theme layer.
+- Native Direct2D pre-boot home with player-owned artwork; system MessageDialog settings/resume pages,
+  folder picker, fps/volume/button-layout settings, a mods folder and persisted auto-launch setup.
+  UI strings use the English/Portuguese table, selected by the system language. No CSS layer.
 - LocalSettings persistence and FutureAccessList token `game`; each launch revalidates code/U-King.rpx,
   content/ and meta/. Priority is LocalState/game, LocalState itself, remembered folder, removable
   devices. Removable roots checked: game/, BotW/, BotWRecomp/game/, and the device root. Scanning and
@@ -112,3 +112,54 @@ full Apple/game build was performed. Full builds need generated guest code, abse
   device loss. Voice errors safely mute output; automatic XAudio2 device recreation is not implemented.
 - Suspend/guide/dashboard/visibility transitions and resize/DPI with W1/W2 quiescing installed;
   verify guest/GPU lifecycle, memory, frame pacing and long-run behavior on Series S and Series X.
+
+## Player-owned launcher artwork
+
+The pre-boot home screen reads `meta/bootTvTex.tga`, `meta/iconTex.tga` and
+`meta/bootDrcTex.tga` from the **same detected game folder** selected by the launcher.
+Reads use its brokered `StorageFolder`, including the remembered picker grant;
+art loading does not rely on CRT access to an external path. Artwork is never
+bundled, downloaded, copied into the repository or written to a cache. Each read
+and decoded image is limited to 16 MiB. Missing, inaccessible or malformed images
+are ignored independently; without a valid game/meta the home stays true black
+with the title and a folder-selection action. DRC art is decoded and retained for
+the future DRC presentation handoff; the TV hero uses only TV art.
+
+The TV image fills the screen with a centered aspect-fill crop. A separate black
+scrim has three stops (50% transparent, 82% at .82 opacity, 100% at .98). Copy sits
+in its lower portion. Saturated hue buckets select the accent from the player's
+art; neutral/transparent pixels do not dominate, and the accent is lifted until
+its WCAG contrast on black reaches 4.5:1. Without a saturated hue it uses white.
+The focused pill uses black text on this accent. Keyboard arrows/Tab/Enter,
+pointer and controller D-pad/A navigate the three 56-pixel home actions.
+
+Optional personal disc art lives in **LocalState/art/**, beside LocalState/game
+and LocalState/mods. Create `art/disc.png` or `art/cover.png` there; priority is a
+valid `disc.png`, then a valid `cover.png`, then the dump's `iconTex.tga`. WIC
+decodes only PNG containers, with the same memory bounds. Overrides are read only
+when a valid game is detected. Restart the launcher to reload personal artwork.
+The disc is a circular centered crop with a transparent center hole and subtle
+rings. Its 12-second smoothstep rotation runs only during runtime preparation;
+Windows `UISettings.AnimationsEnabled` is checked each frame, and disabled
+animations leave it stationary. Failed loads and leaving the home stop animation.
+
+The home owns a Direct2D/D3D11 CoreWindow swapchain **only before guest boot**;
+it releases all graphics resources before handing the window to W2. While a
+live guest retains its swapchain, View+Menu continues to use the existing native
+MessageDialog overlay for Resume/settings/mods. Showing the art home over an
+already-running guest requires a renderer-owned shared presentation surface,
+which is outside this directory's ownership. Graphics/device failures fall back
+to the system dialog. The new header-only graphics code uses MSVC library
+pragmas for d3d11, d2d1, dwrite and windowscodecs; non-MSVC Windows builds must
+link those libraries explicitly.
+
+`uwp_art_tests` uses exclusively synthetic byte arrays (no fixture images):
+24/32-bit raw and RLE TGAs, all four origins, image IDs, alpha/unused attributes,
+row-crossing packets, truncated prefixes, corrupt/oversize headers and packet
+overflow, synthetic TV/icon dimensions, dominant hue selection, a 4,096-color
+contrast sweep and loading/reduced-motion behavior. `check-syntax.sh` also checks
+the new graphics/PNG headers and art tests with the real MinGW Windows headers.
+The existing SDK limitation still applies: **app.cpp has not been compiled
+against real C++/WinRT projections on this Mac**. Windows/Xbox validation must
+check brokered meta reads, optional PNG decoding, resize/DPI/device loss,
+controller/keyboard/pointer focus, reduced-motion toggling and renderer handoff.
