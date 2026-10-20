@@ -28,7 +28,7 @@ jobs:
         run: python .github/workflows/ci-build.py check-contract
       - name: Install UWP dependencies
         run: |
-          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-uwp --allow-unsupported fmt glm boost-headers boost-nowide boost-algorithm boost-container boost-iterator boost-predef boost-random zlib zstd libpng openssl glslang spirv-cross
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-uwp fmt glm boost-headers boost-nowide boost-algorithm boost-container boost-iterator boost-predef zlib zstd libpng openssl glslang spirv-cross
           if ($LASTEXITCODE -ne 0) { throw 'UWP dependency installation failed' }
           # Shader translators run on the build host, outside the UWP sandbox.
           & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-windows 'glslang[tools]' spirv-cross directx-dxc
