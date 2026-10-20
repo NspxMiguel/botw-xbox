@@ -12,6 +12,7 @@
 #include "util/helpers/helpers.h"
 
 #include <thread>
+#include "D3D12PackHooks.h"
 
 extern std::atomic_int g_compiled_shaders_total;
 extern std::atomic_int g_compiled_shaders_async;
@@ -122,6 +123,16 @@ void RendererShaderD3D12::Shutdown()
 RendererShaderD3D12::RendererShaderD3D12(ShaderType type, uint64 baseHash, uint64 auxHash, bool isGameShader, bool isGfxPackShader, const std::string &glslCode)
 	: RendererShader(type, baseHash, auxHash, isGameShader, isGfxPackShader), m_glslCode(glslCode)
 {
+	if (const auto *plan = d3d12_packs::active_plan; plan && isGameShader)
+	{
+		const auto stage = type == ShaderType::kVertex ? packs::ShaderStage::vertex : type == ShaderType::kGeometry ? packs::ShaderStage::geometry
+																													: packs::ShaderStage::pixel;
+		if (const auto *replacement = packs::find_shader(*plan, baseHash, auxHash, stage))
+		{
+			m_glslCode = replacement->source;
+			m_isGfxPackShader = true;
+		}
+	}
 	m_uniqueId = s_nextUniqueId.fetch_add(1);
 	cemu_assert_debug(s_shaderD3D12ThreadPool.HasThreadsRunning());
 	std::lock_guard _l(s_shaderD3D12ThreadPool.m_queueMutex);
@@ -143,7 +154,7 @@ RendererShaderD3D12::~RendererShaderD3D12()
 
 bool RendererShaderD3D12::LoadFromCache()
 {
-	if (!s_bytecodeCache || !m_isGameShader || m_isGfxPackShader)
+	if (d3d12_packs::active_plan || !s_bytecodeCache || !m_isGameShader || m_isGfxPackShader)
 		return false;
 	uint64 h1, h2;
 	GenerateShaderPrecompiledCacheFilename(m_type, m_baseHash, m_auxHash, h1, h2);
@@ -168,7 +179,7 @@ bool RendererShaderD3D12::LoadFromCache()
 
 void RendererShaderD3D12::StoreInCache()
 {
-	if (!s_bytecodeCache || !m_isGameShader || m_isGfxPackShader || m_bytecode.empty())
+	if (d3d12_packs::active_plan || !s_bytecodeCache || !m_isGameShader || m_isGfxPackShader || m_bytecode.empty())
 		return;
 	uint64 h1, h2;
 	GenerateShaderPrecompiledCacheFilename(m_type, m_baseHash, m_auxHash, h1, h2);

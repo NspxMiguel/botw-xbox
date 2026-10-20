@@ -23,6 +23,7 @@
 // BotWRecomp: no Cemu process crash handler.
 // BotWRecomp: the recomp filesystem has no Cemu file-open observer.
 
+#include "D3D12PackHooks.h"
 #include <chrono>
 #include <cstdio>
 #include <condition_variable>
@@ -1037,6 +1038,13 @@ void D3D12PipelineCache::OpenDiskCaches(uint64 titleId)
 	if (m_diskCacheOpened)
 		return;
 	m_diskCacheOpened = true;
+	if (d3d12_packs::active_plan)
+	{
+		// Pack shaders share original guest hashes. Keep every persistent cache
+		// out of this session so another build/selection cannot reuse old PSOs.
+		m_diskCache = D3D12PipelineDiskCache::CreateInMemory();
+		return;
+	}
 	D3D12PipelineQuarantine::Open(titleId);
 	bool forceBlobs = false; // CEMU_D3D12_PSO_BLOBS=1 tests the Xbox's blob cache on a PC
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)

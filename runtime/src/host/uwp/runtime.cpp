@@ -1,11 +1,18 @@
 // SPDX-License-Identifier: MIT
 #if defined(BOTW_PLATFORM_UWP)
 #include "runtime.h"
+#include "../../../cemu/Cafe/HW/Latte/Renderer/D3D12/D3D12PackHooks.h"
 #include "../../hle.h"
 #include "../../latte/latte.h"
 #include "../../loader.h"
 #include "../../os.h"
+#include "../../packs/host_install.h"
 #include "../../settings.h"
+#if defined(_WIN32)
+#include <winrt/Windows.Graphics.Display.Core.h>
+#include <winrt/Windows.Graphics.Display.h>
+#include <winrt/Windows.UI.Core.h>
+#endif
 #include <algorithm>
 #include <cstdlib>
 
@@ -22,22 +29,67 @@ uint64_t g_trace_from = 0, g_trace_to = 0;
 extern "C" PPC_NORETURN void rt_fatal_exit() { std::_Exit(3); }
 
 namespace uwp {
+namespace {
+packs::LoadedRpx loaded_rpx;
+void output_pixels([[maybe_unused]] int &width, [[maybe_unused]] int &height) {
+#if defined(_WIN32)
+    try {
+        const auto hdmi =
+            winrt::Windows::Graphics::Display::Core::HdmiDisplayInformation::GetForCurrentView();
+        if (hdmi) {
+            const auto mode = hdmi.GetCurrentDisplayMode();
+            if (mode && mode.ResolutionWidthInRawPixels() && mode.ResolutionHeightInRawPixels()) {
+                width = static_cast<int>(mode.ResolutionWidthInRawPixels());
+                height = static_cast<int>(mode.ResolutionHeightInRawPixels());
+                return;
+            }
+        }
+    } catch (const winrt::hresult_error &) {
+        // HDMI information is unavailable on desktop/remote displays.
+    }
+    try {
+        const auto bounds = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread().Bounds();
+        const auto scale = winrt::Windows::Graphics::Display::DisplayInformation::GetForCurrentView()
+                               .RawPixelsPerViewPixel();
+        width = std::max(1, static_cast<int>(bounds.Width * scale + 0.5));
+        height = std::max(1, static_cast<int>(bounds.Height * scale + 0.5));
+    } catch (const winrt::hresult_error &) {
+        LOG("Display pixel size unavailable; using host size %dx%d", width, height);
+    }
+#endif
+}
+} // namespace
 bool prepare_runtime(const std::string &game, const std::string &user) {
     // One guest address space per process. Resume uses the existing guest; never load a second RPX.
     g_game_root = game;
     g_user_root = user;
     mem::init();
     dispatch::init();
-    if (!loader::load_main(g_game_root + "/code/U-King.rpx"))
+    std::string error;
+    if (!packs::load_rpx(packs::compiled_plan(), g_game_root + "/code/U-King.rpx", g_user_root,
+                         loader::load_main, loaded_rpx, error))
         return false;
+    if (!error.empty())
+        LOG("%s", error.c_str());
     os::init();
     debug_watch_init();
     return true;
 }
 void start_runtime(void *window, int width, int height) {
+    output_pixels(width, height);
     g_render_scale = std::clamp(std::min(width / 1280.f, height / 720.f), 1.f, 3.f);
     latte::create_renderer(window, width, height); // W2: IUnknown CoreWindow, not NSView.
     settings::apply();
+    packs::install_loaded(loaded_rpx, d3d12_packs::hooks());
+    // The base texture constructor consumes the built-in scaling rules once.
+    // Accepted pack texture rules supply all overrides instead.
+    if (const auto *plan = d3d12_packs::active_plan) {
+        for (const auto &pack : plan->packs)
+            if (!pack.textures.empty()) {
+                g_render_scale = 1.f;
+                break;
+            }
+    }
     auto argv = os::build_argv("U-King.rpx");
     const auto &module = loader::main_module();
     threads::start_main(module.entry, 1, argv, module.stack_size);

@@ -10,6 +10,9 @@
 
 #include <dxgi1_5.h>
 #include <chrono>
+#ifdef BOTWRECOMP
+extern int g_target_fps;
+#endif
 
 D3D12SwapChain::D3D12SwapChain(ID3D12Device *device, IDXGIFactory4 *factory, ID3D12CommandQueue *queue, D3D12StagingDescriptorHeap *rtvHeap, TargetType type, void *nativeHandle, uint32 width, uint32 height)
 	: m_device(device), m_rtvHeap(rtvHeap), m_type(type), m_width(std::max<uint32>(width, 1)), m_height(std::max<uint32>(height, 1))
@@ -122,6 +125,11 @@ void D3D12SwapChain::Resize(uint32 width, uint32 height)
 
 bool D3D12SwapChain::Present(uint32 syncInterval)
 {
+#ifdef BOTWRECOMP
+	// The guest uses a 60 Hz vblank clock: one interval at 60 fps, two at 30.
+	// Never use ALLOW_TEARING, including callers requesting an unsynced present.
+	syncInterval = g_target_fps >= 60 ? 1 : 2;
+#endif
 	UINT flags = 0;
 	if (syncInterval == 0 && m_allowTearing)
 		flags |= DXGI_PRESENT_ALLOW_TEARING;

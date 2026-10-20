@@ -42,6 +42,12 @@ struct BuildPlan {
 // An empty plan is returned for the existing build without packs.
 const BuildPlan &compiled_plan();
 
+// Hash the exact source snapshot handed to the RPX loader.
+std::string sha256(const uint8_t *bytes, size_t size);
+bool validate_renderer_fields(const BuildPlan &plan, bool textures,
+                              bool shaders, std::string &error);
+bool has_timing_pack(const BuildPlan &plan);
+
 struct TextureDescription {
   uint32_t width = 0, height = 0, depth = 0;
   uint32_t format = 0, tile_mode = 0;
