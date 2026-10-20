@@ -16,12 +16,14 @@
 #endif
 #endif
 
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "hle.h"
 #include "os.h"
+#include "vfs/overlay.h"
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -58,6 +60,8 @@ struct Handle {
     FILE* f = nullptr;
     std::filesystem::directory_iterator *d = nullptr;
     std::string host;
+    std::shared_ptr<std::vector<vfs::Entry>> overlay_entries{};
+    size_t overlay_position = 0;
 };
 std::mutex g_fs_lock;
 std::vector<Handle> g_handles(1);  // index 0 unused
@@ -69,7 +73,17 @@ std::string host_path(std::string p) { return botw_ios_fix_case(host_path_exact(
 #define host_path host_path_exact
 #endif
 std::string host_path(std::string p) {
-  return platform::guest_path(std::move(p), g_cwd, {g_game_root, g_user_root});
+    if (vfs::content_overlay().active()) {
+        if (p.empty() || p.front() != '/')
+            p = g_cwd + "/" + p;
+        std::string normalized;
+        for (char ch : p)
+            if (!(ch == '/' && !normalized.empty() && normalized.back() == '/'))
+                normalized += ch;
+        vfs::normalize_content_volume(normalized);
+        p = std::move(normalized);
+    }
+    return platform::guest_path(std::move(p), g_cwd, {g_game_root, g_user_root});
 }
 #if TARGET_OS_IOS
 #undef host_path
@@ -82,7 +96,7 @@ void mkdirs(const std::string& p) {
 
 uint32_t add_handle(Handle h) {
     for (size_t i = 1; i < g_handles.size(); i++)
-        if (!g_handles[i].f && !g_handles[i].d) {
+        if (!g_handles[i].f && !g_handles[i].d && !g_handles[i].overlay_entries) {
             g_handles[i] = h;
             return (uint32_t)i;
         }
@@ -111,6 +125,8 @@ int32_t fail(PPCContext* c, int32_t err, uint32_t mask, const char* what, const 
 
 int32_t open_file(PPCContext* c, const std::string& gpath, const char* mode, uint32_t handle_out, uint32_t mask) {
     std::string hp = host_path(gpath);
+    if (vfs::content_overlay().active())
+        hp = vfs::content_overlay().resolve(hp);
     struct stat st;
     bool exists = path_stat(hp.c_str(), &st) == 0;
     if (exists && S_ISDIR(st.st_mode)) return fail(c, FS_NOT_FILE, mask, "open", gpath);
@@ -136,6 +152,20 @@ int32_t open_file(PPCContext* c, const std::string& gpath, const char* mode, uin
 
 int32_t open_dir(PPCContext* c, const std::string& gpath, uint32_t out, uint32_t mask) {
     std::string hp = host_path(gpath);
+    if (vfs::content_overlay().active()) {
+        auto entries = std::make_shared<std::vector<vfs::Entry>>();
+        bool exists = false;
+        if (vfs::content_overlay().list(hp, *entries, exists)) {
+            if (!exists)
+                return fail(c, FS_NOT_FOUND, mask, "opendir", gpath);
+            Handle handle;
+            handle.host = hp;
+            handle.overlay_entries = std::move(entries);
+            std::lock_guard<std::mutex> l(g_fs_lock);
+            mem::w32(out, add_handle(std::move(handle)));
+            return FS_OK;
+        }
+    }
     std::error_code error;
     auto *d = new std::filesystem::directory_iterator(utf8_path(hp), error);
     if (error) {
@@ -150,8 +180,11 @@ int32_t open_dir(PPCContext* c, const std::string& gpath, uint32_t out, uint32_t
 
 int32_t get_stat(PPCContext* c, const std::string& gpath, uint32_t out, uint32_t mask) {
     struct stat st;
-    if (path_stat(host_path(gpath).c_str(), &st) != 0)
-      return fail(c, FS_NOT_FOUND, mask, "stat", gpath);
+    std::string hp = host_path(gpath);
+    if (vfs::content_overlay().active())
+        hp = vfs::content_overlay().resolve(hp);
+    if (path_stat(hp.c_str(), &st) != 0)
+        return fail(c, FS_NOT_FOUND, mask, "stat", gpath);
     fill_stat(out, st);
     return FS_OK;
 }
@@ -164,7 +197,12 @@ std::string save_path(uint32_t account, const char* path) {
 }
 }  // namespace
 
-HLE_EXPORT(coreinit, FSInit) {}
+HLE_EXPORT(coreinit, FSInit) {
+    const char *root = getenv("BOTW_MODS_ROOT");
+    vfs::content_overlay().configure_defaults(utf8_path(g_game_root), utf8_path(g_user_root),
+                                              utf8_path(root ? root : ""),
+                                              [](const std::string &message) { LOG("%s", message.c_str()); });
+}
 HLE_EXPORT(coreinit, FSShutdown) {}
 HLE_EXPORT(coreinit, FSAddClient) { RET(0); }
 HLE_EXPORT(coreinit, FSDelClient) { RET(0); }
@@ -248,6 +286,21 @@ HLE_EXPORT(coreinit, FSReadDir) {
     uint32_t out = ARG(3);
     std::lock_guard<std::mutex> l(g_fs_lock);
     Handle* h = get(ARG(2));
+    if (h && h->overlay_entries) {
+        while (h->overlay_position < h->overlay_entries->size()) {
+            const auto &entry = (*h->overlay_entries)[h->overlay_position++];
+            struct stat st;
+            if (path_stat(entry.host.c_str(), &st) != 0)
+                continue;
+            fill_stat(out, st);
+            memset(mem::host(out + 0x64), 0, 0x80);
+            strncpy((char *)mem::host(out + 0x64), entry.name.c_str(), 0x7F);
+            RET(0);
+            return;
+        }
+        RET(FS_END);
+        return;
+    }
     if (!h || !h->d) {
         RET(FS_FATAL);
         return;
@@ -280,9 +333,9 @@ HLE_EXPORT(coreinit, FSReadDir) {
 HLE_EXPORT(coreinit, FSCloseDir) {
     std::lock_guard<std::mutex> l(g_fs_lock);
     Handle* h = get(ARG(2));
-    if (h && h->d) {
-      delete h->d;
-      *h = Handle{};
+    if (h && (h->d || h->overlay_entries)) {
+        delete h->d;
+        *h = Handle{};
     }
     RET(0);
 }
