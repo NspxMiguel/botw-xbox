@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(BotWUwpHostTests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+enable_testing()
+add_executable(uwp_host_tests tests.cc ../controller.cpp ../launcher.cpp)
+target_compile_options(uwp_host_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME uwp_host_tests COMMAND uwp_host_tests)

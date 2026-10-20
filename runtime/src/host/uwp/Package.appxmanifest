@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+         xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+         IgnorableNamespaces="uap">
+  <Identity Name="BotWRecompiled" Publisher="CN=BotWRecompiled" Version="1.0.0.0" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>BotW Recompiled</DisplayName>
+    <PublisherDisplayName>BotW Recompiled contributors</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+  <Resources>
+    <Resource Language="en-US" />
+    <Resource Language="pt-BR" />
+  </Resources>
+  <Applications>
+    <Application Id="App" Executable="BotWRecomp.exe" EntryPoint="BotWRecomp.App">
+      <uap:VisualElements DisplayName="BotW Recompiled" Description="Unofficial Wii U recompilation host"
+                          BackgroundColor="black" Square150x150Logo="Assets\Square150x150Logo.png"
+                          Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="black" />
+      </uap:VisualElements>
+      <Extensions>
+        <!-- RPX association allows removableStorage discovery. It does NOT grant access to every
+             content extension. A picker grant or W1 broker/import is needed for the whole dump. -->
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="wiiu-rpx">
+            <uap:DisplayName>Wii U executable</uap:DisplayName>
+            <uap:SupportedFileTypes><uap:FileType>.rpx</uap:FileType></uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <!-- broadFileSystemAccess is unsupported on Xbox; no network or microphone access is needed. -->
+  <Capabilities><uap:Capability Name="removableStorage" /></Capabilities>
+</Package>
