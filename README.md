@@ -40,24 +40,50 @@ shaders compile on first use, so the first run hitches; DLC is untested. Details
   # ba58da5b95ce929e005d058ceb08b9b2788d1ab2bbc8a6c189bbadca0bb34d30
   ```
 
-### Getting the game files
+### Getting the game files (from your own console)
 
-Dump the game and its update from your own Wii U (for example with
-[Dumpling](https://github.com/emiyl/dumpling)). Then copy the update's `code/`, `content/` and
-`meta/` folders over the base game's, replacing files, so that one folder holds the updated game.
+Everything comes from **your own Wii U and your own copy of the game**. Nothing here downloads
+games or keys, and no key ever needs to reach the Xbox: the Xbox only takes the decrypted folders.
 
-If you have a `.wud` or `.wux` disc image and its disc key instead, `tools/wud_extract.py` unpacks
-the base game. It needs the Wii U common key, which is not included here. Pass it in
-`WIIU_COMMON_KEY`, either as hex or as a file:
+**Recommended: dump the game already decrypted (no keys needed).**
+
+1. Set up the Aroma homebrew environment on your Wii U by following
+   [wiiu.hacks.guide](https://wiiu.hacks.guide/). You need an SD card and, for large games, a USB
+   drive formatted as FAT32 or exFAT.
+2. Install [Dumpling](https://github.com/emiyl/dumpling) and open it from the Wii U menu.
+3. Choose **Dump a game**, select Breath of the Wild and tick **Game**, **Update** and **DLC**
+   (the update must be **1.6.0 / v208**; update it from the eShop first if needed).
+4. Dumpling writes `code/`, `content/` and `meta/` folders for the base game, the update and the
+   DLC (`/dumpling/Games/...` on the chosen drive).
+5. Merge them into one folder: copy the base game, then copy the update's `code/`, `content/` and
+   `meta/` over it, replacing files. Keep the DLC's `content/` as `aoc/` next to them.
+6. Check the executable:
+
+   ```bash
+   shasum -a 256 game/code/U-King.rpx
+   # ba58da5b95ce929e005d058ceb08b9b2788d1ab2bbc8a6c189bbadca0bb34d30
+   ```
+
+**Only if you have a `.wud`/`.wux` image of your own disc**, you also need two keys from your
+console. Dumpling's **Dump online files / console files** option saves `otp.bin`, which holds the
+Wii U common key; the disc key is saved as `game.key` when you dump the disc image with Dumpling
+or wudump. Keep both private; they are tied to your console.
 
 ```bash
-WIIU_COMMON_KEY=/path/to/common.key uv run python -I tools/wud_extract.py game.wux game.key game-base
+WIIU_COMMON_KEY=/path/to/otp.bin uv run --with cryptography python -I tools/wud_extract.py game.wux game.key game-base
 ```
 
-You still need the v208 update from your console on top of that.
+`WIIU_COMMON_KEY` also takes the key as 32 hex digits or a file holding them. You still need the
+v208 update on top of the extracted base game (step 5 above).
 
 The scripts look for the game in a folder named `game` next to this repository. If yours is
 elsewhere, set `BOTW_GAME=/path/to/game`.
+
+### On Xbox
+
+Copy the merged folder to a USB drive (exFAT or NTFS) as `BotW/` with `code/`, `content/`,
+`meta/` (and `aoc/` if you have the DLC) inside, plug it into the console and open the app. The
+first-run setup finds it, checks the files and walks you through the rest.
 
 ## Build for iPhone
 
