@@ -50,7 +50,7 @@ file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/runtime/src/*.mm)
 # ---- W1 platform sources (owned by W1) -------------------------------------------------------
 # Keep test mains and the other platform's implementation out of the application.
-list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/platform/")
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/platform/")
 list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/clock.cpp)
 if(WIN32 OR BOTW_PLATFORM STREQUAL "win32" OR BOTW_PLATFORM STREQUAL "uwp")
   list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/win32/platform.cpp)
@@ -58,8 +58,37 @@ else()
   list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/apple/platform.cpp)
 endif()
 # ---- end W1 platform sources ---------------------------------------------------------------
+# BEGIN W3 UWP host sources (W3-owned block)
+if(BOTW_PLATFORM STREQUAL "uwp")
+  list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/(main|settings)\\.cpp$|/audio/output\\.cpp$|/host/(window\\.mm|menu\\.cpp|touch\\.cpp)$")
+  list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/host/uwp/tests/")
+else()
+  # Do not let the recursive source glob pull Windows code or the test main into Apple builds.
+  list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/host/uwp/")
+endif()
+# END W3 UWP host sources
 add_executable(BotWRecomp ${RUNTIME_SOURCES} $<TARGET_OBJECTS:guest> $<TARGET_OBJECTS:cemu_gpu>)
 target_include_directories(BotWRecomp PRIVATE runtime/include runtime/src generated)
+# BEGIN W3 UWP host target configuration (W3-owned block)
+if(BOTW_PLATFORM STREQUAL "uwp")
+  target_compile_definitions(BotWRecomp PRIVATE BOTW_PLATFORM_UWP=1 NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_include_directories(BotWRecomp PRIVATE runtime/src/host/uwp/compat)
+  target_link_libraries(BotWRecomp PRIVATE windowsapp xaudio2)
+  set(W3_UWP_PACKAGE ${CMAKE_SOURCE_DIR}/runtime/src/host/uwp)
+  set(W3_UWP_ASSETS
+    ${W3_UWP_PACKAGE}/Assets/StoreLogo.png
+    ${W3_UWP_PACKAGE}/Assets/Square44x44Logo.png
+    ${W3_UWP_PACKAGE}/Assets/Square150x150Logo.png
+    ${W3_UWP_PACKAGE}/Assets/SplashScreen.png)
+  target_sources(BotWRecomp PRIVATE ${W3_UWP_PACKAGE}/Package.appxmanifest ${W3_UWP_ASSETS})
+  set_source_files_properties(${W3_UWP_ASSETS} PROPERTIES
+    VS_DEPLOYMENT_CONTENT TRUE VS_DEPLOYMENT_LOCATION "Assets")
+  if(MSVC)
+    target_compile_options(BotWRecomp PRIVATE /await:strict /permissive- /utf-8)
+    target_link_options(BotWRecomp PRIVATE /SUBSYSTEM:WINDOWS /APPCONTAINER)
+  endif()
+endif()
+# END W3 UWP host target configuration
 target_compile_options(BotWRecomp PRIVATE -Wall -Wno-unused-function -Wno-unused-variable -fwrapv -mcpu=apple-m1
   $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 find_package(SDL3 REQUIRED CONFIG)
