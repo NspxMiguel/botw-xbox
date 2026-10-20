@@ -1,3 +1,8 @@
+#ifdef ENABLE_D3D12
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12PipelineCache.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/RendererShaderD3D12.h"
+#endif
 #include "Cafe/CafeSystem.h"
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
@@ -192,6 +197,11 @@ void LatteShaderCache_finish()
 		RendererShaderMtl::ShaderCacheLoading_end();
 		return;
 #endif
+#ifdef ENABLE_D3D12
+	case RendererAPI::D3D12:
+		RendererShaderD3D12::ShaderCacheLoading_end();
+		return;
+#endif
 	}
 }
 
@@ -286,6 +296,11 @@ void LatteShaderCache_Load()
 #ifdef ENABLE_METAL
 	case RendererAPI::Metal:
 		RendererShaderMtl::ShaderCacheLoading_begin(cacheTitleId);
+		break;
+#endif
+#ifdef ENABLE_D3D12
+	case RendererAPI::D3D12:
+		RendererShaderD3D12::ShaderCacheLoading_begin(cacheTitleId);
 		break;
 #endif
 	}
@@ -385,8 +400,8 @@ void LatteShaderCache_Load()
 #endif
 	LatteShaderCache_finish();
 	// if Vulkan or Metal then also load pipeline cache
-#if defined(ENABLE_VULKAN) || defined(ENABLE_METAL)
-	if (g_renderer->GetType() == RendererAPI::Vulkan || g_renderer->GetType() == RendererAPI::Metal)
+#if defined(ENABLE_VULKAN) || defined(ENABLE_METAL) || defined(ENABLE_D3D12)
+	if (RendererUsesVulkanGLSL(g_renderer->GetType()) || g_renderer->GetType() == RendererAPI::Metal)
         LatteShaderCache_LoadPipelineCache(cacheTitleId);
 #endif
 
@@ -567,6 +582,11 @@ void LatteShaderCache_LoadPipelineCache(uint64 cacheTitleId)
 		g_shaderCacheLoaderState.pipelineFileCount = MetalPipelineCache::GetInstance().BeginLoading(cacheTitleId);
 		break;
 #endif
+#ifdef ENABLE_D3D12
+	case RendererAPI::D3D12:
+		g_shaderCacheLoaderState.pipelineFileCount = D3D12Renderer::GetInstance()->GetPipelineCache()->BeginPreload(cacheTitleId);
+		break;
+#endif
 	}
 
 	g_shaderCacheLoaderState.loadedPipelines = 0;
@@ -584,6 +604,12 @@ void LatteShaderCache_LoadPipelineCache(uint64 cacheTitleId)
 		MetalPipelineCache::GetInstance().EndLoading();
 		break;
 #endif
+#ifdef ENABLE_D3D12
+	case RendererAPI::D3D12:
+		D3D12Renderer::GetInstance()->GetPipelineCache()->EndPreload();
+		D3D12Renderer::GetInstance()->GetPipelineCache()->BeginStartupWindow();
+		break;
+#endif
 	}
 }
 
@@ -599,6 +625,10 @@ bool LatteShaderCache_updatePipelineLoadingProgress()
 #ifdef ENABLE_METAL
 	case RendererAPI::Metal:
 		return MetalPipelineCache::GetInstance().UpdateLoading(g_shaderCacheLoaderState.loadedPipelines, pipelinesMissingShaders);
+#endif
+#ifdef ENABLE_D3D12
+	case RendererAPI::D3D12:
+		return D3D12Renderer::GetInstance()->GetPipelineCache()->UpdatePreload(g_shaderCacheLoaderState.loadedPipelines);
 #endif
 	}
 
@@ -875,6 +905,11 @@ void LatteShaderCache_Close()
 #ifdef ENABLE_METAL
 	case RendererAPI::Metal:
 		RendererShaderMtl::ShaderCacheLoading_Close();
+		break;
+#endif
+#ifdef ENABLE_D3D12
+	case RendererAPI::D3D12:
+		RendererShaderD3D12::ShaderCacheLoading_Close();
 		break;
 #endif
 	}

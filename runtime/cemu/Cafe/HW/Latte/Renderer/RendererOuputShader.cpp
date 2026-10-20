@@ -530,13 +530,14 @@ void RendererOutputShader::InitializeStatic()
 		break;
     }
 #endif
-#ifdef ENABLE_VULKAN
+#if defined(ENABLE_VULKAN) || defined(ENABLE_D3D12)
+    case RendererAPI::D3D12:
     case RendererAPI::Vulkan:
     {
     	std::string vertex_source, vertex_source_ud;
     	// vertex shader
-		vertex_source = GetVulkanVertexSource(false);
-		vertex_source_ud = GetVulkanVertexSource(true);
+		vertex_source = GetVulkanVertexSource(g_renderer->GetType() == RendererAPI::D3D12);
+		vertex_source_ud = GetVulkanVertexSource(g_renderer->GetType() != RendererAPI::D3D12);
 			
     	s_copy_shader = new RendererOutputShader(vertex_source, s_copy_shader_source);
     	s_copy_shader_ud = new RendererOutputShader(vertex_source_ud, s_copy_shader_source);

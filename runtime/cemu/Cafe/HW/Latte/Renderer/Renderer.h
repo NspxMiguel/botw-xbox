@@ -8,7 +8,7 @@
 #include "Cafe/HW/Latte/Core/LatteQueryObject.h"
 #include "Cafe/HW/Latte/Renderer/RendererOuputShader.h"
 
-#if BOOST_OS_WINDOWS
+#if BOOST_OS_WINDOWS && !defined(ENABLE_D3D12)
 #include "util/DXGIWrapper/DXGIWrapper.h"
 #endif
 
@@ -34,9 +34,15 @@ enum class RendererAPI
 	OpenGL,
 	Vulkan,
 	Metal,
+	D3D12,
 
 	MAX
 };
+
+inline bool RendererUsesVulkanGLSL(RendererAPI api)
+{
+	return api == RendererAPI::Vulkan || api == RendererAPI::D3D12;
+}
 
 using ImTextureID = void*;
 
@@ -197,7 +203,7 @@ protected:
 	ImGuiContext* imguiTVContext{};
 	ImGuiContext* imguiPadContext{};
 
-#if BOOST_OS_WINDOWS
+#if BOOST_OS_WINDOWS && !defined(ENABLE_D3D12)
 	std::unique_ptr<DXGIWrapper> m_dxgi_wrapper{};
 #endif
 };

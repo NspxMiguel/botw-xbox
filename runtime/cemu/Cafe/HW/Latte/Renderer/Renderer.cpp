@@ -16,7 +16,7 @@ bool Renderer::GetVRAMInfo(int& usageInMB, int& totalInMB) const
 {
 	usageInMB = totalInMB = -1;
 	
-#if BOOST_OS_WINDOWS
+#if BOOST_OS_WINDOWS && !defined(ENABLE_D3D12)
 	if (m_dxgi_wrapper)
 	{
 		DXGI_QUERY_VIDEO_MEMORY_INFO info{};
