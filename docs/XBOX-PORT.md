@@ -19,3 +19,9 @@ Legal: no game files, no generated code from the game in the repo (same rule as 
 First launch: menu with select the game (only if not found automatically), settings, mods. Setup asks
 "next time, open the game automatically?" — if yes, later launches go straight in. Select + Start in
 game returns to the menu (same gesture as NXbox).
+
+## Mods (owner's request, 2026-10-20)
+- Brazilian Portuguese translation and dubbing mods must work. They replace game files (message
+  archives under content/, voice/sound archives). Players supply the mods; we ship none.
+- Graphic packs (Cemu format) and file-replacement mods load from the mods folder chosen in the
+  launcher; later packs override earlier ones; each applied file is logged once.
