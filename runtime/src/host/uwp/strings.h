@@ -26,6 +26,7 @@ enum class Text {
     mods_help,
     controls,
     restart,
+    loading,
     count
 };
 inline std::wstring_view text(Text key, bool pt) {
@@ -58,7 +59,8 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"View + Menu: launcher. View + Y: GamePad screen. Xbox has no touch or gyro.",
           L"View + Menu: menu inicial. View + Y: tela do GamePad. Xbox não tem toque nem giroscópio."},
          {L"Check your updated game folder, then close and reopen the app to try again.",
-          L"Confira a pasta do jogo atualizado, feche e abra o app para tentar novamente."}}};
+          L"Confira a pasta do jogo atualizado, feche e abra o app para tentar novamente."},
+         {L"Loading your game…", L"Carregando seu jogo…"}}};
     return table.at(static_cast<size_t>(key))[pt ? 1 : 0];
 }
 } // namespace uwp

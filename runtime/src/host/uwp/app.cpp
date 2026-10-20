@@ -3,6 +3,8 @@
 #include "../../host/window.h"
 #include "../../latte/latte.h"
 #include "../../settings.h"
+#include "art_png.h"
+#include "art_view.h"
 #include "audio.h"
 #include "controller.h"
 #include "host.h"
@@ -24,9 +26,13 @@
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.AccessCache.h>
 #include <winrt/Windows.Storage.Pickers.h>
+#include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.Popups.h>
+#include <winrt/Windows.UI.ViewManagement.h>
 
 using namespace winrt;
 using namespace Windows::ApplicationModel;
@@ -76,11 +82,36 @@ uwp::Candidate inspect(StorageFolder const &root, uwp::Source source) {
     return candidate;
 }
 
+std::optional<uwp::ArtImage> read_art(StorageFolder const &meta, wchar_t const *name, bool png = false) {
+    if (!meta)
+        return std::nullopt;
+    try {
+        auto file = meta.GetFileAsync(name).get();
+        auto stream = file.OpenReadAsync().get();
+        auto size = stream.Size();
+        if (!size || size > uwp::art_byte_limit)
+            return std::nullopt;
+        Streams::DataReader reader(stream.GetInputStreamAt(0));
+        if (reader.LoadAsync(static_cast<uint32_t>(size)).get() != size)
+            return std::nullopt;
+        std::vector<uint8_t> bytes(static_cast<size_t>(size));
+        reader.ReadBytes(bytes);
+        return png ? uwp::decode_art_png(bytes) : uwp::decode_tga(bytes);
+    } catch (hresult_error const &) {
+        return std::nullopt;
+    }
+}
+
 struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool pt = false, menu_open = false, running = false, boot_attempted = false;
     bool failed = false, foreground = true, suspended = false, opening = false;
     uwp::Preferences preferences;
     uwp::Controller controller;
+    uwp::GameArt art;
+    uwp::ArtView home;
+    uint32_t home_buttons = ~uint32_t(0);
+    std::chrono::steady_clock::time_point loading_since{};
+    event_token key_down{}, pointer_pressed{};
     StorageFolder local{nullptr};
     std::vector<uwp::Candidate> candidates;
     Gamepad pad{nullptr};
@@ -118,23 +149,50 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             update_size();
             if (running)
                 latte::resize_window(pixel_width, pixel_height);
+            else
+                resize_home();
         });
         dpi = Windows::Graphics::Display::DisplayInformation::GetForCurrentView().DpiChanged(
             [this](auto const &, auto const &) {
                 update_size();
                 if (running)
                     latte::resize_window(pixel_width, pixel_height);
+                else
+                    resize_home();
             });
+        key_down = window.KeyDown([this](auto const &, KeyEventArgs const &e) {
+            if (!home.shown || home.loading)
+                return;
+            using Windows::System::VirtualKey;
+            auto key = e.VirtualKey();
+            if (key == VirtualKey::Left || key == VirtualKey::Up)
+                home.focus = (home.focus + 2) % 3;
+            if (key == VirtualKey::Right || key == VirtualKey::Down || key == VirtualKey::Tab)
+                home.focus = (home.focus + 1) % 3;
+            if (key == VirtualKey::Enter || key == VirtualKey::Space)
+                home.selected = home.focus;
+        });
+        pointer_pressed = window.PointerPressed([this](auto const &, PointerEventArgs const &e) {
+            if (!home.shown || home.loading)
+                return;
+            auto point = e.CurrentPoint().Position();
+            auto bounds = host_window.Bounds();
+            home.selected =
+                home.hit(point.X * pixel_width / bounds.Width, point.Y * pixel_height / bounds.Height);
+        });
         update_size();
     }
     void Load(hstring const &) {}
     void Uninitialize() {
         neutral();
+        home.close();
         active(false);
         uwp::shutdown_audio();
         CoreApplication::Suspending(suspending);
         CoreApplication::Resuming(resuming);
         CoreApplication::MainView().Activated(activating);
+        host_window.KeyDown(key_down);
+        host_window.PointerPressed(pointer_pressed);
         host_window.Closed(closed);
         host_window.VisibilityChanged(visibility);
         host_window.Activated(activated);
@@ -146,6 +204,7 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         input::set_gamepad({});
         input::clear_rumble();
         controller.reset();
+        home_buttons = ~uint32_t(0);
         if (pad) {
             try {
                 pad.Vibration(GamepadVibration{});
@@ -187,18 +246,24 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
     IAsyncAction scan() {
         auto lifetime = get_strong();
         auto dispatcher = host_window.Dispatcher();
+        auto saved_preferences = preferences;
         co_await resume_background();
         std::vector<uwp::Candidate> found;
+        std::vector<StorageFolder> folders;
+        auto add = [&](StorageFolder const &folder, uwp::Source source) {
+            found.push_back(inspect(folder, source));
+            folders.push_back(folder);
+        };
         try {
             for (auto path : {L"game", L""}) {
                 auto folder = *path ? child(local, path) : local;
                 if (folder)
-                    found.push_back(inspect(folder, uwp::Source::local));
+                    add(folder, uwp::Source::local);
             }
             auto access = AccessCache::StorageApplicationPermissions::FutureAccessList();
             if (access.ContainsItem(L"game")) {
                 try {
-                    found.push_back(inspect(access.GetFolderAsync(L"game").get(), uwp::Source::remembered));
+                    add(access.GetFolderAsync(L"game").get(), uwp::Source::remembered);
                 } catch (
                     hresult_error const &) { /* Removed drive or expired grant: continue auto detection. */
                 }
@@ -208,12 +273,34 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                 for (auto path : {L"game", L"BotW", L"BotWRecomp\\game", L""}) {
                     auto folder = *path ? child(drive, path) : drive;
                     if (folder)
-                        found.push_back(inspect(folder, uwp::Source::removable));
+                        add(folder, uwp::Source::removable);
                 }
             }
         } catch (hresult_error const &) { /* LocalState remains usable if removable access is denied. */
         }
+        uwp::GameArt loaded_art;
+        auto decision = uwp::decide(found, saved_preferences);
+        if (decision.game) {
+            for (size_t i = 0; i < found.size(); ++i) {
+                if (found[i].path != decision.game->path)
+                    continue;
+                auto meta = child(folders[i], L"meta");
+                loaded_art.tv = read_art(meta, L"bootTvTex.tga");
+                loaded_art.icon = read_art(meta, L"iconTex.tga");
+                loaded_art.drc = read_art(meta, L"bootDrcTex.tga");
+                break;
+            }
+        }
+        if (decision.game) {
+            auto custom = child(local, L"art");
+            auto custom_disc = read_art(custom, L"disc.png", true);
+            if (!custom_disc)
+                custom_disc = read_art(custom, L"cover.png", true);
+            if (custom_disc)
+                loaded_art.icon = std::move(custom_disc);
+        }
         co_await resume_foreground(dispatcher);
+        art = std::move(loaded_art);
         candidates = std::move(found);
     }
     IAsyncOperation<int32_t> choose(hstring title, hstring body, std::vector<hstring> choices) {
@@ -224,6 +311,54 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         dialog.CancelCommandIndex(static_cast<uint32_t>(choices.size() - 1));
         auto command = co_await dialog.ShowAsync();
         co_return command ? unbox_value<int32_t>(command.Id()) : static_cast<int32_t>(choices.size() - 1);
+    }
+    void resize_home() {
+        if (!home.ready())
+            return;
+        auto heading = home.heading, detail = home.detail, loading_text = home.loading_text;
+        auto buttons = home.buttons;
+        bool shown = home.shown, loading = home.loading;
+        int focus = home.focus;
+        try {
+            home.open(static_cast<IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
+            home.heading = std::move(heading);
+            home.detail = std::move(detail);
+            home.loading_text = std::move(loading_text);
+            home.buttons = std::move(buttons);
+            home.shown = shown;
+            home.loading = loading;
+            home.focus = focus;
+        } catch (std::exception const &) {
+            home.close();
+        }
+    }
+    void show_home() {
+        home.open(static_cast<IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
+        home.heading = label(uwp::Text::title).c_str();
+        home.loading_text = label(uwp::Text::loading).c_str();
+        home_buttons = ~uint32_t(0); // Require release before accepting a controller action.
+    }
+    IAsyncOperation<int32_t> choose_home(hstring body, std::vector<hstring> choices) {
+        try {
+            show_home();
+        } catch (std::exception const &) {
+            home.close();
+        }
+        if (!home.ready())
+            co_return co_await choose(label(uwp::Text::title), body, choices);
+        home.detail = body.c_str();
+        for (size_t i = 0; i < 3; ++i)
+            home.buttons[i] = choices[i].c_str();
+        auto dispatcher = host_window.Dispatcher();
+        while (home.selected < 0 && home.shown && !quit) {
+            co_await resume_after(std::chrono::milliseconds(16));
+            co_await resume_foreground(dispatcher);
+        }
+        if (!home.ready() && !quit)
+            co_return co_await choose(label(uwp::Text::title), body, choices);
+        int result = home.selected < 0 ? 0 : home.selected;
+        home.shown = false;
+        co_return result;
     }
     IAsyncAction select_folder() {
         Pickers::FolderPicker picker;
@@ -292,6 +427,16 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                 co_return;
             }
             boot_attempted = true;
+            if (!home.ready()) {
+                try {
+                    show_home();
+                } catch (std::exception const &) {
+                    home.close();
+                }
+            }
+            home.shown = home.ready();
+            home.loading = true;
+            loading_since = std::chrono::steady_clock::now();
             auto dispatcher = host_window.Dispatcher();
             auto user = to_string(local.Path());
             co_await resume_background();
@@ -302,9 +447,11 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             co_await resume_foreground(dispatcher);
             if (!loaded) {
+                home.close();
                 failed = true;
                 co_return;
             }
+            home.close(); // Release the CoreWindow swapchain before the game renderer takes ownership.
             uwp::start_runtime(uwp::core_window(), pixel_width, pixel_height);
             running = true;
         }
@@ -339,16 +486,22 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (running)
                     co_return;
             }
+            if (quit)
+                co_return;
             allow_auto = false;
             hstring body = failed ? label(boot_attempted && !running ? uwp::Text::restart : uwp::Text::error)
                            : decision.select_game ? label(uwp::Text::missing)
                                                   : label(uwp::Text::controls);
-            int choice = co_await choose(label(uwp::Text::title), body,
-                                         {label(running                ? uwp::Text::resume
-                                                : decision.select_game ? uwp::Text::select
-                                                                       : uwp::Text::play),
-                                          label(uwp::Text::settings), label(uwp::Text::mods)});
+            std::vector<hstring> choices{label(running                ? uwp::Text::resume
+                                               : decision.select_game ? uwp::Text::select
+                                                                      : uwp::Text::play),
+                                         label(uwp::Text::settings), label(uwp::Text::mods)};
+            // The live game owns its CoreWindow swapchain; resume uses the system overlay.
+            int choice = running ? co_await choose(label(uwp::Text::title), body, choices)
+                                 : co_await choose_home(body, choices);
             failed = false;
+            if (quit)
+                co_return;
             if (choice == 0) {
                 if (decision.select_game) {
                     co_await select_folder();
@@ -386,6 +539,7 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                 read_preferences();
                 save_preferences();
                 co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
+                co_await local.CreateFolderAsync(L"art", CreationCollisionOption::OpenIfExists);
                 co_await scan();
             }
             co_await menu(startup);
@@ -403,6 +557,22 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (current != pad) {
             neutral();
             pad = current;
+        }
+        if (home.shown && !home.loading && pad && visible) {
+            auto buttons = static_cast<uint32_t>(pad.GetCurrentReading().Buttons);
+            if (home_buttons == ~uint32_t(0)) {
+                if (!buttons)
+                    home_buttons = 0;
+            } else {
+                auto pressed = buttons & ~home_buttons;
+                if (pressed & (uwp::left | uwp::up))
+                    home.focus = (home.focus + 2) % 3;
+                if (pressed & (uwp::right | uwp::down))
+                    home.focus = (home.focus + 1) % 3;
+                if (pressed & uwp::a)
+                    home.selected = home.focus;
+                home_buttons = buttons;
+            }
         }
         if (!pad || !running || menu_open || !visible)
             return;
@@ -428,15 +598,25 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
     void Run() {
         active(true);
         open_menu(true);
+        Windows::UI::ViewManagement::UISettings ui_settings;
         while (!quit) {
             host_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
             if (failed && local && !opening && visible)
                 open_menu(false);
             try {
                 poll();
+                if (home.shown && visible && !suspended) {
+                    bool reduced = !ui_settings.AnimationsEnabled();
+                    home.draw(std::chrono::duration<double>(std::chrono::steady_clock::now() - loading_since)
+                                  .count(),
+                              reduced);
+                }
             } catch (hresult_error const &) {
                 neutral();
                 pad = nullptr;
+            } catch (std::exception const &) {
+                home.close();
+                failed = true;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
