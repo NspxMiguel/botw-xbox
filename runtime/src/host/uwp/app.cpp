@@ -2,6 +2,7 @@
 #if defined(BOTW_PLATFORM_UWP)
 #include "../../host/window.h"
 #include "../../latte/latte.h"
+#include "../../mods/catalog.h"
 #include "../../settings.h"
 #include "art_png.h"
 #include "art_view.h"
@@ -14,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <exception>
 #include <thread>
 #include <vector>
 #include <windows.h>
@@ -109,6 +111,8 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
     uwp::Controller controller;
     uwp::GameArt art;
     uwp::ArtView home;
+    bool mods_open = false;
+    int mods_action = 0;
     uint32_t home_buttons = ~uint32_t(0);
     std::chrono::steady_clock::time_point loading_since{};
     event_token key_down{}, pointer_pressed{};
@@ -165,10 +169,18 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                 return;
             using Windows::System::VirtualKey;
             auto key = e.VirtualKey();
+            if (mods_open) {
+                if (key == VirtualKey::Escape)
+                    mods_action = 1;
+                if (key == VirtualKey::X)
+                    mods_action = -1;
+                if (key == VirtualKey::Y)
+                    mods_action = 2;
+            }
             if (key == VirtualKey::Left || key == VirtualKey::Up)
-                home.focus = (home.focus + 2) % 3;
+                home.step(-1);
             if (key == VirtualKey::Right || key == VirtualKey::Down || key == VirtualKey::Tab)
-                home.focus = (home.focus + 1) % 3;
+                home.step(1);
             if (key == VirtualKey::Enter || key == VirtualKey::Space)
                 home.selected = home.focus;
         });
@@ -317,6 +329,8 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             return;
         auto heading = home.heading, detail = home.detail, loading_text = home.loading_text;
         auto buttons = home.buttons;
+        auto rows = home.rows;
+        bool mods_mode = home.mods_mode;
         bool shown = home.shown, loading = home.loading;
         int focus = home.focus;
         try {
@@ -325,6 +339,8 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             home.detail = std::move(detail);
             home.loading_text = std::move(loading_text);
             home.buttons = std::move(buttons);
+            home.rows = std::move(rows);
+            home.mods_mode = mods_mode;
             home.shown = shown;
             home.loading = loading;
             home.focus = focus;
@@ -420,6 +436,224 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             save_preferences();
         }
     }
+    // Use brokered StorageFolder operations: picker paths alone do not grant CRT access.
+    static size_t copy_mod_tree(StorageFolder const &source, StorageFolder const &destination) {
+        size_t count = 0;
+        for (auto const &file : source.GetFilesAsync().get()) {
+            file.CopyAsync(destination, file.Name(), NameCollisionOption::ReplaceExisting).get();
+            ++count;
+        }
+        for (auto const &folder : source.GetFoldersAsync().get()) {
+            auto target =
+                destination.CreateFolderAsync(folder.Name(), CreationCollisionOption::OpenIfExists).get();
+            count += copy_mod_tree(folder, target);
+        }
+        return count;
+    }
+    static bool import_candidates(StorageFolder const &source, StorageFolder const &destination) {
+        // A picker can select LocalState itself. Never copy a tree into itself.
+        auto from = std::filesystem::path(source.Path().c_str()).lexically_normal();
+        auto to = std::filesystem::path(destination.Path().c_str()).lexically_normal();
+        auto relative = to.lexically_relative(from);
+        if (!relative.empty() && *relative.begin() != L"..")
+            return false;
+        std::vector<StorageFolder> folders;
+        if (child(source, L"content") || child(source, L"aoc"))
+            folders.push_back(source);
+        else
+            for (auto const &folder : source.GetFoldersAsync().get())
+                folders.push_back(folder);
+        bool copied = false;
+        for (auto const &folder : folders) {
+            if (!child(folder, L"content") && !child(folder, L"aoc"))
+                continue;
+            // Never overwrite an installed mod, and never import a selection file.
+            auto target =
+                destination.CreateFolderAsync(folder.Name(), CreationCollisionOption::GenerateUniqueName)
+                    .get();
+            try {
+                if (!copy_mod_tree(folder, target))
+                    throw std::runtime_error("No accessible mod files");
+            } catch (...) {
+                // Never leave a partially copied mod available for activation.
+                try {
+                    target.DeleteAsync(StorageDeleteOption::PermanentDelete).get();
+                } catch (...) {
+                }
+                throw;
+            }
+            copied = true;
+        }
+        return copied;
+    }
+    IAsyncAction import_mods() {
+        auto dispatcher = host_window.Dispatcher();
+        auto destination = co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
+        co_await resume_background();
+        bool copied = false;
+        std::exception_ptr import_failure;
+        try {
+            for (auto const &drive : KnownFolders::RemovableDevices().GetFoldersAsync().get()) {
+                auto source = child(drive, L"mods");
+                copied |= import_candidates(source ? source : drive, destination);
+            }
+        } catch (hresult_error const &) {
+            // Removable access can be filtered by the manifest; try the picker.
+        } catch (...) {
+            import_failure = std::current_exception();
+        }
+        co_await resume_foreground(dispatcher);
+        // Missing files/permissions on removableStorage also need the picker grant.
+        if (import_failure && copied)
+            std::rethrow_exception(import_failure);
+        if (!copied) {
+            Pickers::FolderPicker picker;
+            picker.SuggestedStartLocation(Pickers::PickerLocationId::ComputerFolder);
+            picker.FileTypeFilter().Append(L"*");
+            auto folder = co_await picker.PickSingleFolderAsync();
+            if (!folder)
+                co_return;
+            co_await resume_background();
+            std::exception_ptr failure;
+            try {
+                copied = import_candidates(folder, destination);
+            } catch (...) {
+                failure = std::current_exception();
+            }
+            co_await resume_foreground(dispatcher);
+            if (failure)
+                std::rethrow_exception(failure);
+            if (!copied)
+                throw std::runtime_error("No mod folders found");
+        }
+    }
+    std::wstring mod_label(const mods::ModInfo &entry) const {
+        auto kind = entry.kind == mods::Kind::translation ? uwp::Text::translation
+                    : entry.kind == mods::Kind::dubbing   ? uwp::Text::dubbing
+                    : entry.kind == mods::Kind::graphics  ? uwp::Text::graphics
+                                                          : uwp::Text::files;
+        return std::wstring(to_hstring(entry.name)) + L" · " + label(kind).c_str() + L" · " +
+               label(entry.enabled ? uwp::Text::mod_on : uwp::Text::mod_off).c_str() +
+               (entry.locked ? L" · " + std::wstring(label(uwp::Text::rebuild)) : L"");
+    }
+    IAsyncAction manage_mods() {
+        auto folder = co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
+        mods::ModCatalog catalog;
+        auto root = std::filesystem::path(folder.Path().c_str());
+        catalog.load(root, packs::compiled_plan());
+        // A live guest owns the surface. Keep the same management actions in native dialogs.
+        bool graphical = !running;
+        if (graphical) {
+            try {
+                show_home();
+            } catch (std::exception const &) {
+                home.close();
+            }
+            graphical = home.ready();
+        }
+        mods_open = true;
+        struct Guard {
+            App &app;
+            ~Guard() {
+                app.mods_open = false;
+                app.home.mods_mode = false;
+                app.home.shown = false;
+            }
+        } guard{*this};
+        home.mods_mode = true;
+        home.focus = 0;
+        mods_action = 0;
+        size_t cursor = 0;
+        for (;;) {
+            int selected = -1;
+            if (graphical) {
+                home.heading = label(uwp::Text::mods).c_str();
+                home.detail =
+                    label(catalog.list().empty() ? uwp::Text::mods_empty : uwp::Text::mods_help).c_str();
+                home.loading_text = label(uwp::Text::mods_controls).c_str();
+                home.rows.clear();
+                for (auto const &entry : catalog.list())
+                    home.rows.push_back(mod_label(entry));
+                home.rows.push_back(label(uwp::Text::import_usb).c_str());
+                home.rows.push_back(label(uwp::Text::save_mods).c_str());
+                home.focus = std::clamp(home.focus, 0, static_cast<int>(home.rows.size()) - 1);
+                home.selected = -1;
+                auto dispatcher = host_window.Dispatcher();
+                while (home.selected < 0 && !mods_action && !quit && home.ready()) {
+                    co_await resume_after(std::chrono::milliseconds(16));
+                    co_await resume_foreground(dispatcher);
+                }
+                if (quit)
+                    co_return;
+                if (!home.ready()) {
+                    graphical = false;
+                    continue;
+                }
+                selected = home.selected;
+                if (mods_action == 1)
+                    selected = static_cast<int>(catalog.list().size()) + 1;
+                if ((mods_action == -1 || mods_action == 2) &&
+                    home.focus < static_cast<int>(catalog.list().size())) {
+                    auto id = catalog.list()[home.focus].id;
+                    int target = std::clamp(home.focus + (mods_action == -1 ? -1 : 1), 0,
+                                            static_cast<int>(catalog.list().size()) - 1);
+                    catalog.move(id, target);
+                    home.focus = target;
+                }
+                mods_action = 0;
+            } else {
+                auto count = catalog.list().size();
+                cursor %= count + 2;
+                auto body = cursor < count
+                                ? hstring(mod_label(catalog.list()[cursor]))
+                                : label(cursor == count ? uwp::Text::import_usb : uwp::Text::save_mods);
+                auto action = co_await choose(
+                    label(uwp::Text::mods), body,
+                    {label(uwp::Text::yes), label(uwp::Text::mods_next), label(uwp::Text::save_mods)});
+                if (action == 2)
+                    selected = static_cast<int>(count + 1);
+                else if (action == 1) {
+                    cursor++;
+                    continue;
+                } else if (cursor < count) {
+                    auto entry = catalog.list()[cursor];
+                    auto edit =
+                        co_await choose(label(uwp::Text::mods), hstring(mod_label(entry)),
+                                        {label(entry.enabled ? uwp::Text::mod_off : uwp::Text::mod_on),
+                                         label(uwp::Text::mods_up), label(uwp::Text::mods_down)});
+                    if (edit == 0)
+                        catalog.setEnabled(entry.id, !entry.enabled);
+                    else
+                        catalog.move(entry.id,
+                                     edit == 1 ? (cursor ? cursor - 1 : 0) : std::min(cursor + 1, count - 1));
+                    continue;
+                } else
+                    selected = static_cast<int>(cursor);
+            }
+            bool error = false;
+            try {
+                if (selected == static_cast<int>(catalog.list().size()) + 1) {
+                    catalog.save();
+                    co_return;
+                }
+                if (selected == static_cast<int>(catalog.list().size())) {
+                    catalog.save();
+                    co_await import_mods();
+                    catalog.load(root, packs::compiled_plan());
+                } else if (selected >= 0) {
+                    auto entry = catalog.list().at(selected);
+                    catalog.setEnabled(entry.id, !entry.enabled);
+                }
+            } catch (std::exception const &) {
+                error = true;
+            } catch (hresult_error const &) {
+                error = true;
+            }
+            if (error)
+                co_await choose(label(uwp::Text::mods), label(uwp::Text::import_failed),
+                                {label(uwp::Text::back)});
+        }
+    }
     IAsyncAction launch(uwp::Candidate candidate) {
         if (!running) {
             if (boot_attempted) {
@@ -513,13 +747,8 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                 }
             } else if (choice == 1)
                 co_await configure();
-            else {
-                auto mods = co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
-                co_await choose(
-                    label(uwp::Text::mods),
-                    hstring(std::wstring(uwp::text(uwp::Text::mods_help, pt)) + L"\n" + mods.Path().c_str()),
-                    {label(uwp::Text::back)});
-            }
+            else
+                co_await manage_mods();
         }
     }
     fire_and_forget open_menu(bool startup) {
@@ -566,9 +795,17 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             } else {
                 auto pressed = buttons & ~home_buttons;
                 if (pressed & (uwp::left | uwp::up))
-                    home.focus = (home.focus + 2) % 3;
+                    home.step(-1);
                 if (pressed & (uwp::right | uwp::down))
-                    home.focus = (home.focus + 1) % 3;
+                    home.step(1);
+                if (mods_open) {
+                    if (pressed & uwp::b)
+                        mods_action = 1;
+                    if (pressed & (uwp::x | uwp::lb))
+                        mods_action = -1;
+                    if (pressed & (uwp::y | uwp::rb))
+                        mods_action = 2;
+                }
                 if (pressed & uwp::a)
                     home.selected = home.focus;
                 home_buttons = buttons;

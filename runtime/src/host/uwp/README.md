@@ -69,8 +69,13 @@ announcing a Pro Controller needs a change to `runtime/src/input/pad_hle.cpp`, o
    A cooperative whole-runtime pause requires scheduler/renderer ownership. No unsafe thread killing
    or second guest boot is attempted. A failed RPX load requires restarting the app before another
    guest boot, because guest-memory initialization is not reversible.
-5. **Mods:** LocalState/mods is created and its path shown. Applying mod files is the runtime/mod
-   loader's responsibility; no arbitrary DLL loading or unimplemented mod-enable control is exposed.
+5. **Mods:** The launcher uses `mods::ModCatalog` for LocalState/mods and the compiled graphics
+   plan. The pre-boot screen lists kind, enabled state and rebuild locks on a true-black surface
+   with the home artwork's accent, 56px focus pills and scrolling. D-pad/arrows select; A/Enter
+   toggles; X/LB and Y/RB move up/down; B/Escape saves and returns. Import and Save are focusable
+   rows. In-game management uses native dialogs because the guest owns the swapchain.
+   `enabled.txt` remains directly compatible with VFS auto-launch. Compiled shader/texture filtering
+   is exposed for the runtime owner to wire; see `../../mods/README.md`.
 
 File access reference: [Microsoft UWP file permissions](https://learn.microsoft.com/en-us/windows/uwp/files/file-access-permissions).
 Button ABI references: [Windows.Gaming.Input](https://learn.microsoft.com/en-us/uwp/api/windows.gaming.input.gamepadbuttons)
@@ -163,3 +168,24 @@ The existing SDK limitation still applies: **app.cpp has not been compiled
 against real C++/WinRT projections on this Mac**. Windows/Xbox validation must
 check brokered meta reads, optional PNG decoding, resize/DPI/device loss,
 controller/keyboard/pointer focus, reduced-motion toggling and renderer handoff.
+
+## USB mod import
+
+Import scans each removable drive's `mods/` folder (or drive root) for immediate
+folders containing `content/` or `aoc/`. If no folder is copied, a folder picker
+accepts a mod folder or a parent containing mod folders. All copy operations use
+brokered StorageFolder/StorageFile APIs on a background thread, never a USB CRT
+path. Copies go to LocalState/mods with unique names; installed mods and enabled.txt
+are preserved. Incomplete copies are removed when an import fails. Imported mods
+start disabled so the player can review and enable them. Errors offer a retry path.
+The removable manifest permissions still filter accessible file types: use the
+picker fallback when direct enumeration cannot see all files. Validate complete
+translation/voice imports on Xbox with the real SDK and storage permissions.
+
+The portable catalog tests exercise saved selection against the real VFS reader.
+The existing syntax script compiles the updated Direct2D screen through
+`art_view_syntax.cc`. Its existing limitation remains: app.cpp's C++/WinRT import
+and coroutine code requires the Microsoft SDK and was reviewed, not compiled or
+run on this Mac. On Xbox, verify empty/long lists, locked packs, USB disconnect,
+name collisions, permission/space failures, controller release gating, and the
+live-guest dialog fallback. No artwork assets are added by this feature.

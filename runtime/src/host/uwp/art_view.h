@@ -68,6 +68,12 @@ class ArtView {
     ArtColor accent;
     std::wstring heading, detail, loading_text;
     std::array<std::wstring, 3> buttons;
+    // Mods share the home surface before boot; seven visible 56px pill targets.
+    bool mods_mode = false;
+    std::vector<std::wstring> rows;
+    size_t first_row() const { return focus < 6 ? 0 : static_cast<size_t>(focus - 5); }
+    int action_count() const { return mods_mode ? static_cast<int>(rows.size()) : 3; }
+    void step(int delta) { focus = (focus + delta + action_count()) % action_count(); }
     bool ready() const { return target != nullptr; }
     void close() {
         // Release the CoreWindow swap chain now: the D3D12 renderer creates its own on the same window.
@@ -144,6 +150,16 @@ class ArtView {
     int hit(float x, float y) const {
         x *= art_style::width / pixel_w;
         y *= art_style::height / pixel_h;
+        if (mods_mode) {
+            auto first = first_row();
+            for (size_t i = first; i < rows.size() && i < first + 7; ++i) {
+                float top = 160 + (i - first) * 64;
+                if (x >= art_style::margin && x <= art_style::width - art_style::margin && y >= top &&
+                    y <= top + art_style::button_h)
+                    return static_cast<int>(i);
+            }
+            return -1;
+        }
         for (int i = 0; i < 3; ++i) {
             float left = art_style::margin + i * (art_style::button_w + art_style::gap);
             if (x >= left && x <= left + art_style::button_w && y >= art_style::button_y &&
@@ -160,6 +176,29 @@ class ArtView {
         target->BeginDraw();
         target->SetTransform(transform);
         target->Clear(black());
+        if (mods_mode) {
+            brush->SetColor(white());
+            text(heading, D2D1::RectF(margin, 48, width - margin, 96), true);
+            text(detail, D2D1::RectF(margin, 104, width - margin, 152));
+            auto first = first_row();
+            for (size_t i = first; i < rows.size() && i < first + 7; ++i) {
+                float top = 160 + (i - first) * 64;
+                auto rect = D2D1::RectF(margin, top, width - margin, top + button_h);
+                bool focused = static_cast<int>(i) == focus;
+                if (focused) {
+                    brush->SetColor(D2D1::ColorF(accent.r, accent.g, accent.b));
+                    target->FillRoundedRectangle(D2D1::RoundedRect(rect, button_h / 2, button_h / 2),
+                                                 brush.Get());
+                }
+                brush->SetColor(focused ? black() : white());
+                text(rows[i], D2D1::RectF(margin + 24, top + 17, width - margin - 24, top + button_h));
+            }
+            brush->SetColor(white());
+            text(loading_text, D2D1::RectF(margin, 632, width - margin, 700));
+            check(target->EndDraw());
+            check(swapchain->Present(1, 0));
+            return;
+        }
         if (hero) {
             // Centered aspect-fill; never stretch the player's art.
             auto size = hero->GetSize();

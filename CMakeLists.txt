@@ -154,6 +154,11 @@ endif()
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/runtime/src/*.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/*.mm)
+# BEGIN W8 mods
+# Keep the portable catalog explicit despite the runtime's recursive glob.
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/mods/")
+list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/mods/catalog.cpp)
+# END W8 mods
 # ---- W1 platform sources (owned by W1) -------------------------------------------------------
 # Keep test mains and the other platform's implementation out of the application.
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/platform/")
