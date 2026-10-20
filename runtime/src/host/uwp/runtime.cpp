@@ -12,6 +12,10 @@
 #include <winrt/Windows.Graphics.Display.Core.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.UI.Core.h>
+#if __has_include(<gamingdeviceinformation.h>)
+#include <gamingdeviceinformation.h>
+#define BOTW_HAS_GAMING_DEVICE_INFO 1
+#endif
 #endif
 #include <algorithm>
 #include <cstdlib>
@@ -58,6 +62,17 @@ void output_pixels([[maybe_unused]] int &width, [[maybe_unused]] int &height) {
     }
 #endif
 }
+// Series S (~4 TFLOPS) holds 60 fps at 1080p internal, not 4K: cap the render scale there.
+// The swap chain stays at the output size; the output shader upscales.
+float max_render_scale() {
+#if defined(BOTW_HAS_GAMING_DEVICE_INFO)
+    GAMING_DEVICE_MODEL_INFORMATION info{};
+    if (SUCCEEDED(GetGamingDeviceModelInformation(&info)) && info.vendorId == GAMING_DEVICE_VENDOR_ID_MICROSOFT &&
+        info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_S)
+        return 1.5f;
+#endif
+    return 3.f;
+}
 } // namespace
 bool prepare_runtime(const std::string &game, const std::string &user) {
     // One guest address space per process. Resume uses the existing guest; never load a second RPX.
@@ -77,7 +92,8 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
 }
 void start_runtime(void *window, int width, int height) {
     output_pixels(width, height);
-    g_render_scale = std::clamp(std::min(width / 1280.f, height / 720.f), 1.f, 3.f);
+    g_render_scale = std::clamp(std::min(width / 1280.f, height / 720.f), 1.f, max_render_scale());
+    LOG("output %dx%d, render scale %.2f", width, height, g_render_scale);
     latte::create_renderer(window, width, height); // W2: IUnknown CoreWindow, not NSView.
     settings::apply();
     packs::install_loaded(loaded_rpx, d3d12_packs::hooks());
