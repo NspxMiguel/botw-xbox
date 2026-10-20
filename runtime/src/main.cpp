@@ -12,12 +12,14 @@
 #include <string>
 
 #include "hle.h"
-#include "loader.h"
-#include "os.h"
-#include "settings.h"
-#include "thread.h"
 #include "host/window.h"
 #include "latte/latte.h"
+#include "latte/pack_hooks_metal.h"
+#include "loader.h"
+#include "os.h"
+#include "packs/host_install.h"
+#include "settings.h"
+#include "thread.h"
 
 extern "C" int g_trace_hle;
 std::string g_game_root;   // contains code/, content/, meta/
@@ -99,7 +101,14 @@ int main(int argc, char** argv) {
 
     mem::init();
     dispatch::init();
-    if (!loader::load_main(g_game_root + "/code/U-King.rpx")) return 1;
+    packs::LoadedRpx loaded_rpx;
+    std::string packs_error;
+    if (!packs::load_rpx(packs::compiled_plan(),
+                         g_game_root + "/code/U-King.rpx", g_user_root,
+                         loader::load_main, loaded_rpx, packs_error))
+      return 1;
+    if (!packs_error.empty())
+      LOG("%s", packs_error.c_str());
     os::init();
     window::create();
     if (g_render_scale <= 0) {  // render at the display's native resolution, so fullscreen is 1:1
@@ -112,6 +121,7 @@ int main(int argc, char** argv) {
     debug_watch_init();
     if (capture_every) latte::set_capture(capture_every, (g_user_root + "/captures").c_str());
 
+    packs::install_loaded(loaded_rpx, latte::metal_pack_hooks());
     uint32_t argv_g = os::build_argv("U-King.rpx");
     threads::start_main(loader::main_module().entry, 1, argv_g, loader::main_module().stack_size);
     os::host_main_loop();  // returns when the game exits or the time limit is reached

@@ -1,0 +1,161 @@
+#include "../../../cemu/Cafe/HW/Latte/Renderer/D3D12/D3D12PackHooks.h"
+#include "../../latte/pack_hooks_metal.h"
+#include "../loaded_rpx.h"
+#include "../packs.h"
+#include <cassert>
+#include <cstdio>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <iterator>
+
+namespace {
+unsigned compilations = 0;
+bool fake_compiler(const packs::ShaderReplacement &, std::string &) {
+  ++compilations;
+  return true;
+}
+struct Memory {
+  uint8_t bytes[8]{};
+  unsigned writes = 0;
+  static bool validate(void *, uint32_t address, size_t size) {
+    return address >= 0x1000 && size <= 0x1008ull - address && address < 0x1008;
+  }
+  static void write(void *context, uint32_t address, const uint8_t *bytes,
+                    size_t size) {
+    auto &self = *static_cast<Memory *>(context);
+    ++self.writes;
+    std::memcpy(self.bytes + (address - 0x1000), bytes, size);
+  }
+};
+void hash(const std::string &input, const std::string &expected) {
+  assert(packs::sha256(reinterpret_cast<const uint8_t *>(input.data()),
+                       input.size()) == expected);
+}
+std::vector<uint8_t> expected_rpx;
+std::string original_path, snapshot_path;
+bool load_snapshot(const std::string &path) {
+  snapshot_path = path;
+  assert(path != original_path);
+  // Changing the source cannot change the snapshot given to the real loader.
+  std::ofstream(original_path, std::ios::binary) << "changed source";
+  std::ifstream file(path, std::ios::binary);
+  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
+  assert(bytes == expected_rpx);
+  return true;
+}
+bool load_original(const std::string &path) {
+  assert(path == original_path);
+  return true;
+}
+void be32(size_t offset, uint32_t value) {
+  for (int i = 0; i < 4; ++i)
+    expected_rpx[offset + i] = uint8_t(value >> (24 - i * 8));
+}
+} // namespace
+int main(int argc, char **argv) {
+  assert(argc == 2);
+  hash("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  hash("abc",
+       "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+  hash("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
+       "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+  hash(std::string(1000000, 'a'),
+       "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+  std::cout << "SHA-256: 4 vectors passed\n";
+
+  packs::BuildPlan plan;
+  plan.rpx_sha256 = "test hash";
+  plan.packs.push_back({"memory only", {}, {}, {}});
+  plan.initial_memory.push_back({0x1000, {1, 2, 3, 4}});
+  plan.initial_memory.push_back({0x1007, {5, 6}});
+  Memory memory;
+  packs::GuestMemory guest{&memory, Memory::validate, Memory::write};
+  auto &hooks = latte::metal_pack_hooks();
+  std::string error;
+  assert(!packs::install(plan, plan.rpx_sha256, guest, hooks, error));
+  assert(memory.writes == 0);
+  plan.initial_memory.pop_back();
+  assert(packs::install(plan, plan.rpx_sha256, guest, hooks, error));
+  assert(memory.writes == 1 && memory.bytes[0] == 1 && memory.bytes[3] == 4);
+  std::cout
+      << "install: out-of-range rejected transactionally; in-range applied\n";
+
+  plan.packs[0].control.push_back({"unknownControl", {60}});
+  assert(!hooks.prepare(plan, error) &&
+         error.find("unknownControl") != std::string::npos);
+  assert(!packs::validate_renderer_fields(plan, true, true, error));
+  plan.packs[0].control = {{"vsyncFrequency", {120}}};
+  assert(hooks.prepare(plan, error) && packs::has_timing_pack(plan));
+  plan.packs[0].textures = {{{{"width", {1280}}, {"overwriteWidth", {3840}}}}};
+  assert(packs::validate_renderer_fields(plan, true, true, error));
+  assert(!hooks.prepare(plan, error));
+  plan.packs[0].textures[0].fields.push_back({"unknownTexture", {1}});
+  assert(!packs::validate_renderer_fields(plan, true, true, error));
+  assert(error.find("unknownTexture") != std::string::npos);
+  d3d12_packs::PackHooks d3d12_hooks{fake_compiler};
+  plan.packs[0].shaders.push_back(
+      {1, 2, packs::ShaderStage::pixel, "test shader"});
+  assert(!d3d12_hooks.prepare(plan, error));
+  assert(compilations == 0 && !d3d12_packs::active_plan);
+  plan.packs[0].textures[0].fields.pop_back();
+  assert(d3d12_hooks.prepare(plan, error));
+  assert(compilations == 1 && !d3d12_packs::active_plan);
+  d3d12_hooks.commit(plan);
+  assert(d3d12_packs::active_plan == &plan && d3d12_packs::overrides_textures);
+  d3d12_hooks.commit({});
+  assert(!d3d12_packs::active_plan && !d3d12_packs::overrides_textures);
+  std::cout << "D3D12/Metal hooks prepare: unknown fields rejected before "
+               "compilation; commit publishes plan\n";
+
+  original_path = std::string(argv[1]) + "/synthetic.rpx";
+  expected_rpx.resize(52 + 3 * 40);
+  be32(0, 0x7f454c46);
+  be32(32, 52);
+  expected_rpx[47] = 40;
+  expected_rpx[49] = 3;
+  // text, writable data, read-only section immediately beyond the text.
+  be32(52 + 4, 1);
+  be32(52 + 8, 6);
+  be32(52 + 12, 0x02000000);
+  be32(52 + 20, 16);
+  be32(92 + 4, 8);
+  be32(92 + 8, 3);
+  be32(92 + 12, 0x10000000);
+  be32(92 + 20, 16);
+  be32(132 + 4, 1);
+  be32(132 + 8, 2);
+  be32(132 + 12, 0x02000010);
+  be32(132 + 20, 16);
+  {
+    std::ofstream file(original_path, std::ios::binary);
+    file.write(reinterpret_cast<const char *>(expected_rpx.data()),
+               expected_rpx.size());
+  }
+  packs::LoadedRpx loaded;
+  assert(packs::load_rpx(plan, original_path, argv[1], load_snapshot, loaded,
+                         error));
+  assert(error.empty() && loaded.hash == packs::sha256(expected_rpx.data(),
+                                                       expected_rpx.size()));
+  assert(!std::ifstream(snapshot_path));
+  assert(loaded.validate(0x02000000, 16, 0x02000010, 1));
+  assert(loaded.validate(0x10000000, 16, 0x02000010, 1));
+  assert(!loaded.validate(0x1000000f, 2, 0x02000010, 1));
+  assert(!loaded.validate(0x10001000, 4, 0x02000010, 1));
+  assert(!loaded.validate(0x02000010, 4, 0x02000010, 1));
+  assert(loaded.validate(0x02000020, 16, 0x02000010, 1));
+  assert(!loaded.validate(0x0df00000, 4, 0x02000010, 1));
+  assert(!loaded.validate(0x0e100000, 4, 0x02000010, 1));
+  assert(!loaded.validate(0xfffffff0, 32, 0x02000010, 1));
+  assert(!loaded.validate(0, 0, 0x02000010, 1));
+  assert(packs::load_rpx({}, original_path, argv[1], load_original, loaded,
+                         error));
+  assert(loaded.hash.empty() && error.empty());
+  assert(packs::install({}, "", {}, hooks, error));
+  assert(packs::load_rpx(plan, original_path, "/nonexistent/cache",
+                         load_original, loaded, error));
+  assert(loaded.hash.empty() && !error.empty());
+  std::remove(original_path.c_str());
+  std::cout << "loaded RPX: snapshot/hash identity, writable bounds, codecave, "
+               "empty plan and fallback passed\n";
+}

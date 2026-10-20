@@ -904,7 +904,12 @@ void D3D12Renderer::PresentSwapChain(bool mainWindow)
 	if (!swapChain || !swapChain->IsValid())
 		return;
 	const int vsync = GetD3D12Settings().vsync;
+	// fps.cpp owns game timing. Interpolated presents add an independent clock.
+#ifdef BOTWRECOMP
+	const bool interpolationWanted = false;
+#else
 	const bool interpolationWanted = mainWindow && vsync != 0 && GetD3D12Settings().frameInterpolation;
+#endif
 	if (mainWindow)
 		UpdatePresentDiagnostics(swapChain, interpolationWanted);
 	const bool interpolate = interpolationWanted && !m_interpolationPaused;

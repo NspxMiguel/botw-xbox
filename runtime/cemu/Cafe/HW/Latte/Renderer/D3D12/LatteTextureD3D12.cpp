@@ -12,6 +12,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 
+#include "D3D12PackHooks.h"
 #include <mutex>
 #include <unordered_set>
 
@@ -19,6 +20,42 @@ LatteTextureD3D12::LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, 
 									 uint32 swizzle, Latte::E_HWTILEMODE tileMode, bool isDepth)
 	: LatteTexture(dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth), m_renderer(renderer)
 {
+	if (const auto *plan = d3d12_packs::active_plan; plan && d3d12_packs::overrides_textures)
+	{
+		const packs::TextureDescription original{width, height, depth, uint32(format), uint32(tileMode),
+												 physAddress >= 0xf4000000u && physAddress < 0xf6000000u};
+		// The base constructor may have cached the built-in scale rules before
+		// installation. Remove them even on textures unmatched by this plan.
+		overwriteInfo = {};
+		overwriteInfo.width = width;
+		overwriteInfo.height = height;
+		overwriteInfo.depth = std::max(1u, depth);
+		const auto overrides = packs::texture_overrides(*plan, original);
+		if (!overrides.empty())
+		{
+			for (const auto &field : overrides)
+			{
+				if (field.name == "overwriteWidth")
+					overwriteInfo.width = int(field.values[0]);
+				if (field.name == "overwriteHeight")
+					overwriteInfo.height = int(field.values[0]);
+				if (field.name == "overwriteDepth")
+					overwriteInfo.depth = int(field.values[0]);
+			}
+			overwriteInfo.hasResolutionOverwrite = true;
+		}
+		// The base constructor computed this before the pack overrides.
+		// Texture view creation must see the same effective mip bounds.
+		maxPossibleMipLevels = 1;
+		int extent = std::max(overwriteInfo.width, overwriteInfo.height);
+		if (dim == Latte::E_DIM::DIM_3D)
+			extent = std::max(extent, overwriteInfo.depth);
+		while (extent > 1)
+		{
+			extent >>= 1;
+			++maxPossibleMipLevels;
+		}
+	}
 	D3D12Format::GetTextureFormatInfo(renderer->GetFormatSupport(), format, isDepth, m_formatInfo);
 	cemu_assert_debug(hasStencil == m_formatInfo.hasStencil || !isDepth);
 	{
