@@ -27,6 +27,21 @@ enum class Text {
     controls,
     restart,
     loading,
+    import_usb,
+    mods_controls,
+    mods_empty,
+    mod_on,
+    mod_off,
+    translation,
+    dubbing,
+    graphics,
+    files,
+    rebuild,
+    save_mods,
+    import_failed,
+    mods_next,
+    mods_up,
+    mods_down,
     count
 };
 inline std::wstring_view text(Text key, bool pt) {
@@ -60,7 +75,27 @@ inline std::wstring_view text(Text key, bool pt) {
           L"View + Menu: menu inicial. View + Y: tela do GamePad. Xbox não tem toque nem giroscópio."},
          {L"Check your updated game folder, then close and reopen the app to try again.",
           L"Confira a pasta do jogo atualizado, feche e abra o app para tentar novamente."},
-         {L"Loading your game…", L"Carregando seu jogo…"}}};
+         {L"Loading your game…", L"Carregando seu jogo…"},
+         {L"Import from USB", L"Importar do USB"},
+         {L"A: toggle · X/Y: move up/down · B: save and return. Lower entries win. Changes apply next "
+          L"launch.",
+          L"A: alternar · X/Y: subir/descer · B: salvar e voltar. Os últimos têm prioridade. Mudanças na "
+          L"próxima abertura."},
+         {L"Import a folder containing content/ or aoc/ to get started.",
+          L"Importe uma pasta com content/ ou aoc/ para começar."},
+         {L"On", L"Ativado"},
+         {L"Off", L"Desativado"},
+         {L"Translation", L"Tradução"},
+         {L"Dubbing", L"Dublagem"},
+         {L"Graphics", L"Gráficos"},
+         {L"Files", L"Arquivos"},
+         {L"Rebuild to change", L"Recompile para alterar"},
+         {L"Save and return", L"Salvar e voltar"},
+         {L"Unable to import or save. Check storage permissions and free space, then try again.",
+          L"Não foi possível importar ou salvar. Confira permissões e espaço livre e tente novamente."},
+         {L"Next mod / actions", L"Próximo mod / ações"},
+         {L"Move up", L"Subir"},
+         {L"Move down", L"Descer"}}};
     return table.at(static_cast<size_t>(key))[pt ? 1 : 0];
 }
 } // namespace uwp

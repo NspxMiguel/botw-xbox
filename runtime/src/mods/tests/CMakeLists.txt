@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.24)
+project(BotWModsTests LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+enable_testing()
+add_executable(mods_tests catalog_test.cc ../catalog.cpp ../../vfs/overlay.cpp)
+target_compile_options(mods_tests PRIVATE -Wall -Wextra -Werror)
+add_test(NAME mods_tests COMMAND mods_tests)
