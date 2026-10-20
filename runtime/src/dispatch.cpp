@@ -13,7 +13,9 @@
 #include <unordered_map>
 #include <vector>
 
+#if !defined(BOTW_BUILD_GAME) || BOTW_BUILD_GAME
 #include "guest_table.h"
+#endif
 #include "hle.h"
 #include "thread.h"
 
@@ -50,6 +52,7 @@ GuestFn hle::find(const char* lib, const char* name) {
 
 namespace dispatch {
 void init() {
+#if !defined(BOTW_BUILD_GAME) || BOTW_BUILD_GAME
     uint32_t hi = 0;
     for (uint32_t i = 0; i < g_guest_function_count; i++) hi = std::max(hi, g_guest_functions[i].addr);
     g_text_end = hi + 4;
@@ -58,6 +61,9 @@ void init() {
     for (uint32_t i = 0; i < g_guest_function_count; i++)
         g_text_table[(g_guest_functions[i].addr - mem::kText) >> 2] = g_guest_functions[i].fn;
     LOG("dispatch: %u guest functions, %zu HLE exports registered", g_guest_function_count, registry().size());
+#else
+    LOG("dispatch: runtime-only build, %zu HLE exports registered", registry().size());
+#endif
 }
 
 GuestFn lookup(uint32_t addr) {

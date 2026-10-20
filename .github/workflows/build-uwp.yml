@@ -1,0 +1,60 @@
+name: Build and package UWP runtime
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uwp-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require game-free runtime build support
+        run: python .github/workflows/ci-build.py check-contract
+      - name: Install UWP dependencies
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-uwp fmt glm boost-headers boost-nowide boost-algorithm boost-container boost-iterator boost-predef boost-random zlib zstd libpng openssl glslang spirv-cross
+          if ($LASTEXITCODE -ne 0) { throw 'UWP dependency installation failed' }
+          # Shader translators run on the build host, outside the UWP sandbox.
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-windows 'glslang[tools]' spirv-cross directx-dxc
+          if ($LASTEXITCODE -ne 0) { throw 'Host shader tool installation failed' }
+      - name: Configure MSVC UWP x64 D3D12 runtime and launcher
+        run: |
+          cmake --preset ci-uwp
+          if ($LASTEXITCODE -ne 0) { throw 'UWP/D3D12 CMake integration failed; see docs/CI.md' }
+      - name: Build MSVC UWP x64 D3D12 runtime and launcher
+        run: |
+          cmake --build --preset ci-uwp
+          if ($LASTEXITCODE -ne 0) { throw 'UWP runtime or launcher build failed; platform/renderer/host integration may be pending' }
+      - name: Stage runtime package
+        run: |
+          cmake --install build/ci-uwp --config Release --component Runtime --prefix "$env:GITHUB_WORKSPACE/build/ci-uwp/package-root"
+          if ($LASTEXITCODE -ne 0) { throw 'UWP Runtime component installation failed' }
+          python .github/workflows/ci-build.py audit-package build/ci-uwp/package-root
+          if ($LASTEXITCODE -ne 0) { throw 'UWP package staging audit failed' }
+      - name: Pack and sign with disposable test certificate
+        run: .github/workflows/package-uwp.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: botw-uwp-x64-test-${{ github.run_number }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            build/ci-uwp/artifacts/*.appx
+            build/ci-uwp/artifacts/*.cer
+            build/ci-uwp/artifacts/build-info.json

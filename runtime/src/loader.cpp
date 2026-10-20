@@ -6,7 +6,9 @@
 #include <map>
 #include <vector>
 
+#if !defined(BOTW_BUILD_GAME) || BOTW_BUILD_GAME
 #include "guest_table.h"
+#endif
 #include "hle.h"
 
 namespace loader {
@@ -44,7 +46,11 @@ uint32_t data_import_addr(const char* lib, const char* name) {
     return it == data_defs().end() ? 0 : it->second.addr;
 }
 
-bool load_main(const std::string& path) {
+bool load_main(const std::string &path) {
+#if defined(BOTW_BUILD_GAME) && !BOTW_BUILD_GAME
+    LOG("loader: this runtime-only build cannot execute a game; rebuild with BOTW_BUILD_GAME=ON");
+    return false;
+#else
     FILE* f = fopen(path.c_str(), "rb");
     if (!f) {
         LOG("loader: cannot open %s", path.c_str());
@@ -203,5 +209,6 @@ bool load_main(const std::string& path) {
         g_main.sda2_base, g_main.stack_size, g_main.tls_module, g_main.tls_size, nrel,
         missing_data ? " (missing data imports!)" : "");
     return true;
+#endif
 }
 }  // namespace loader

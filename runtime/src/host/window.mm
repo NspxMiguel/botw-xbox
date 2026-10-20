@@ -280,6 +280,11 @@ void create() {
     LOG("window %dx%d (%dx%d pixels)%s", pw, ph, w, h, g_headless ? ", hidden" : "");
 }
 
+#if defined(BOTW_BUILD_GAME) && !BOTW_BUILD_GAME
+// Draw the existing settings launcher without waiting for a guest scanout submission.
+extern void botw_draw_launcher_frame();
+#endif
+
 void run() {
     auto t0 = SDL_GetTicks();
     update_safe_area();
@@ -362,6 +367,9 @@ void run() {
                 SDL_SetWindowFullscreen(g_win, !fs);
             }
         }
+#if defined(BOTW_BUILD_GAME) && !BOTW_BUILD_GAME
+        botw_draw_launcher_frame();
+#endif
         apply_input();
         // Freeze watchdog: no game frame for 8 s while in the foreground -> log every thread (once a minute)
         {

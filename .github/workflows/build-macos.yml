@@ -1,0 +1,31 @@
+name: Build macOS runtime
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require game-free runtime build support
+        run: python .github/workflows/ci-build.py check-contract
+      - name: Install dependencies
+        run: brew install cmake ninja sdl3 fmt openssl@3 zstd boost glm libpng
+      - name: Configure Apple Metal runtime and launcher
+        run: cmake --preset ci-macos
+      - name: Build Apple Metal runtime and launcher
+        run: cmake --build --preset ci-macos
