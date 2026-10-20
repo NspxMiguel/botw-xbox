@@ -3,13 +3,7 @@
 // tools/symbolize.sh: recompiled frames map to guest addresses). For "<ptr>+<off>" the watch is
 // armed once the guest pointer at <ptr> becomes non-zero. Other writes to the page are let through
 // by unprotecting it; a helper thread re-protects it shortly after.
-#include <dlfcn.h>
-#include <mach-o/dyld.h>
-#include <signal.h>
-#include <sys/mman.h>
-#include <sys/ucontext.h>
-#include <unistd.h>
-
+#include "platform/platform.h"
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
@@ -23,7 +17,9 @@ std::atomic<uintptr_t> g_page{0}, g_target{0};
 std::atomic<bool> g_open{false};
 size_t g_psize = 0;
 
-void protect(bool ro) { mprotect((void*)g_page.load(), g_psize, ro ? PROT_READ : PROT_READ | PROT_WRITE); }
+void protect(bool ro) {
+  platform::protect_pages((void *)g_page.load(), g_psize, ro);
+}
 
 void watcher(uint32_t ptr, uint32_t off, uint32_t direct) {
     uint32_t guest = direct;
@@ -35,8 +31,10 @@ void watcher(uint32_t ptr, uint32_t off, uint32_t direct) {
     uintptr_t host = (uintptr_t)g_mem + guest;
     LOG("watch: armed on %08x (value %02x)", guest, mem::r8(guest));
     g_target = host;
-    g_page = host & ~(g_psize - 1);
-    protect(true);
+    if (platform::supports_write_watch())
+      g_page = host & ~(g_psize - 1);
+    if (platform::supports_write_watch())
+      protect(true);
     uint8_t last = mem::r8(guest);
     for (;;) {
         std::this_thread::sleep_for(std::chrono::microseconds(5));
@@ -76,20 +74,35 @@ void watcher(uint32_t ptr, uint32_t off, uint32_t direct) {
 }
 }  // namespace
 
+bool debug_watch_fault(void *addr, void *uctx);
 void debug_watch_init() {
-    const char* e = getenv("BOTW_WATCH");
-    if (!e) return;
-    g_psize = (size_t)getpagesize();
-    std::string s = e;
-    size_t plus = s.find('+');
-    uint32_t ptr = 0, off = 0, direct = 0;
-    if (plus != std::string::npos) {
-        ptr = (uint32_t)strtoul(s.substr(0, plus).c_str(), nullptr, 16);
-        off = (uint32_t)strtoul(s.substr(plus + 1).c_str(), nullptr, 16);
-    } else {
-        direct = (uint32_t)strtoul(s.c_str(), nullptr, 16);
-    }
-    std::thread(watcher, ptr, off, direct).detach();
+#if defined(_WIN32)
+  if (!platform::install_fault_handler(
+          [](void *address, void *context, bool write) {
+            if (write && debug_watch_fault(address, context))
+              return true;
+            LOG("FATAL: host access at %p, pc %p", address,
+                reinterpret_cast<void *>(platform::fault_pc(context)));
+            return false;
+          })) {
+    LOG("FATAL: cannot install platform exception handler");
+    std::abort();
+  }
+#endif
+  const char *e = getenv("BOTW_WATCH");
+  if (!e)
+    return;
+  g_psize = platform::page_size();
+  std::string s = e;
+  size_t plus = s.find('+');
+  uint32_t ptr = 0, off = 0, direct = 0;
+  if (plus != std::string::npos) {
+    ptr = (uint32_t)strtoul(s.substr(0, plus).c_str(), nullptr, 16);
+    off = (uint32_t)strtoul(s.substr(plus + 1).c_str(), nullptr, 16);
+  } else {
+    direct = (uint32_t)strtoul(s.c_str(), nullptr, 16);
+  }
+  std::thread(watcher, ptr, off, direct).detach();
 }
 
 // Called first by the fault handler: true if the fault was a watched-page write (handled).
@@ -97,20 +110,11 @@ bool debug_watch_fault(void* addr, void* uctx) {
     uintptr_t page = g_page.load(), a = (uintptr_t)addr;
     if (!page || a < page || a >= page + g_psize) return false;
     if (a >= g_target.load() - 3 && a <= g_target.load()) {
-        auto* uc = (ucontext_t*)uctx;
-        uint64_t pc = uc->uc_mcontext->__ss.__pc, lr = uc->uc_mcontext->__ss.__lr, fp = uc->uc_mcontext->__ss.__fp;
-        char line[1024];
-        int k = snprintf(line, sizeof line, "watch: write at %08x, host frames (base 0x%lx): 0x%llx 0x%llx",
-                         (uint32_t)(a - (uintptr_t)g_mem), (unsigned long)_dyld_get_image_header(0),
-                         (unsigned long long)pc, (unsigned long long)lr);
-        for (int i = 0; i < 16 && fp && k < (int)sizeof line - 24; i++) {
-            uint64_t* f = (uint64_t*)fp;
-            k += snprintf(line + k, sizeof line - k, " 0x%llx", (unsigned long long)f[1]);
-            fp = f[0];
-        }
-        log_write("%s", line);
+      platform::log_watch_fault(uctx, static_cast<uint32_t>(a - reinterpret_cast<uintptr_t>(g_mem)));
     }
-    mprotect((void*)page, g_psize, PROT_READ | PROT_WRITE);
+    if (!platform::protect_pages(reinterpret_cast<void *>(page), g_psize,
+                                 false))
+      return false;
     g_open = true;
     return true;
 }

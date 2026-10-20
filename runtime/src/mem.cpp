@@ -1,7 +1,7 @@
 #include "mem.h"
 
+#include "platform/platform.h"
 #include <stdlib.h>
-#include <sys/mman.h>
 
 #include <map>
 #include <mutex>
@@ -20,16 +20,14 @@ std::map<uint32_t, uint32_t> g_used;
 }  // namespace
 
 void init() {
-    size_t size = (1ull << 32) + 0x10000;  // + guard so accesses near 0xFFFFFFFF stay in bounds
-    void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE | MAP_NORESERVE, -1, 0);
-    if (p == MAP_FAILED) {
-        LOG("FATAL: cannot reserve the 4 GB guest address space");
-        abort();
-    }
-    g_mem = (uint8_t*)p;
-    memory_base = g_mem;
-    mprotect(g_mem, 0x10000, PROT_NONE);  // catch guest null-pointer accesses
-    LOG("guest memory at %p", (void*)g_mem);
+  void *p = platform::reserve_guest();
+  if (!p) {
+    LOG("FATAL: cannot reserve/commit the 4 GB guest address space");
+    abort();
+  }
+  g_mem = static_cast<uint8_t *>(p);
+  memory_base = g_mem;
+  LOG("guest memory at %p", (void *)g_mem);
 }
 
 uint32_t sys_alloc(uint32_t size, uint32_t align) {
