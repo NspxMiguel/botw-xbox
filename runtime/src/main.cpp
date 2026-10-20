@@ -12,12 +12,13 @@
 #include <string>
 
 #include "hle.h"
+#include "host/menu.h"
+#include "host/window.h"
+#include "latte/latte.h"
 #include "loader.h"
 #include "os.h"
 #include "settings.h"
 #include "thread.h"
-#include "host/window.h"
-#include "latte/latte.h"
 
 extern "C" int g_trace_hle;
 std::string g_game_root;   // contains code/, content/, meta/
@@ -82,10 +83,12 @@ int main(int argc, char** argv) {
     if (g_game_root.empty()) {
         if (const char* e = getenv("BOTW_GAME")) g_game_root = e;
     }
+#if !defined(BOTW_BUILD_GAME) || BOTW_BUILD_GAME
     if (g_game_root.empty()) {
         fprintf(stderr, "usage: %s --game <folder with code/ content/ meta/>\n", argv[0]);
         return 2;
     }
+#endif
     struct sigaction sa = {};
     sa.sa_sigaction = on_fault;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -97,6 +100,19 @@ int main(int argc, char** argv) {
         _exit(6);
     });
 
+#if defined(BOTW_BUILD_GAME) && !BOTW_BUILD_GAME
+    if (!g_game_root.empty()) {
+        fprintf(stderr, "This runtime-only build cannot run games. Rebuild with BOTW_BUILD_GAME=ON.\n");
+        return 2;
+    }
+    LOG("runtime-only launcher: no guest code linked");
+    if (g_headless)
+        return 0;
+    window::create();
+    menu::toggle();
+    window::run();
+    return 0;
+#endif
     mem::init();
     dispatch::init();
     if (!loader::load_main(g_game_root + "/code/U-King.rpx")) return 1;

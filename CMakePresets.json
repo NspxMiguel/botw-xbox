@@ -1,0 +1,84 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "ci-base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "BOTW_BUILD_GAME": false,
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "ci-macos",
+      "inherits": "ci-base",
+      "displayName": "macOS arm64 runtime and launcher (Metal, no game)",
+      "generator": "Ninja",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      },
+      "cacheVariables": {
+        "BOTW_PLATFORM": "apple",
+        "BOTW_RENDERER": "metal",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "13.3"
+      }
+    },
+    {
+      "name": "ci-windows-base",
+      "inherits": "ci-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "cacheVariables": {
+        "BOTW_RENDERER": "d3d12",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_INSTALLATION_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_MANIFEST_MODE": false
+      }
+    },
+    {
+      "name": "ci-uwp",
+      "inherits": "ci-windows-base",
+      "displayName": "UWP x64 MSVC runtime and launcher (D3D12, no game)",
+      "cacheVariables": {
+        "BOTW_PLATFORM": "uwp",
+        "CMAKE_SYSTEM_NAME": "WindowsStore",
+        "CMAKE_SYSTEM_VERSION": "10.0",
+        "VCPKG_TARGET_TRIPLET": "x64-uwp"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "ci-macos",
+      "configurePreset": "ci-macos",
+      "configuration": "Release",
+      "targets": [
+        "BotWRecomp"
+      ],
+      "jobs": 2
+    },
+    {
+      "name": "ci-uwp",
+      "configurePreset": "ci-uwp",
+      "configuration": "Release",
+      "targets": [
+        "BotWRecomp"
+      ],
+      "jobs": 2
+    }
+  ]
+}
