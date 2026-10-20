@@ -1,0 +1,1817 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+// Ported from PrismFox67/Cemu-UWP; see runtime/cemu/VENDORED.md.
+
+// BotWRecomp: iOS also globs this directory; keep non-D3D12 builds platform-neutral.
+#ifdef ENABLE_D3D12
+
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12PipelineCache.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Format.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/CachedFBOD3D12.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/RendererShaderD3D12.h"
+#include "Cafe/HW/Latte/Renderer/RendererCore.h"
+#include "Cafe/HW/Latte/Core/FetchShader.h"
+#include "Cafe/HW/Latte/Core/LatteShader.h"
+#include "Cafe/HW/Latte/Core/LatteConst.h"
+#include "Cafe/HW/Latte/ISA/RegDefines.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Runtime.h"
+#include "config/ActiveSettings.h"
+#include "Cafe/CafeSystem.h"
+#include "util/helpers/helpers.h"
+// BotWRecomp: no Cemu process crash handler.
+// BotWRecomp: the recomp filesystem has no Cemu file-open observer.
+
+#include <chrono>
+#include <cstdio>
+#include <condition_variable>
+#include <deque>
+#include <fstream>
+#include <thread>
+#include <unordered_set>
+
+extern std::atomic_int g_compiling_pipelines;
+extern std::atomic_int g_compiling_pipelines_async;
+
+// Pipelines that crashed the driver. The Xbox Series X's shader compiler (newbe_xs.dll) recursed until it overflowed a
+// 256 MB stack on a Mario Kart 8 pipeline (v81 update with graphic packs). A crash during CreateGraphicsPipelineState
+// writes the pipeline's key to <titleId>_blocked.txt from the crash handler, and later runs skip that pipeline (its
+// draws are skipped) instead of crashing again. Delete the file to retry them, e.g. after a system update
+namespace D3D12PipelineQuarantine
+{
+thread_local uint64 t_creatingKey = 0; // pipeline the thread is handing to the driver
+wchar_t s_path[MAX_PATH]{};
+std::unordered_set<uint64> s_blocked; // written before any pipeline is created, read-only afterwards
+
+void OnCrash()
+{
+	const uint64 key = t_creatingKey;
+	if (key == 0 || s_path[0] == L'\0')
+		return;
+	char line[24];
+	const int length = snprintf(line, sizeof(line), "%016llx\n", (unsigned long long)key);
+	HANDLE file = CreateFile2(s_path, FILE_APPEND_DATA, FILE_SHARE_READ, OPEN_ALWAYS, nullptr);
+	if (file == INVALID_HANDLE_VALUE)
+		return;
+	DWORD written = 0;
+	WriteFile(file, line, (DWORD)length, &written, nullptr);
+	FlushFileBuffers(file);
+	CloseHandle(file);
+}
+
+void Open(uint64 titleId)
+{
+	const fs::path path = ActiveSettings::GetCachePath("shaderCache/driver/d3d12/{:016x}_blocked.txt", titleId);
+	std::error_code ec;
+	fs::create_directories(path.parent_path(), ec);
+	const std::wstring wpath = path.wstring();
+	if (wpath.size() >= MAX_PATH)
+		return;
+	wcscpy_s(s_path, wpath.c_str());
+	std::ifstream file(path);
+	std::string line;
+	while (std::getline(file, line))
+	{
+		uint64 key = 0;
+		if (std::sscanf(line.c_str(), "%llx", (unsigned long long *)&key) == 1 && key != 0)
+			s_blocked.insert(key);
+	}
+	if (!s_blocked.empty())
+		cemuLog_log(LogType::Force, "D3D12: Skipping {} pipeline(s) that crashed the driver before ({})", s_blocked.size(), _pathToUtf8(path));
+	// BotWRecomp: quarantine file is read, but no process-wide crash callback is installed.
+}
+} // namespace D3D12PipelineQuarantine
+
+// Driver compiled pipelines of one title, stored with ID3D12PipelineLibrary. Creating a pipeline can take the driver
+// seconds (Intel), which leaves the scene black while draws are skipped; loading it from the library takes milliseconds.
+// Entries are keyed by a hash of the complete description, and the runtime additionally rejects a load whose description
+// doesn't match, so a stale entry only costs a cache miss. Files of another driver version are discarded.
+class D3D12PipelineDiskCache
+{
+  public:
+	static std::shared_ptr<D3D12PipelineDiskCache> Open(ID3D12Device *device, const fs::path &path)
+	{
+		ComPtr<ID3D12Device1> device1;
+		if (FAILED(device->QueryInterface(IID_PPV_ARGS(&device1))))
+			return nullptr;
+		auto cache = std::make_shared<D3D12PipelineDiskCache>();
+		cache->m_path = path;
+		{
+			std::ifstream file(path, std::ios::binary);
+			if (file)
+				cache->m_blob.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+		}
+		HRESULT hr = E_FAIL;
+		if (!cache->m_blob.empty())
+		{
+			// the library references the blob for its whole lifetime
+			hr = device1->CreatePipelineLibrary(cache->m_blob.data(), cache->m_blob.size(), IID_PPV_ARGS(&cache->m_library));
+			if (FAILED(hr))
+				cemuLog_log(LogType::Force, "D3D12: Discarding the pipeline cache ({}), it was created by another driver or is damaged", D3D12_HResultToString(hr));
+			else
+				cemuLog_log(LogType::Force, "D3D12: Loaded pipeline cache ({} KB)", cache->m_blob.size() / 1024);
+		}
+		if (FAILED(hr))
+		{
+			cache->m_blob.clear();
+			hr = device1->CreatePipelineLibrary(nullptr, 0, IID_PPV_ARGS(&cache->m_library));
+			if (FAILED(hr))
+			{
+				cemuLog_log(LogType::Force, "D3D12: Pipeline libraries are not supported ({}), pipelines are not cached", D3D12_HResultToString(hr));
+				return nullptr;
+			}
+		}
+		cache->m_lastSave = std::chrono::steady_clock::now();
+		return cache;
+	}
+
+	// Without pipeline library support (Xbox) the pipelines are kept for the session only. That still lets the loading
+	// screen precompile everything the title used before, so gameplay doesn't wait for the driver
+	static std::shared_ptr<D3D12PipelineDiskCache> CreateInMemory()
+	{
+		auto cache = std::make_shared<D3D12PipelineDiskCache>();
+		cemuLog_log(LogType::Force, "D3D12: Pipelines are kept in memory for this session (no pipeline library)");
+		return cache;
+	}
+
+	// The Xbox driver removes the device when a pipeline library is created, and takes ~2.5 s per pipeline, so every
+	// session recompiled everything. This mode stores each pipeline's cached blob (ID3D12PipelineState::GetCachedBlob),
+	// appended to a file, and recreates pipelines from it with CachedPSO. Whether the driver handles that is tested once
+	// per device (probeMarker): "testing" is written before the first test, so a test that takes the app down leaves
+	// it behind and the mode stays off from then on
+	static std::shared_ptr<D3D12PipelineDiskCache> OpenBlobs(ID3D12Device *device, const fs::path &path, const fs::path &probeMarker)
+	{
+		std::string probe;
+		{
+			std::ifstream marker(probeMarker);
+			std::getline(marker, probe);
+		}
+		if (probe == "testing" || probe == "failed")
+		{
+			if (probe == "testing")
+			{
+				std::ofstream(probeMarker, std::ios::trunc) << "failed";
+				cemuLog_log(LogType::Force, "D3D12: The pipeline blob cache test didn't finish last time, the cache stays off");
+			}
+			return CreateInMemory();
+		}
+		auto cache = std::make_shared<D3D12PipelineDiskCache>();
+		cache->m_device = device;
+		cache->m_path = path;
+		cache->m_probeMarker = probeMarker;
+		cache->m_blobMode = true;
+		cache->m_probePending = probe != "ok";
+		if (!cache->m_probePending)
+			cache->ReadBlobIndex();
+		cemuLog_log(LogType::Force, "D3D12: Pipeline blob cache: {} pipelines{}", cache->m_blobIndex.size(), cache->m_probePending ? " (testing whether the driver supports it)" : "");
+		return cache;
+	}
+
+	bool Load(const std::wstring &name, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc, ComPtr<ID3D12PipelineState> &pso)
+	{
+		std::unique_lock lock(m_mutex);
+		if (!m_library)
+		{
+			auto it = m_inMemory.find(name);
+			if (it != m_inMemory.end())
+			{
+				pso = it->second; // pipeline state objects are immutable and can be shared
+				return true;
+			}
+			if (!m_blobMode || m_probePending)
+				return false;
+			auto blob = m_blobIndex.find(name);
+			if (blob == m_blobIndex.end())
+				return false;
+			std::vector<uint8> data;
+			if (!ReadBlob(blob->second, data))
+			{
+				m_blobIndex.erase(blob);
+				return false;
+			}
+			lock.unlock();
+			D3D12_GRAPHICS_PIPELINE_STATE_DESC cachedDesc = desc;
+			cachedDesc.CachedPSO = {data.data(), data.size()};
+			const HRESULT hr = m_device->CreateGraphicsPipelineState(&cachedDesc, IID_PPV_ARGS(&pso));
+			lock.lock();
+			if (FAILED(hr))
+			{
+				// another driver version, or the description changed: compile it again, which stores a new blob
+				m_blobIndex.erase(name);
+				if (m_blobFailures++ == 0)
+					cemuLog_log(LogType::Force, "D3D12: A cached pipeline blob was rejected ({}), recompiling", D3D12_HResultToString(hr));
+				pso.Reset();
+				return false;
+			}
+			m_inMemory.emplace(name, pso);
+			return true;
+		}
+		return SUCCEEDED(m_library->LoadGraphicsPipeline(name.c_str(), &desc, IID_PPV_ARGS(&pso)));
+	}
+
+	void Store(const std::wstring &name, const D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc, ID3D12PipelineState *pso)
+	{
+		std::unique_lock lock(m_mutex);
+		if (!m_library)
+		{
+			m_inMemory.emplace(name, pso);
+			if (!m_blobMode || m_blobIndex.count(name) != 0)
+				return;
+			// the test starts before GetCachedBlob: on the Xbox that call already removed the device
+			if (m_probePending)
+				std::ofstream(m_probeMarker, std::ios::trunc) << "testing";
+			ComPtr<ID3DBlob> blob;
+			if (FAILED(pso->GetCachedBlob(&blob)) || !blob || blob->GetBufferSize() == 0)
+			{
+				if (m_probePending)
+				{
+					m_probePending = false;
+					m_blobMode = false;
+					std::ofstream(m_probeMarker, std::ios::trunc) << "failed";
+					cemuLog_log(LogType::Force, "D3D12: Pipeline blob cache test: GetCachedBlob failed, pipelines are kept for this session");
+				}
+				return;
+			}
+			if (m_probePending)
+			{
+				// first pipeline of this device: check that the driver recreates it from the blob
+				m_probePending = false;
+				D3D12_GRAPHICS_PIPELINE_STATE_DESC cachedDesc = desc;
+				cachedDesc.CachedPSO = {blob->GetBufferPointer(), blob->GetBufferSize()};
+				ComPtr<ID3D12PipelineState> test;
+				const HRESULT hr = m_device->CreateGraphicsPipelineState(&cachedDesc, IID_PPV_ARGS(&test));
+				const HRESULT removed = m_device->GetDeviceRemovedReason();
+				const bool ok = SUCCEEDED(hr) && removed == S_OK;
+				std::ofstream(m_probeMarker, std::ios::trunc) << (ok ? "ok" : "failed");
+				cemuLog_log(LogType::Force, "D3D12: Pipeline blob cache test: {} ({}, device {})", ok ? "works, pipelines are cached on disk" : "not supported, pipelines are kept for this session", D3D12_HResultToString(hr), D3D12_HResultToString(removed));
+				if (!ok)
+				{
+					m_blobMode = false;
+					return;
+				}
+				ReadBlobIndex();
+			}
+			AppendBlob(name, blob->GetBufferPointer(), (uint32)blob->GetBufferSize());
+			return;
+		}
+		if (SUCCEEDED(m_library->StorePipeline(name.c_str(), pso)))
+			m_dirty = true;
+	}
+
+	// save at most every 30 seconds while pipelines are being created, the app may be closed without a clean shutdown
+	void SaveIfDue()
+	{
+		{
+			std::lock_guard lock(m_mutex);
+			if (!m_dirty || std::chrono::steady_clock::now() - m_lastSave < std::chrono::seconds(30))
+				return;
+		}
+		Save();
+	}
+
+	void Save()
+	{
+		std::vector<uint8> data;
+		{
+			std::lock_guard lock(m_mutex);
+			if (!m_dirty || !m_library)
+				return;
+			data.resize(m_library->GetSerializedSize());
+			if (data.empty() || FAILED(m_library->Serialize(data.data(), data.size())))
+				return;
+			m_dirty = false;
+			m_lastSave = std::chrono::steady_clock::now();
+		}
+		std::lock_guard fileLock(m_fileMutex);
+		std::error_code ec;
+		fs::create_directories(m_path.parent_path(), ec);
+		const fs::path tmpPath = m_path.string() + ".tmp";
+		{
+			std::ofstream file(tmpPath, std::ios::binary | std::ios::trunc);
+			if (!file.write((const char *)data.data(), (std::streamsize)data.size()))
+				return;
+		}
+		fs::rename(tmpPath, m_path, ec); // replace the old file only once the new one is complete
+		if (ec)
+			cemuLog_log(LogType::Force, "D3D12: Failed to save the pipeline cache: {}", ec.message());
+	}
+
+  private:
+	// blob file: "CPSB", version, then entries of name length (uint16, in wchar_t), name, blob size (uint32), blob.
+	// Entries are only appended; a later entry of the same name wins. Blobs are read from the file when needed
+	static constexpr uint32 kBlobFileMagic = 0x42535043; // "CPSB"
+	static constexpr uint32 kBlobFileVersion = 1;
+	struct BlobLocation
+	{
+		uint64 offset;
+		uint32 size;
+	};
+
+	void ReadBlobIndex()
+	{
+		m_blobIndex.clear();
+		std::ifstream file(m_path, std::ios::binary);
+		uint32 header[2]{};
+		if (!file.read((char *)header, sizeof(header)) || header[0] != kBlobFileMagic || header[1] != kBlobFileVersion)
+			return;
+		while (true)
+		{
+			uint16 nameLength = 0;
+			if (!file.read((char *)&nameLength, sizeof(nameLength)) || nameLength == 0 || nameLength > 64)
+				break;
+			std::wstring name(nameLength, L'\0');
+			uint32 size = 0;
+			if (!file.read((char *)name.data(), nameLength * sizeof(wchar_t)) || !file.read((char *)&size, sizeof(size)))
+				break;
+			const uint64 offset = (uint64)file.tellg();
+			if (!file.seekg(size, std::ios::cur) || (uint64)file.tellg() != offset + size)
+				break; // incomplete last entry (the app was closed while writing)
+			m_blobIndex[name] = {offset, size};
+			m_blobFileSize = offset + size;
+		}
+	}
+
+	bool ReadBlob(const BlobLocation &location, std::vector<uint8> &data)
+	{
+		std::lock_guard fileLock(m_fileMutex);
+		std::ifstream file(m_path, std::ios::binary);
+		data.resize(location.size);
+		return file.seekg((std::streamoff)location.offset) && file.read((char *)data.data(), location.size);
+	}
+
+	void AppendBlob(const std::wstring &name, const void *data, uint32 size)
+	{
+		std::lock_guard fileLock(m_fileMutex);
+		std::error_code ec;
+		fs::create_directories(m_path.parent_path(), ec);
+		const bool newFile = m_blobFileSize == 0;
+		std::ofstream file(m_path, std::ios::binary | (newFile ? std::ios::trunc : std::ios::app));
+		if (!file)
+			return;
+		if (newFile)
+		{
+			const uint32 header[2] = {kBlobFileMagic, kBlobFileVersion};
+			file.write((const char *)header, sizeof(header));
+			m_blobFileSize = sizeof(header);
+		}
+		const uint16 nameLength = (uint16)name.size();
+		file.write((const char *)&nameLength, sizeof(nameLength));
+		file.write((const char *)name.data(), nameLength * sizeof(wchar_t));
+		file.write((const char *)&size, sizeof(size));
+		const uint64 offset = m_blobFileSize + sizeof(nameLength) + nameLength * sizeof(wchar_t) + sizeof(size);
+		if (!file.write((const char *)data, size))
+			return;
+		m_blobFileSize = offset + size;
+		m_blobIndex[name] = {offset, size};
+	}
+
+	std::mutex m_mutex;
+	std::mutex m_fileMutex;
+	fs::path m_path;
+	std::vector<uint8> m_blob;				 // declared before m_library, which references it
+	ComPtr<ID3D12PipelineLibrary> m_library; // null in memory only mode
+	std::unordered_map<std::wstring, ComPtr<ID3D12PipelineState>> m_inMemory;
+	bool m_dirty = false;
+	std::chrono::steady_clock::time_point m_lastSave;
+	// blob mode (see OpenBlobs)
+	ComPtr<ID3D12Device> m_device;
+	fs::path m_probeMarker;
+	bool m_blobMode = false;
+	bool m_probePending = false;
+	uint32 m_blobFailures = 0;
+	uint64 m_blobFileSize = 0;
+	std::unordered_map<std::wstring, BlobLocation> m_blobIndex;
+};
+
+// A pipeline description that no longer references any Latte or renderer object, so it can be compiled on another thread
+// while the GPU thread continues (shaders may even be deleted in the meantime)
+struct D3D12PipelineCompileJob
+{
+	// where the bytecode of a stage comes from, recorded so the pipeline can be recreated at the next launch
+	struct ShaderRef
+	{
+		enum Kind : uint8
+		{
+			kNone = 0,
+			kGameShader = 1,
+			kInline = 2
+		}; // kInline: generated shader, bytecode is recorded
+		uint8 kind = kNone;
+		uint64 baseHash = 0;
+		uint64 auxHash = 0;
+	};
+	static constexpr uint32 kRecordVersion = 1;
+
+	std::shared_ptr<D3D12PipelineInfo> info;
+	std::shared_ptr<D3D12PipelineDiskCache> diskCache;
+	std::shared_ptr<std::atomic<uint32>> finishedCounter; // incremented when the job is done (pipeline preloading)
+	bool countAsNew = false;							  // a draw needs it: show it in the "Compiled N new pipelines" overlay unless it was cached
+	ShaderRef vsRef, gsRef, psRef;
+	ComPtr<ID3D12Device> device;
+	ComPtr<ID3D12RootSignature> rootSignature;
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+	std::vector<D3D12_INPUT_ELEMENT_DESC> inputElements;
+	std::vector<uint8> vsBytecode, gsBytecode, psBytecode;
+	uint64 vsHash = 0;
+	uint64 psHash = 0;
+
+	void Run()
+	{
+		auto toBytecode = [](const std::vector<uint8> &v) { return v.empty() ? D3D12_SHADER_BYTECODE{} : D3D12_SHADER_BYTECODE{v.data(), v.size()}; };
+		desc.pRootSignature = rootSignature.Get();
+		desc.InputLayout.pInputElementDescs = inputElements.data();
+		desc.InputLayout.NumElements = (UINT)inputElements.size();
+		desc.VS = toBytecode(vsBytecode);
+		desc.GS = toBytecode(gsBytecode);
+		desc.PS = toBytecode(psBytecode);
+		CreatePipeline();
+		info->isReady.store(true, std::memory_order_release);
+		if (finishedCounter)
+			++*finishedCounter;
+		if (diskCache)
+			diskCache->SaveIfDue();
+	}
+
+	// the parts of the description that don't depend on Latte objects or the running process
+	std::vector<uint8> SerializeRecord() const
+	{
+		std::vector<uint8> out;
+		auto put = [&out](const void *data, size_t size) { out.insert(out.end(), (const uint8 *)data, (const uint8 *)data + size); };
+		put(&kRecordVersion, sizeof(kRecordVersion));
+		for (const ShaderRef *ref : {&vsRef, &gsRef, &psRef})
+		{
+			put(&ref->kind, sizeof(ref->kind));
+			if (ref->kind == ShaderRef::kGameShader)
+			{
+				put(&ref->baseHash, sizeof(ref->baseHash));
+				put(&ref->auxHash, sizeof(ref->auxHash));
+			}
+		}
+		if (gsRef.kind == ShaderRef::kInline)
+		{
+			const uint32 size = (uint32)gsBytecode.size();
+			put(&size, sizeof(size));
+			put(gsBytecode.data(), gsBytecode.size());
+		}
+		const uint32 elementCount = (uint32)inputElements.size();
+		put(&elementCount, sizeof(elementCount));
+		for (const auto &e : inputElements)
+		{
+			put(&e.SemanticIndex, sizeof(e.SemanticIndex));
+			put(&e.Format, sizeof(e.Format));
+			put(&e.InputSlot, sizeof(e.InputSlot));
+			put(&e.AlignedByteOffset, sizeof(e.AlignedByteOffset));
+			put(&e.InputSlotClass, sizeof(e.InputSlotClass));
+			put(&e.InstanceDataStepRate, sizeof(e.InstanceDataStepRate));
+		}
+		ForEachPlainDescField([&](void *data, size_t size) { put(data, size); });
+		return out;
+	}
+
+	// restores everything but the bytecode of game shaders, see D3D12PipelineCache::ResolveRecordedShaders()
+	bool DeserializeRecord(const std::vector<uint8> &in)
+	{
+		size_t pos = 0;
+		auto get = [&](void *data, size_t size) {
+			if (pos + size > in.size())
+				return false;
+			memcpy(data, in.data() + pos, size);
+			pos += size;
+			return true;
+		};
+		uint32 version = 0;
+		if (!get(&version, sizeof(version)) || version != kRecordVersion)
+			return false;
+		for (ShaderRef *ref : {&vsRef, &gsRef, &psRef})
+		{
+			if (!get(&ref->kind, sizeof(ref->kind)) || ref->kind > ShaderRef::kInline)
+				return false;
+			if (ref->kind == ShaderRef::kGameShader && (!get(&ref->baseHash, sizeof(ref->baseHash)) || !get(&ref->auxHash, sizeof(ref->auxHash))))
+				return false;
+		}
+		if (vsRef.kind != ShaderRef::kGameShader || psRef.kind == ShaderRef::kInline)
+			return false;
+		if (gsRef.kind == ShaderRef::kInline)
+		{
+			uint32 size = 0;
+			if (!get(&size, sizeof(size)) || size > in.size())
+				return false;
+			gsBytecode.resize(size);
+			if (!get(gsBytecode.data(), size))
+				return false;
+		}
+		uint32 elementCount = 0;
+		if (!get(&elementCount, sizeof(elementCount)) || elementCount > 32)
+			return false;
+		inputElements.resize(elementCount);
+		for (auto &e : inputElements)
+		{
+			e.SemanticName = "TEXCOORD";
+			if (!get(&e.SemanticIndex, sizeof(e.SemanticIndex)) || !get(&e.Format, sizeof(e.Format)) || !get(&e.InputSlot, sizeof(e.InputSlot)) ||
+				!get(&e.AlignedByteOffset, sizeof(e.AlignedByteOffset)) || !get(&e.InputSlotClass, sizeof(e.InputSlotClass)) || !get(&e.InstanceDataStepRate, sizeof(e.InstanceDataStepRate)))
+				return false;
+		}
+		bool ok = true;
+		ForEachPlainDescField([&](void *data, size_t size) { ok = ok && get(data, size); });
+		return ok && pos == in.size();
+	}
+
+  private:
+	// description members that are plain values (no pointers)
+	template <typename F>
+	void ForEachPlainDescField(F &&f) const
+	{
+		auto &d = const_cast<D3D12_GRAPHICS_PIPELINE_STATE_DESC &>(desc);
+		f(&d.BlendState, sizeof(d.BlendState));
+		f(&d.SampleMask, sizeof(d.SampleMask));
+		f(&d.RasterizerState, sizeof(d.RasterizerState));
+		f(&d.DepthStencilState, sizeof(d.DepthStencilState));
+		f(&d.IBStripCutValue, sizeof(d.IBStripCutValue));
+		f(&d.PrimitiveTopologyType, sizeof(d.PrimitiveTopologyType));
+		f(&d.NumRenderTargets, sizeof(d.NumRenderTargets));
+		f(d.RTVFormats, sizeof(d.RTVFormats));
+		f(&d.DSVFormat, sizeof(d.DSVFormat));
+		f(&d.SampleDesc, sizeof(d.SampleDesc));
+		f(&d.Flags, sizeof(d.Flags));
+	}
+
+	void CreatePipeline()
+	{
+		const uint64 cacheKey = CalculateCacheKey();
+		if (D3D12PipelineQuarantine::s_blocked.count(cacheKey) != 0)
+		{
+			cemuLog_log(LogType::Force, "D3D12: Skipped pipeline {:016x} for VS {:016x} PS {:016x}, it crashed the driver before", cacheKey, vsHash, psHash);
+			info->pso.Reset();
+			return;
+		}
+		std::wstring cacheName;
+		D3D12PipelineQuarantine::t_creatingKey = cacheKey; // loading from a cached blob compiles too
+		if (diskCache)
+		{
+			const std::string key = fmt::format("{:016x}", cacheKey);
+			cacheName.assign(key.begin(), key.end());
+			if (diskCache->Load(cacheName, desc, info->pso))
+			{
+				D3D12PipelineQuarantine::t_creatingKey = 0;
+				return;
+			}
+		}
+		if (countAsNew)
+			g_compiling_pipelines++;
+		const auto start = std::chrono::steady_clock::now();
+		HRESULT hr = device->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&info->pso));
+		D3D12PipelineQuarantine::t_creatingKey = 0;
+		D3D12_Checkpoint(device.Get(), "game pipeline created");
+		const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+		if (FAILED(hr))
+		{
+			cemuLog_log(LogType::Force, "D3D12: CreateGraphicsPipelineState failed ({}) for VS {:016x} PS {:016x}", D3D12_HResultToString(hr), vsHash, psHash);
+			info->pso.Reset();
+		}
+		else
+		{
+			if (ms >= 2000)
+				cemuLog_log(LogType::Force, "D3D12: The driver took {}ms to create the pipeline for VS {:016x} PS {:016x}", ms, vsHash, psHash);
+			if (diskCache)
+			{
+				D3D12PipelineQuarantine::t_creatingKey = cacheKey; // the blob cache test recreates the pipeline
+				diskCache->Store(cacheName, desc, info->pso.Get());
+				D3D12PipelineQuarantine::t_creatingKey = 0;
+			}
+		}
+	}
+
+	// identifies the complete pipeline description, see D3D12PipelineDiskCache
+	uint64 CalculateCacheKey() const
+	{
+		uint64 h = 0xcbf29ce484222325ull ^ 2; // version, bump when the hashed data changes
+		auto add = [&h](const void *data, size_t size) {
+			const uint8 *p = (const uint8 *)data;
+			for (size_t i = 0; i < size; i++)
+				h = (h ^ p[i]) * 0x100000001b3ull;
+		};
+		auto addVector = [&](const std::vector<uint8> &v) {
+			const uint64 size = v.size();
+			add(&size, sizeof(size));
+			add(v.data(), v.size());
+		};
+		addVector(vsBytecode);
+		addVector(gsBytecode);
+		addVector(psBytecode);
+		for (const auto &e : inputElements)
+		{
+			add(e.SemanticName, strlen(e.SemanticName));
+			add(&e.SemanticIndex, sizeof(e.SemanticIndex));
+			add(&e.Format, sizeof(e.Format));
+			add(&e.InputSlot, sizeof(e.InputSlot));
+			add(&e.AlignedByteOffset, sizeof(e.AlignedByteOffset));
+			add(&e.InputSlotClass, sizeof(e.InputSlotClass));
+			add(&e.InstanceDataStepRate, sizeof(e.InstanceDataStepRate));
+		}
+		// plain value structs. Padding bytes are zero because the description is value-initialized; if they weren't,
+		// the result would only be a cache miss
+		add(&desc.BlendState, sizeof(desc.BlendState));
+		add(&desc.SampleMask, sizeof(desc.SampleMask));
+		add(&desc.RasterizerState, sizeof(desc.RasterizerState));
+		add(&desc.DepthStencilState, sizeof(desc.DepthStencilState));
+		add(&desc.IBStripCutValue, sizeof(desc.IBStripCutValue));
+		add(&desc.PrimitiveTopologyType, sizeof(desc.PrimitiveTopologyType));
+		add(&desc.NumRenderTargets, sizeof(desc.NumRenderTargets));
+		add(desc.RTVFormats, sizeof(desc.RTVFormats));
+		add(&desc.DSVFormat, sizeof(desc.DSVFormat));
+		add(&desc.SampleDesc, sizeof(desc.SampleDesc));
+		add(&desc.Flags, sizeof(desc.Flags));
+		return h;
+	}
+};
+
+// Descriptions of all pipelines a title has used (D3D12PipelineCompileJob::SerializeRecord), so they can be created while
+// the game loads. Unlike the driver cache it doesn't depend on the GPU or driver: it lives next to the transferable shader
+// cache and can be copied to another device (e.g. from a PC to an Xbox) together with it.
+class D3D12PipelineRecordFile
+{
+  public:
+	explicit D3D12PipelineRecordFile(const fs::path &path) : m_path(path)
+	{
+		std::ifstream file(path, std::ios::binary);
+		uint32 header[2]{};
+		if (!file || !file.read((char *)header, sizeof(header)) || header[0] != kMagic || header[1] != kVersion)
+			return; // missing or incompatible, recreated on the first new record
+		m_headerValid = true;
+		while (true)
+		{
+			uint32 size = 0;
+			if (!file.read((char *)&size, sizeof(size)) || size == 0 || size > 1024 * 1024)
+				break;
+			std::vector<uint8> record(size);
+			if (!file.read((char *)record.data(), size))
+				break; // incomplete last record (closed while writing)
+			if (m_known.insert(_Hash(record)).second)
+				m_records.emplace_back(std::move(record));
+			m_validSize = (uint64)file.tellg();
+		}
+		// the startup set: hashes of the records sessions needed right after the loading screen (menus, character
+		// select, the start of a race), merged over all sessions. A plain list of uint64, appended to
+		std::ifstream startup(_StartupPath(), std::ios::binary);
+		uint64 h;
+		while (startup.read((char *)&h, sizeof(h)))
+			m_startup.insert(h);
+		for (uint32 i = 0; i < (uint32)m_records.size(); i++)
+			m_index.emplace(_Hash(m_records[i]), i);
+		// scene tags: (scene hash, record hash) pairs, the records a level (a Mario Kart 8 course) used, appended to
+		std::ifstream scenes(_ScenePath(), std::ios::binary);
+		uint64 pair[2];
+		while (scenes.read((char *)pair, sizeof(pair)))
+			if (m_sceneTags.insert({pair[0], pair[1]}).second)
+				m_scenes[pair[0]].push_back(pair[1]);
+	}
+
+	static uint64 Hash(const std::vector<uint8> &record)
+	{
+		return _Hash(record);
+	}
+
+	// index of a loaded record, -1 if it isn't in the file (yet)
+	sint32 IndexOf(uint64 recordHash) const
+	{
+		auto it = m_index.find(recordHash);
+		return it == m_index.end() ? -1 : (sint32)it->second;
+	}
+
+	std::vector<uint64> GetSceneRecords(uint64 scene)
+	{
+		std::lock_guard lock(m_mutex);
+		auto it = m_scenes.find(scene);
+		return it == m_scenes.end() ? std::vector<uint64>() : it->second;
+	}
+
+	void TagScene(uint64 scene, uint64 recordHash)
+	{
+		std::lock_guard lock(m_mutex);
+		if (!m_sceneTags.insert({scene, recordHash}).second)
+			return;
+		m_scenes[scene].push_back(recordHash);
+		std::error_code ec;
+		fs::create_directories(m_path.parent_path(), ec);
+		std::ofstream file(_ScenePath(), std::ios::binary | std::ios::app);
+		const uint64 pair[2] = {scene, recordHash};
+		file.write((const char *)pair, sizeof(pair));
+	}
+
+	const std::vector<std::vector<uint8>> &GetRecords() const
+	{
+		return m_records;
+	}
+
+	bool IsStartup(const std::vector<uint8> &record) const
+	{
+		return m_startup.count(_Hash(record)) != 0;
+	}
+	size_t GetStartupCount() const
+	{
+		return m_startup.size();
+	}
+
+	void MarkStartup(const std::vector<uint8> &record)
+	{
+		std::lock_guard lock(m_mutex);
+		const uint64 h = _Hash(record);
+		if (!m_startup.insert(h).second)
+			return;
+		std::ofstream file(_StartupPath(), std::ios::binary | std::ios::app);
+		file.write((const char *)&h, sizeof(h));
+	}
+
+	void Add(const std::vector<uint8> &record)
+	{
+		std::lock_guard lock(m_mutex);
+		if (!m_known.insert(_Hash(record)).second)
+			return;
+		std::error_code ec;
+		if (!m_headerValid)
+		{
+			fs::create_directories(m_path.parent_path(), ec);
+			std::ofstream file(m_path, std::ios::binary | std::ios::trunc);
+			const uint32 header[2] = {kMagic, kVersion};
+			if (!file.write((const char *)header, sizeof(header)))
+				return;
+			m_headerValid = true;
+			m_validSize = sizeof(header);
+		}
+		else if (fs::file_size(m_path, ec) != m_validSize && !ec)
+			fs::resize_file(m_path, m_validSize, ec); // drop an incomplete record left by an earlier crash
+		std::ofstream file(m_path, std::ios::binary | std::ios::app);
+		const uint32 size = (uint32)record.size();
+		if (file.write((const char *)&size, sizeof(size)) && file.write((const char *)record.data(), size) && file.flush())
+			m_validSize += sizeof(size) + size;
+		// also usable by a level that loads again in this session (records are only added on the GPU thread, which is
+		// also the only reader of m_records)
+		m_index.emplace(_Hash(record), (uint32)m_records.size());
+		m_records.push_back(record);
+	}
+
+  private:
+	static constexpr uint32 kMagic = 0x4c503344; // 'D3PL'
+	static constexpr uint32 kVersion = 1;
+
+	static uint64 _Hash(const std::vector<uint8> &data)
+	{
+		uint64 h = 0xcbf29ce484222325ull;
+		for (uint8 b : data)
+			h = (h ^ b) * 0x100000001b3ull;
+		return h;
+	}
+
+	fs::path _StartupPath() const
+	{
+		fs::path p = m_path; // <titleId>_d3d12pipelines.bin -> <titleId>_d3d12pipelines.startup.bin
+		p.replace_extension(".startup.bin");
+		return p;
+	}
+
+	fs::path _ScenePath() const
+	{
+		fs::path p = m_path; // <titleId>_d3d12pipelines.scene.bin
+		p.replace_extension(".scene.bin");
+		return p;
+	}
+
+	struct PairHash
+	{
+		size_t operator()(const std::pair<uint64, uint64> &p) const
+		{
+			return (size_t)(p.first * 0x9E3779B97F4A7C15ull ^ p.second);
+		}
+	};
+	std::unordered_map<uint64, uint32> m_index;				  // record hash -> index in m_records
+	std::unordered_map<uint64, std::vector<uint64>> m_scenes; // scene hash -> record hashes, in first-use order
+	std::unordered_set<std::pair<uint64, uint64>, PairHash> m_sceneTags;
+	std::mutex m_mutex;
+	fs::path m_path;
+	bool m_headerValid = false;
+	uint64 m_validSize = 0;
+	std::unordered_set<uint64> m_known;
+	std::unordered_set<uint64> m_startup;
+	std::vector<std::vector<uint8>> m_records; // loaded from the file, used once for preloading
+};
+
+class D3D12PipelineCompileQueue
+{
+  public:
+	static std::shared_ptr<D3D12PipelineCompileQueue> Create()
+	{
+		auto queue = std::make_shared<D3D12PipelineCompileQueue>();
+		// pipeline creation is mostly the driver's single threaded shader compiler, so it scales with threads. Where the
+		// driver can't cache pipelines (Xbox: ~2.5 s each, all of them recreated every session) the loading screen's
+		// precompile is bound by this. The threads run below normal priority, so emulation keeps its cores when both
+		// want them
+		const uint32 threadCount = std::clamp<uint32>(std::thread::hardware_concurrency() - 2, 2, 6);
+		for (uint32 i = 0; i < threadCount; i++)
+		{
+			HANDLE thread = D3D12_CreateLargeStackThread([queue]() { queue->ThreadFunc(); }); // threads keep the queue alive if detached
+			if (thread)
+				SetThreadPriority(thread, THREAD_PRIORITY_BELOW_NORMAL);
+			queue->m_threads.emplace_back(thread);
+		}
+		cemuLog_log(LogType::Force, "D3D12: {} pipeline compile threads", threadCount);
+		return queue;
+	}
+
+	// urgent jobs (a draw is waiting for the pipeline) go ahead of the speculative preload jobs
+	void Push(std::unique_ptr<D3D12PipelineCompileJob> job, bool urgent = false)
+	{
+		std::lock_guard lock(m_mutex);
+		if (urgent)
+			m_jobs.push_front(std::move(job));
+		else
+			m_jobs.push_back(std::move(job));
+		m_jobAvailable.notify_one();
+	}
+
+	// returns true if the pipeline became ready within the timeout
+	bool WaitForReady(const D3D12PipelineInfo *info, std::chrono::milliseconds timeout)
+	{
+		std::unique_lock lock(m_mutex);
+		// jobs mark the pipeline ready before they lock the mutex to notify, so a wakeup can't be missed
+		return m_jobFinished.wait_for(lock, timeout, [info]() { return info->isReady.load(std::memory_order_acquire); });
+	}
+
+	void Stop()
+	{
+		std::unique_lock lock(m_mutex);
+		m_stop = true;
+		m_jobs.clear();
+		m_jobAvailable.notify_all();
+		// a driver compile can take minutes or hang, it must not block closing the game
+		const bool idle = m_jobFinished.wait_for(lock, std::chrono::seconds(3), [this]() { return m_busyThreads == 0; });
+		lock.unlock();
+		if (!idle)
+			cemuLog_log(LogType::Force, "D3D12: A pipeline is still being created by the driver, not waiting for it");
+		for (HANDLE t : m_threads)
+		{
+			if (idle)
+				WaitForSingleObject(t, INFINITE);
+			CloseHandle(t); // without waiting this detaches the thread
+		}
+		m_threads.clear();
+	}
+
+  private:
+	void ThreadFunc()
+	{
+		SetThreadName("d3d12PsoComp");
+		std::unique_lock lock(m_mutex);
+		while (true)
+		{
+			// near the memory limit fewer pipelines are created at once: the Xbox driver needs a lot of memory per pipeline, and
+			// six at a time while loading a never played MK8 course at 4K went over the 5 GB budget. The pressure level isn't
+			// signalled, so waiting threads check again every 50 ms
+			m_jobAvailable.wait_for(lock, std::chrono::milliseconds(50), [this]() { return m_stop || (!m_jobs.empty() && _MayStartJob()); });
+			if (m_stop)
+				return;
+			if (m_jobs.empty() || !_MayStartJob())
+				continue;
+			std::unique_ptr<D3D12PipelineCompileJob> job = std::move(m_jobs.front());
+			m_jobs.pop_front();
+			m_busyThreads++;
+			lock.unlock();
+			job->Run();
+			job.reset();
+			lock.lock();
+			m_busyThreads--;
+			m_jobFinished.notify_all();
+		}
+	}
+
+	bool _MayStartJob() const
+	{
+		const int pressure = D3D12GetMemoryPressure();
+		const uint32 maxBusy = pressure >= 2 ? 1 : (pressure == 1 ? 2 : 0xFFFFFFFF);
+		return m_busyThreads < maxBusy;
+	}
+
+	std::mutex m_mutex;
+	std::condition_variable m_jobAvailable;
+	std::condition_variable m_jobFinished;
+	std::deque<std::unique_ptr<D3D12PipelineCompileJob>> m_jobs;
+	std::vector<HANDLE> m_threads;
+	uint32 m_busyThreads = 0;
+	bool m_stop = false;
+};
+
+// GLSL geometry shader that turns the 3 vertices of a GPU7 RECT primitive into a quad. Same approach as
+// rectsEmulationGS_generate() in the Vulkan backend, except that every pixel shader input is passed through: under D3D12
+// the vertex shader declares all of them (LatteDecompilerOptions::declareAllPSInputs) and the signatures of all stages
+// have to match
+static RendererShaderD3D12 *_GenerateRectEmulationGS(D3D12Renderer *renderer, LatteDecompilerShader *vertexShader, const LatteContextRegister &latteRegister)
+{
+	(void)vertexShader;
+	(void)latteRegister;
+	LatteShaderPSInputTable *psInputTable = LatteSHRC_GetPSInputTable();
+	std::vector<uint32> semantics;
+	std::string gsSrc;
+	gsSrc.append("#version 450\r\n");
+	gsSrc.append("layout(triangles) in;\r\n");
+	gsSrc.append("layout(triangle_strip) out;\r\n");
+	gsSrc.append("layout(max_vertices = 4) out;\r\n");
+	for (sint32 i = 0; i < psInputTable->count; i++)
+	{
+		const auto &psImport = psInputTable->import[i];
+		if (psImport.semanticId > LATTE_ANALYZER_IMPORT_INDEX_PARAM_MAX)
+			continue;
+		semantics.emplace_back(psImport.semanticId);
+		for (sint32 f = 0; f < 2; f++)
+		{
+			gsSrc.append(fmt::format("layout(location = {}) ", i));
+			if (psImport.isFlat)
+				gsSrc.append("flat ");
+			if (psImport.isNoPerspective)
+				gsSrc.append("noperspective ");
+			if (f == 0)
+				gsSrc.append(fmt::format("in vec4 passParameterSem{}In[];\r\n", psImport.semanticId));
+			else
+				gsSrc.append(fmt::format("out vec4 passParameterSem{}Out;\r\n", psImport.semanticId));
+		}
+	}
+	gsSrc.append("vec4 gen4thVertexA(vec4 a, vec4 b, vec4 c)\r\n{\r\nreturn b - (c - a);\r\n}\r\n");
+	gsSrc.append("vec4 gen4thVertexB(vec4 a, vec4 b, vec4 c)\r\n{\r\nreturn c - (b - a);\r\n}\r\n");
+	gsSrc.append("vec4 gen4thVertexC(vec4 a, vec4 b, vec4 c)\r\n{\r\nreturn c + (b - a);\r\n}\r\n");
+
+	auto emitVertices = [&](sint32 p0, sint32 p1, sint32 p2, sint32 p3, const char *variant) {
+		const sint32 order[4] = {p0, p1, p2, p3};
+		for (sint32 v : order)
+		{
+			for (uint32 sem : semantics)
+			{
+				if (v == 3)
+					gsSrc.append(fmt::format("passParameterSem{0}Out = gen4thVertex{1}(passParameterSem{0}In[0], passParameterSem{0}In[1], passParameterSem{0}In[2]);\r\n", sem, variant));
+				else
+					gsSrc.append(fmt::format("passParameterSem{0}Out = passParameterSem{0}In[{1}];\r\n", sem, v));
+			}
+			if (v == 3)
+				gsSrc.append(fmt::format("gl_Position = gen4thVertex{}(gl_in[0].gl_Position, gl_in[1].gl_Position, gl_in[2].gl_Position);\r\n", variant));
+			else
+				gsSrc.append(fmt::format("gl_Position = gl_in[{}].gl_Position;\r\n", v));
+			gsSrc.append("EmitVertex();\r\n");
+		}
+	};
+	gsSrc.append("void main()\r\n{\r\n");
+	gsSrc.append("float dist0_1 = length(gl_in[1].gl_Position.xy - gl_in[0].gl_Position.xy);\r\n");
+	gsSrc.append("float dist0_2 = length(gl_in[2].gl_Position.xy - gl_in[0].gl_Position.xy);\r\n");
+	gsSrc.append("float dist1_2 = length(gl_in[2].gl_Position.xy - gl_in[1].gl_Position.xy);\r\n");
+	gsSrc.append("if(dist0_1 > dist0_2 && dist0_1 > dist1_2)\r\n{\r\n");
+	emitVertices(2, 1, 0, 3, "A");
+	gsSrc.append("} else if ( dist0_2 > dist0_1 && dist0_2 > dist1_2 ) {\r\n");
+	emitVertices(1, 2, 0, 3, "B");
+	gsSrc.append("} else {\r\n");
+	emitVertices(0, 1, 2, 3, "C");
+	gsSrc.append("}\r\n}\r\n");
+	return renderer->CreateInternalShader(RendererShader::ShaderType::kGeometry, gsSrc);
+}
+
+static D3D_PRIMITIVE_TOPOLOGY _GetTopology(Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE mode, D3D12_PRIMITIVE_TOPOLOGY_TYPE &typeOut, bool &isStripOut)
+{
+	using E = Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE;
+	isStripOut = false;
+	switch (mode)
+	{
+	case E::POINTS:
+		typeOut = D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT;
+		return D3D_PRIMITIVE_TOPOLOGY_POINTLIST;
+	case E::LINES:
+		typeOut = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+		return D3D_PRIMITIVE_TOPOLOGY_LINELIST;
+	case E::LINE_STRIP:
+	case E::LINE_LOOP: // converted to a strip by LatteIndices
+		typeOut = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+		isStripOut = true;
+		return D3D_PRIMITIVE_TOPOLOGY_LINESTRIP;
+	case E::LINE_STRIP_ADJACENT:
+		typeOut = D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE;
+		isStripOut = true;
+		return D3D_PRIMITIVE_TOPOLOGY_LINESTRIP_ADJ;
+	case E::TRIANGLES:
+	case E::QUADS: // converted to triangles by LatteIndices
+	case E::QUAD_STRIP:
+	case E::RECTS: // expanded by the rect emulation geometry shader
+		typeOut = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	case E::TRIANGLE_FAN: // D3D12 has no fans, LatteIndices reorders them into a strip (same as for Metal)
+	case E::TRIANGLE_STRIP:
+		typeOut = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		isStripOut = true;
+		return D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;
+	default:
+		cemuLog_logDebug(LogType::Force, "D3D12: Unsupported primitive mode {}", (uint32)mode);
+		typeOut = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+		return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	}
+}
+
+std::atomic<uint64> D3D12PipelineCache::s_pendingScene{0};
+
+D3D12PipelineCache::D3D12PipelineCache(D3D12Renderer *renderer)
+	: m_renderer(renderer)
+{
+	m_compileQueue = D3D12PipelineCompileQueue::Create();
+	// BotWRecomp: host may call OnGameFileOpened explicitly.
+}
+
+D3D12PipelineCache::~D3D12PipelineCache()
+{
+
+	m_compileQueue->Stop();
+	SaveDiskCache();
+	Clear();
+}
+
+void D3D12PipelineCache::SaveDiskCache()
+{
+	if (m_diskCache)
+		m_diskCache->Save();
+}
+
+void D3D12PipelineCache::OpenDiskCaches(uint64 titleId)
+{
+	if (m_diskCacheOpened)
+		return;
+	m_diskCacheOpened = true;
+	D3D12PipelineQuarantine::Open(titleId);
+	bool forceBlobs = false; // CEMU_D3D12_PSO_BLOBS=1 tests the Xbox's blob cache on a PC
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+	char *env = nullptr;
+	size_t envLength = 0;
+	if (_dupenv_s(&env, &envLength, "CEMU_D3D12_PSO_BLOBS") == 0 && env)
+	{
+		forceBlobs = env[0] == '1';
+		free(env);
+	}
+#endif
+	if (m_renderer->IsPipelineLibrarySupported() && !forceBlobs)
+		m_diskCache = D3D12PipelineDiskCache::Open(m_renderer->GetDevice(), ActiveSettings::GetCachePath("shaderCache/driver/d3d12/{:016x}.bin", titleId));
+	if (!m_diskCache && !m_renderer->IsPipelineBlobCacheSupported() && !forceBlobs) // see D3D12Renderer::CreateDevice
+		m_diskCache = D3D12PipelineDiskCache::CreateInMemory();
+	if (!m_diskCache)
+	{
+		const fs::path probeMarker = ActiveSettings::GetCachePath("shaderCache/driver/d3d12/pipeline_blob_test.txt");
+		std::error_code ec;
+		fs::create_directories(probeMarker.parent_path(), ec);
+		m_diskCache = D3D12PipelineDiskCache::OpenBlobs(m_renderer->GetDevice(), ActiveSettings::GetCachePath("shaderCache/driver/d3d12/{:016x}_blobs.bin", titleId), probeMarker);
+	}
+	if (m_diskCache) // recreating pipelines at launch only helps if they can be cached
+		m_recordFile = std::make_unique<D3D12PipelineRecordFile>(ActiveSettings::GetCachePath("shaderCache/transferable/{:016x}_d3d12pipelines.bin", titleId));
+}
+
+bool D3D12PipelineCache::ResolveRecordedShaders(D3D12PipelineCompileJob &job)
+{
+	using Ref = D3D12PipelineCompileJob::ShaderRef;
+	auto resolve = [](const Ref &ref, LatteDecompilerShader *(*find)(uint64, uint64), std::vector<uint8> &bytecode) {
+		if (ref.kind != Ref::kGameShader)
+			return true; // none, or the inline bytecode was restored from the record
+		LatteDecompilerShader *shader = find(ref.baseHash, ref.auxHash);
+		auto *hostShader = shader ? static_cast<RendererShaderD3D12 *>(shader->shader) : nullptr;
+		if (!hostShader)
+			return false;
+		hostShader->PreponeCompilation(true);
+		if (!hostShader->IsValid())
+			return false;
+		const D3D12_SHADER_BYTECODE bc = hostShader->GetBytecode();
+		bytecode.assign((const uint8 *)bc.pShaderBytecode, (const uint8 *)bc.pShaderBytecode + bc.BytecodeLength);
+		return true;
+	};
+	if (!resolve(job.vsRef, LatteSHRC_FindVertexShader, job.vsBytecode) ||
+		!resolve(job.gsRef, LatteSHRC_FindGeometryShader, job.gsBytecode) ||
+		!resolve(job.psRef, LatteSHRC_FindPixelShader, job.psBytecode))
+		return false;
+	job.vsHash = job.vsRef.baseHash;
+	job.psHash = job.psRef.baseHash;
+	job.device = m_renderer->GetDevice();
+	job.rootSignature = m_renderer->GetRootSignature();
+	return true;
+}
+
+uint32 D3D12PipelineCache::BeginPreload(uint64 titleId, bool startupOnly)
+{
+	OpenDiskCaches(titleId);
+	m_preload = {};
+	m_preload.finished = std::make_shared<std::atomic<uint32>>(0);
+	m_preload.start = std::chrono::steady_clock::now();
+	if (!m_recordFile)
+		return 0;
+	const auto &records = m_recordFile->GetRecords();
+	m_preload.order.reserve(records.size());
+	if (startupOnly)
+	{
+		// quick start: the startup set first (what sessions needed right after loading), the rest in the background.
+		// Without a startup set yet, the oldest records stand in for it: the file is in the order pipelines were first
+		// used, so it starts with the title screen and menus
+		constexpr uint32 kFallbackStartupCount = 400;
+		const bool haveStartup = m_recordFile->GetStartupCount() > 0;
+		for (uint32 i = 0; i < (uint32)records.size(); i++)
+			if (haveStartup ? m_recordFile->IsStartup(records[i]) : i < kFallbackStartupCount)
+				m_preload.order.push_back(i);
+		m_preload.limit = m_preload.order.size();
+		for (uint32 i = 0; i < (uint32)records.size(); i++)
+			if (haveStartup ? !m_recordFile->IsStartup(records[i]) : i >= kFallbackStartupCount)
+				m_preload.order.push_back(i);
+		cemuLog_log(LogType::Force, "D3D12: Quick start: creating {} of {} recorded pipelines on the loading screen{}", m_preload.limit, records.size(), haveStartup ? "" : " (no startup set yet, using the oldest)");
+	}
+	else
+	{
+		for (uint32 i = 0; i < (uint32)records.size(); i++)
+			m_preload.order.push_back(i);
+		m_preload.limit = m_preload.order.size();
+	}
+	return (uint32)m_preload.limit;
+}
+
+bool D3D12PipelineCache::UpdatePreload(uint32 &finishedCount, bool blocking)
+{
+	static const std::vector<std::vector<uint8>> s_noRecords;
+	const std::vector<std::vector<uint8>> &records = m_recordFile ? m_recordFile->GetRecords() : s_noRecords;
+	// keep the compile threads busy, but don't queue everything at once: every job holds copies of its bytecode. In the
+	// background (once per game frame) keep it to two at a time, so the emulator keeps its CPU cores (menus would stutter
+	// otherwise) and a pipeline a draw waits for isn't stuck behind preloads
+	const uint32 kMaxInFlight = blocking ? 32 : 2;
+	const auto sliceEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(blocking ? 20 : 2);
+	while (m_preload.next < m_preload.limit && m_preload.submitted - *m_preload.finished < kMaxInFlight && std::chrono::steady_clock::now() < sliceEnd)
+	{
+		auto job = std::make_unique<D3D12PipelineCompileJob>();
+		const bool usable = job->DeserializeRecord(records[m_preload.order[m_preload.next++]]) && ResolveRecordedShaders(*job);
+		if (!usable)
+		{
+			m_preload.skipped++;
+			continue;
+		}
+		job->info = std::make_shared<D3D12PipelineInfo>(); // only lives until the pipeline is in the driver cache
+		job->diskCache = m_diskCache;
+		job->finishedCounter = m_preload.finished;
+		m_preload.submitted++;
+		m_compileQueue->Push(std::move(job));
+	}
+	finishedCount = *m_preload.finished + m_preload.skipped;
+	if (m_preload.next < m_preload.limit || *m_preload.finished < m_preload.submitted)
+	{
+		if (blocking)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1)); // the loading screen calls this in a loop
+		return true;
+	}
+	return false;
+}
+
+void D3D12PipelineCache::ContinuePreloadInBackground()
+{
+	if (m_preload.limit >= m_preload.order.size())
+	{
+		EndPreload(); // the startup set was everything
+		return;
+	}
+	const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_preload.start).count();
+	cemuLog_log(LogType::Force, "D3D12: Quick start: {} pipelines created in {}ms, creating the other {} in the background", m_preload.submitted, ms, m_preload.order.size() - m_preload.limit);
+	m_preload.limit = m_preload.order.size();
+	m_backgroundPreload = true;
+}
+
+void D3D12PipelineCache::BeginStartupWindow()
+{
+	// pipelines first needed within this time after the loading screen join the startup set: the menus, character
+	// select and the start of a race. Real time, so compile waits on a first run only make the window cover a bit less
+	m_startupWindowEnd = std::chrono::steady_clock::now() + std::chrono::seconds(150);
+}
+
+void D3D12PipelineCache::OnGameFileOpened(const char *path)
+{
+	// Mario Kart 8 (and its DLC and mods): every course loads course/<name>/course_model.szs
+	const char *model = strstr(path, "/course_model.szs");
+	const char *course = strstr(path, "/course/");
+	if (!model || !course || course > model)
+		return;
+	uint64 h = 0xcbf29ce484222325ull;
+	for (const char *p = course + 8; p < model; p++)
+		h = (h ^ (uint8)*p) * 0x100000001b3ull;
+	s_pendingScene.store(h ? h : 1);
+	cemuLog_log(LogType::Force, "D3D12: Level load {}: creating its recorded pipelines on the loading screen", std::string(course + 8, model));
+}
+
+void D3D12PipelineCache::TickScenePreload()
+{
+	const uint64 scene = s_pendingScene.exchange(0);
+	if (scene && m_recordFile)
+	{
+		m_scene = scene;
+		m_sceneOrder.clear();
+		m_sceneNext = 0;
+		for (uint64 h : m_recordFile->GetSceneRecords(scene))
+		{
+			const sint32 i = m_recordFile->IndexOf(h);
+			if (i >= 0)
+				m_sceneOrder.push_back((uint32)i);
+		}
+		cemuLog_log(LogType::Force, "D3D12: Level load: {} recorded pipelines", m_sceneOrder.size());
+	}
+	else if (scene)
+		m_scene = scene;
+	// queue them ahead of the background preload, a few ms of shader lookups per frame so the loading screen keeps moving
+	// (pipelines already created this session come from the in-memory driver cache right away)
+	if (m_sceneNext >= m_sceneOrder.size())
+		return;
+	const auto &records = m_recordFile->GetRecords();
+	const auto sliceEnd = std::chrono::steady_clock::now() + std::chrono::milliseconds(6);
+	while (m_sceneNext < m_sceneOrder.size() && std::chrono::steady_clock::now() < sliceEnd)
+	{
+		auto job = std::make_unique<D3D12PipelineCompileJob>();
+		if (!job->DeserializeRecord(records[m_sceneOrder[m_sceneNext++]]) || !ResolveRecordedShaders(*job))
+			continue;
+		job->info = std::make_shared<D3D12PipelineInfo>();
+		job->diskCache = m_diskCache;
+		m_compileQueue->Push(std::move(job), true);
+	}
+	if (m_sceneNext >= m_sceneOrder.size())
+		cemuLog_log(LogType::Force, "D3D12: Level load: all {} pipelines queued", m_sceneOrder.size());
+}
+
+void D3D12PipelineCache::TickBackgroundPreload()
+{
+	TickScenePreload();
+	if (!m_backgroundPreload)
+		return;
+	uint32 finished = 0;
+	if (!UpdatePreload(finished, false))
+	{
+		m_backgroundPreload = false;
+		EndPreload();
+	}
+}
+
+void D3D12PipelineCache::EndPreload()
+{
+	if (!m_recordFile)
+		return;
+	const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - m_preload.start).count();
+	cemuLog_log(LogType::Force, "D3D12: Precompiled {} pipelines in {}ms ({} skipped, their shaders are not in the shader cache)", m_preload.submitted, ms, m_preload.skipped);
+	SaveDiskCache();
+}
+
+void D3D12PipelineCache::Clear()
+{
+	// pipelines still being created are owned by their compile job until it finishes, they were never used by the GPU
+	for (auto &it : m_pipelines)
+		if (it.second->isValid())
+			m_renderer->ReleaseObjectDeferred(it.second->pso);
+	m_pipelines.clear();
+	for (auto &it : m_internalPipelines)
+		m_renderer->ReleaseObjectDeferred(it.second);
+	m_internalPipelines.clear();
+}
+
+uint64 D3D12PipelineCache::CalculateHash(const LatteFetchShader *fetchShader, const LatteDecompilerShader *vertexShader, const LatteDecompilerShader *geometryShader, const LatteDecompilerShader *pixelShader,
+										 const CachedFBOD3D12 *fbo, const LatteContextRegister &lcr, Renderer::INDEX_TYPE indexType)
+{
+	uint32 *ctxRegister = lcr.GetRawView();
+	uint64 h = 0;
+	auto mix = [&h](uint64 v, int rot) {
+		h = std::rotl<uint64>(h, rot);
+		h += v;
+	};
+	// vertex input layout (strides are dynamic in D3D12, only formats/offsets/slots matter)
+	mix(fetchShader->key, 7);
+	mix(fetchShader->getVkPipelineHashFragment(), 7);
+	// shaders. Use the host shader ids, which are unique for the lifetime of the process
+	auto shaderId = [](const LatteDecompilerShader *s) -> uint64 {
+		if (!s || !s->shader)
+			return 0;
+		return static_cast<RendererShaderD3D12 *>(s->shader)->GetUniqueId();
+	};
+	mix(shaderId(vertexShader), 13);
+	mix(shaderId(geometryShader), 13);
+	mix(shaderId(pixelShader), 13);
+	// primitive & index type (strip cut value)
+	mix(ctxRegister[mmVGT_PRIMITIVE_TYPE], 7);
+	mix((uint64)indexType, 3);
+	mix(ctxRegister[mmVGT_STRMOUT_EN], 3);
+	// rasterizer
+	const uint32 polygonCtrl = lcr.PA_SU_SC_MODE_CNTL.getRawValue();
+	mix(polygonCtrl, 7);
+	mix(ctxRegister[Latte::REGADDR::PA_CL_CLIP_CNTL], 7);
+	mix(ctxRegister[Latte::REGADDR::PA_CL_VTE_CNTL], 7); // VPORT_X_OFFSET_ENA affects the rasterization kill workaround
+	if (polygonCtrl & (1 << 11))
+	{
+		// D3D12 depth bias is static pipeline state
+		mix(lcr.PA_SU_POLY_OFFSET_FRONT_SCALE.getRawValue(), 11);
+		mix(lcr.PA_SU_POLY_OFFSET_FRONT_OFFSET.getRawValue(), 11);
+		mix(lcr.PA_SU_POLY_OFFSET_CLAMP.getRawValue(), 11);
+	}
+	// blend
+	const uint32 colorControl = ctxRegister[Latte::REGADDR::CB_COLOR_CONTROL];
+	mix(colorControl, 7);
+	mix(ctxRegister[Latte::REGADDR::CB_TARGET_MASK], 7);
+	const uint32 blendEnableMask = (colorControl >> 8) & 0xFF;
+	for (uint32 i = 0; i < 8; i++)
+	{
+		if (blendEnableMask & (1 << i))
+			mix(ctxRegister[Latte::REGADDR::CB_BLEND0_CONTROL + i], 7);
+	}
+	// depth/stencil (stencil ref is dynamic, masks are static)
+	uint32 depthControl = ctxRegister[Latte::REGADDR::DB_DEPTH_CONTROL];
+	if (depthControl & 1)
+	{
+		mix(ctxRegister[mmDB_STENCILREFMASK] & 0xFFFFFF00, 17);
+		if (depthControl & (1 << 7))
+			mix(ctxRegister[mmDB_STENCILREFMASK_BF] & 0xFFFFFF00, 13);
+	}
+	else
+		depthControl &= 0xFF;
+	mix(depthControl, 17);
+	// render target formats
+	mix(fbo->GetFormatHash(), 17);
+	return h;
+}
+
+// render targets that are probably drawn once (see GetOrCreate): cube maps, texture arrays, and anything up to 256x256
+static bool IsLikelyOneOffTarget(CachedFBOD3D12 *fbo)
+{
+	if (!fbo)
+		return false;
+	if ((sint64)fbo->m_size.x * fbo->m_size.y <= 256 * 256)
+		return true;
+	for (auto &color : fbo->colorBuffer)
+	{
+		if (!color.texture)
+			continue;
+		const Latte::E_DIM dim = color.texture->baseTexture->dim;
+		if (dim == Latte::E_DIM::DIM_CUBEMAP || dim == Latte::E_DIM::DIM_2D_ARRAY || dim == Latte::E_DIM::DIM_3D)
+			return true;
+	}
+	return false;
+}
+
+D3D12PipelineInfo *D3D12PipelineCache::GetOrCreate(const LatteFetchShader *fetchShader, LatteDecompilerShader *vertexShader, LatteDecompilerShader *geometryShader, LatteDecompilerShader *pixelShader,
+												   CachedFBOD3D12 *fbo, const LatteContextRegister &lcr, Renderer::INDEX_TYPE indexType)
+{
+	const uint64 hash = CalculateHash(fetchShader, vertexShader, geometryShader, pixelShader, fbo, lcr, indexType);
+	auto it = m_pipelines.find(hash);
+	if (it != m_pipelines.end())
+		return it->second.get();
+
+	const bool async = GetConfig().async_compile;
+	// Smooth: the game's shaders are compiled on the shader threads as soon as they're created. Compiling one on the
+	// render thread on its first draw (PreponeCompilation) hitched for tens to hundreds of ms on the Xbox when a new
+	// course or effect showed up, so skip the draw until the threads are done (it pops in a few frames later). Nothing
+	// is cached here, the next draw tries again. Small and cube map targets still wait (see IsLikelyOneOffTarget)
+	if (async && GetD3D12Settings().pipelineWait == 0 && !IsLikelyOneOffTarget(fbo))
+	{
+		static D3D12PipelineInfo s_notReady; // isReady stays false: isValid() is false and the draw is skipped
+		bool pending = false;
+		for (LatteDecompilerShader *shader : {vertexShader, geometryShader, pixelShader})
+		{
+			auto *s = shader ? static_cast<RendererShaderD3D12 *>(shader->shader) : nullptr;
+			if (s && !s->IsCompiled())
+			{
+				s->Prioritize();
+				pending = true;
+			}
+		}
+		if (pending)
+			return &s_notReady;
+	}
+	for (LatteDecompilerShader *shader : {vertexShader, geometryShader, pixelShader})
+	{
+		// FXC/DXC are slow for large shaders but never pathological, and the bytecode cache makes later runs instant
+		auto *s = shader ? static_cast<RendererShaderD3D12 *>(shader->shader) : nullptr;
+		if (s)
+			s->PreponeCompilation(true);
+	}
+
+	OpenDiskCaches(CafeSystem::GetForegroundTitleId());
+
+	auto job = std::make_unique<D3D12PipelineCompileJob>();
+	job->info = std::make_shared<D3D12PipelineInfo>();
+	job->diskCache = m_diskCache;
+	D3D12PipelineInfo *result = job->info.get();
+	m_pipelines.emplace(hash, job->info);
+	if (!PreparePipeline(fetchShader, vertexShader, geometryShader, pixelShader, fbo, lcr, indexType, *job))
+	{
+		result->isReady.store(true, std::memory_order_release); // stays invalid, the draws are skipped
+		return result;
+	}
+	if (m_recordFile)
+	{
+		const std::vector<uint8> record = job->SerializeRecord();
+		m_recordFile->Add(record);
+		if (m_scene)
+			m_recordFile->TagScene(m_scene, D3D12PipelineRecordFile::Hash(record));
+		if (std::chrono::steady_clock::now() < m_startupWindowEnd)
+			m_recordFile->MarkStartup(record);
+	}
+	// pipelines of earlier sessions come from the driver cache in a few ms, only count the ones the driver compiles
+	job->countAsNew = true;
+	if (async)
+	{
+		// Skipping draws is only a last resort: games render some things only once, and a skipped draw can leave them
+		// black for good (Mario Kart 8's race scene stayed black when draws were skipped right away). Wait like a synchronous compile would, but give up on the driver
+		// after a while so a pathological compile (minutes on Intel) can't freeze the game.
+		// The waits share a budget of 2 s per 4 s: the Xbox's driver takes ~2.5 s per pipeline, and with many new ones
+		// (a graphic pack, a game update) each draw waiting 2 s froze the game for minutes
+		m_compileQueue->Push(std::move(job), true);
+		const auto now = std::chrono::steady_clock::now();
+		if (now - m_waitWindowStart >= std::chrono::seconds(4))
+		{
+			m_waitWindowStart = now;
+			m_waitedInWindow = std::chrono::milliseconds(0);
+		}
+		// Settings → "New shaders": smooth doesn't wait for draws to the screen sized targets the game redraws every frame
+		// (they pop in), accurate always waits (stutters, never skips), balanced waits within the budget.
+		// Smooth still waits like balanced for small and cube map targets: games render lighting probes, environment
+		// maps and portraits into those once (skipping that left the tops of Mario Kart 8's character select heads
+		// black for good, as the probe was never drawn again)
+		auto timeout = std::max(std::chrono::milliseconds(0), std::chrono::milliseconds(2000) - m_waitedInWindow);
+		const int waitMode = GetD3D12Settings().pipelineWait;
+		if (waitMode == 0 && !IsLikelyOneOffTarget(fbo))
+			timeout = std::chrono::milliseconds(0);
+		else if (waitMode == 2)
+			timeout = std::chrono::hours(1);
+		const bool ready = m_compileQueue->WaitForReady(result, timeout);
+		m_waitedInWindow += std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - now);
+		if (!ready)
+			g_compiling_pipelines_async++;
+	}
+	else
+		job->Run();
+	return result;
+}
+
+bool D3D12PipelineCache::PreparePipeline(const LatteFetchShader *fetchShader, LatteDecompilerShader *vertexShader, LatteDecompilerShader *geometryShader, LatteDecompilerShader *pixelShader,
+										 CachedFBOD3D12 *fbo, const LatteContextRegister &lcr, Renderer::INDEX_TYPE indexType, D3D12PipelineCompileJob &job)
+{
+	D3D12PipelineInfo *info = job.info.get();
+	const auto &support = m_renderer->GetFormatSupport();
+
+	auto *vsHost = vertexShader ? static_cast<RendererShaderD3D12 *>(vertexShader->shader) : nullptr;
+	auto *gsHost = geometryShader ? static_cast<RendererShaderD3D12 *>(geometryShader->shader) : nullptr;
+	auto *psHost = pixelShader ? static_cast<RendererShaderD3D12 *>(pixelShader->shader) : nullptr;
+	if (!vsHost || !vsHost->IsValid() || (gsHost && !gsHost->IsValid()) || (psHost && !psHost->IsValid()))
+	{
+		cemuLog_logDebug(LogType::Force, "D3D12: Pipeline creation skipped due to invalid shader(s)");
+		return false;
+	}
+
+	const auto primitiveMode = lcr.VGT_PRIMITIVE_TYPE.get_PRIMITIVE_MODE();
+	const bool isPrimitiveRect = primitiveMode == Latte::LATTE_VGT_PRIMITIVE_TYPE::E_PRIMITIVE_TYPE::RECTS;
+	if (isPrimitiveRect && !gsHost)
+	{
+		info->rectEmulationGS.reset(_GenerateRectEmulationGS(m_renderer, vertexShader, lcr));
+		if (!info->rectEmulationGS->IsValid())
+			return false;
+		gsHost = info->rectEmulationGS.get();
+	}
+
+	// the job owns copies of everything the description points to (see D3D12PipelineCompileJob::Run)
+	job.device = m_renderer->GetDevice();
+	job.rootSignature = m_renderer->GetRootSignature();
+	job.vsHash = vertexShader ? vertexShader->baseHash : 0;
+	job.psHash = pixelShader ? pixelShader->baseHash : 0;
+	auto copyBytecode = [](RendererShaderD3D12 *s, std::vector<uint8> &out) {
+		const D3D12_SHADER_BYTECODE bc = s->GetBytecode();
+		out.assign((const uint8 *)bc.pShaderBytecode, (const uint8 *)bc.pShaderBytecode + bc.BytecodeLength);
+	};
+	copyBytecode(vsHost, job.vsBytecode);
+	if (gsHost)
+		copyBytecode(gsHost, job.gsBytecode);
+	using Ref = D3D12PipelineCompileJob::ShaderRef;
+	job.vsRef = {Ref::kGameShader, vertexShader->baseHash, vertexShader->auxHash};
+	if (info->rectEmulationGS)
+		job.gsRef.kind = Ref::kInline;
+	else if (geometryShader)
+		job.gsRef = {Ref::kGameShader, geometryShader->baseHash, geometryShader->auxHash};
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC &desc = job.desc;
+
+	// --- input layout ---
+	std::vector<D3D12_INPUT_ELEMENT_DESC> &inputElements = job.inputElements;
+	inputElements.reserve(16);
+	for (auto &bufferGroup : fetchShader->bufferGroups)
+	{
+		for (sint32 j = 0; j < bufferGroup.attribCount; ++j)
+		{
+			auto &attr = bufferGroup.attrib[j];
+			sint32 location = vertexShader->resourceMapping.attributeMapping[attr.semanticId];
+			if (location < 0)
+				continue;
+			D3D12_INPUT_ELEMENT_DESC e{};
+			// the HLSL translation (and spirv_to_dxil) name vertex inputs TEXCOORD<location>
+			e.SemanticName = "TEXCOORD";
+			e.SemanticIndex = (UINT)location;
+			e.Format = D3D12Format::GetVertexFormat(attr.format);
+			e.InputSlot = attr.attributeBufferIndex;
+			e.AlignedByteOffset = attr.offset;
+			if (attr.fetchType == LatteConst::VertexFetchType2::INSTANCE_DATA)
+			{
+				e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_INSTANCE_DATA;
+				e.InstanceDataStepRate = (UINT)std::max(1, attr.aluDivisor); // D3D12 supports arbitrary divisors natively
+			}
+			else
+			{
+				e.InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA;
+				e.InstanceDataStepRate = 0;
+			}
+			inputElements.push_back(e);
+		}
+	}
+
+	// --- input assembly ---
+	D3D12_PRIMITIVE_TOPOLOGY_TYPE topologyType;
+	bool isStrip;
+	info->topology = _GetTopology(primitiveMode, topologyType, isStrip);
+	desc.PrimitiveTopologyType = topologyType;
+	desc.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED;
+	if (isStrip)
+	{
+		if (indexType == Renderer::INDEX_TYPE::U16)
+			desc.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFF;
+		else if (indexType == Renderer::INDEX_TYPE::U32)
+			desc.IBStripCutValue = D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_0xFFFFFFFF;
+	}
+
+	// --- rasterizer ---
+	const auto &polygonControlReg = lcr.PA_SU_SC_MODE_CNTL;
+	const auto frontFace = polygonControlReg.get_FRONT_FACE();
+	uint32 cullFront = polygonControlReg.get_CULL_FRONT();
+	uint32 cullBack = polygonControlReg.get_CULL_BACK();
+	const bool polyOffsetFrontEnable = polygonControlReg.get_OFFSET_FRONT_ENABLED();
+	if (isPrimitiveRect)
+	{
+		if (frontFace == Latte::LATTE_PA_SU_SC_MODE_CNTL::E_FRONTFACE::CW)
+			cullFront = cullBack;
+		else
+			cullBack = cullFront;
+	}
+	bool rasterizerDiscard = lcr.PA_CL_CLIP_CNTL.get_DX_RASTERIZATION_KILL();
+	if (!lcr.PA_CL_VTE_CNTL.get_VPORT_X_OFFSET_ENA())
+		rasterizerDiscard = false; // GX2SetSpecialState(0, true) workaround, same as Vulkan
+	// D3D12 can't cull front and back faces at the same time. Both that and rasterizer discard are emulated by
+	// dropping the pixel shader and disabling all render target, depth and stencil writes
+	const bool discardAllFragments = rasterizerDiscard || (cullFront && cullBack);
+
+	desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+	if (cullFront && !cullBack)
+		desc.RasterizerState.CullMode = D3D12_CULL_MODE_FRONT;
+	else if (cullBack && !cullFront)
+		desc.RasterizerState.CullMode = D3D12_CULL_MODE_BACK;
+	else
+		desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	// Cemu's Vulkan backend uses a Y-flipped viewport and D3D12 uses the native orientation, both result in the same
+	// framebuffer positions and therefore the same visual winding
+	desc.RasterizerState.FrontCounterClockwise = (frontFace == Latte::LATTE_PA_SU_SC_MODE_CNTL::E_FRONTFACE::CCW) ? TRUE : FALSE;
+	if (polyOffsetFrontEnable)
+	{
+		const float frontScale = lcr.PA_SU_POLY_OFFSET_FRONT_SCALE.get_SCALE() / 16.0f;
+		const float frontOffset = lcr.PA_SU_POLY_OFFSET_FRONT_OFFSET.get_OFFSET();
+		const float offsetClamp = lcr.PA_SU_POLY_OFFSET_CLAMP.get_CLAMP();
+		desc.RasterizerState.DepthBias = (INT)std::lround(frontOffset);
+		desc.RasterizerState.SlopeScaledDepthBias = frontScale;
+		desc.RasterizerState.DepthBiasClamp = offsetClamp;
+	}
+	const bool zClipEnable = lcr.PA_CL_CLIP_CNTL.get_ZCLIP_FAR_DISABLE() == false;
+	desc.RasterizerState.DepthClipEnable = zClipEnable ? TRUE : FALSE;
+	desc.RasterizerState.MultisampleEnable = FALSE;
+	desc.RasterizerState.AntialiasedLineEnable = FALSE;
+	desc.RasterizerState.ForcedSampleCount = 0;
+	desc.RasterizerState.ConservativeRaster = D3D12_CONSERVATIVE_RASTERIZATION_MODE_OFF;
+
+	if (!discardAllFragments && psHost)
+	{
+		copyBytecode(psHost, job.psBytecode);
+		job.psRef = {Ref::kGameShader, pixelShader->baseHash, pixelShader->auxHash};
+	}
+
+	// --- blend ---
+	const Latte::LATTE_CB_COLOR_CONTROL &colorControlReg = lcr.CB_COLOR_CONTROL;
+	const uint32 blendEnableMask = colorControlReg.get_BLEND_MASK();
+	const uint32 renderTargetMask = lcr.CB_TARGET_MASK.get_MASK();
+	const auto logicOp = colorControlReg.get_ROP();
+	bool useLogicOp = false;
+	D3D12_LOGIC_OP d3dLogicOp = D3D12_LOGIC_OP_COPY;
+	bool clearViaBlend = false;
+	if (logicOp != Latte::LATTE_CB_COLOR_CONTROL::E_LOGICOP::COPY)
+	{
+		switch (logicOp)
+		{
+		case Latte::LATTE_CB_COLOR_CONTROL::E_LOGICOP::SET:
+			d3dLogicOp = D3D12_LOGIC_OP_SET;
+			break;
+		case Latte::LATTE_CB_COLOR_CONTROL::E_LOGICOP::CLEAR:
+			d3dLogicOp = D3D12_LOGIC_OP_CLEAR;
+			break;
+		case Latte::LATTE_CB_COLOR_CONTROL::E_LOGICOP::OR:
+			d3dLogicOp = D3D12_LOGIC_OP_OR;
+			break;
+		default:
+			cemu_assert_unimplemented();
+			break;
+		}
+		// D3D12 logic ops only apply to UINT render targets
+		bool allInteger = fbo->GetNumRTVs() > 0;
+		for (uint32 i = 0; i < fbo->GetNumRTVs(); i++)
+			if (fbo->GetRTVFormat(i) != DXGI_FORMAT_UNKNOWN && !fbo->IsColorSlotInteger(i))
+				allInteger = false;
+		if (support.logicOp && allInteger)
+			useLogicOp = true;
+		else if (logicOp == Latte::LATTE_CB_COLOR_CONTROL::E_LOGICOP::CLEAR)
+			clearViaBlend = true; // src*0 + dst*0
+		else
+		{
+			// logged in release builds too: GPUs without logic op support (Xbox) render these draws differently
+			static std::atomic<uint32> s_loggedOps{0};
+			const uint32 bit = 1u << ((uint32)logicOp & 31);
+			if ((s_loggedOps.fetch_or(bit) & bit) == 0)
+				cemuLog_log(LogType::Force, "D3D12: Logic op {} is not supported for the bound render targets (GPU logic op support: {}), the draw ignores it", (uint32)logicOp, support.logicOp);
+		}
+	}
+
+	desc.BlendState.AlphaToCoverageEnable = FALSE;
+	desc.BlendState.IndependentBlendEnable = useLogicOp ? FALSE : TRUE;
+	bool usesConstantColor = false;
+	bool usesConstantAlpha = false;
+	bool usesConstantInAlphaSlot = false;
+	for (uint32 i = 0; i < 8; i++)
+	{
+		auto &rt = desc.BlendState.RenderTarget[i];
+		rt.RenderTargetWriteMask = discardAllFragments ? 0 : (UINT8)((renderTargetMask >> (i * 4)) & 0xF);
+		if (fbo->GetRTVFormat(i) == DXGI_FORMAT_UNKNOWN)
+			rt.RenderTargetWriteMask = 0;
+		rt.LogicOp = D3D12_LOGIC_OP_NOOP;
+		rt.SrcBlend = D3D12_BLEND_ONE;
+		rt.DestBlend = D3D12_BLEND_ZERO;
+		rt.BlendOp = D3D12_BLEND_OP_ADD;
+		rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+		rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+		rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+		if (useLogicOp)
+		{
+			if (i == 0)
+			{
+				rt.LogicOpEnable = TRUE;
+				rt.LogicOp = d3dLogicOp;
+			}
+			continue;
+		}
+		if (clearViaBlend)
+		{
+			rt.BlendEnable = TRUE;
+			rt.SrcBlend = rt.DestBlend = rt.SrcBlendAlpha = rt.DestBlendAlpha = D3D12_BLEND_ZERO;
+			continue;
+		}
+		if ((blendEnableMask & (1 << i)) == 0 || fbo->IsColorSlotInteger(i) || fbo->GetRTVFormat(i) == DXGI_FORMAT_UNKNOWN)
+			continue;
+		const auto &blendControlReg = lcr.CB_BLENDN_CONTROL[i];
+		rt.BlendEnable = TRUE;
+		auto colorSrc = blendControlReg.get_COLOR_SRCBLEND();
+		auto colorDst = blendControlReg.get_COLOR_DSTBLEND();
+		auto colorOp = blendControlReg.get_COLOR_COMB_FCN();
+		auto alphaSrc = colorSrc;
+		auto alphaDst = colorDst;
+		auto alphaOp = colorOp;
+		if (blendControlReg.get_SEPARATE_ALPHA_BLEND())
+		{
+			alphaSrc = blendControlReg.get_ALPHA_SRCBLEND();
+			alphaDst = blendControlReg.get_ALPHA_DSTBLEND();
+			alphaOp = blendControlReg.get_ALPHA_COMB_FCN();
+		}
+		rt.SrcBlend = D3D12Format::GetBlendFactor(colorSrc, false);
+		rt.DestBlend = D3D12Format::GetBlendFactor(colorDst, false);
+		rt.BlendOp = D3D12Format::GetBlendOp(colorOp);
+		rt.SrcBlendAlpha = D3D12Format::GetBlendFactor(alphaSrc, true);
+		rt.DestBlendAlpha = D3D12Format::GetBlendFactor(alphaDst, true);
+		rt.BlendOpAlpha = D3D12Format::GetBlendOp(alphaOp);
+		// in the color slots CONSTANT_COLOR and CONSTANT_ALPHA need different blend factors. In the alpha slots both read
+		// the alpha component of the blend factor, so they never conflict
+		for (auto f : {colorSrc, colorDst})
+		{
+			if (D3D12Format::IsBlendFactorConstantAlpha(f))
+				usesConstantAlpha = true;
+			else if (D3D12Format::IsBlendFactorConstant(f))
+				usesConstantColor = true;
+		}
+		for (auto f : {alphaSrc, alphaDst})
+		{
+			if (D3D12Format::IsBlendFactorConstant(f))
+				usesConstantInAlphaSlot = true;
+		}
+	}
+	info->usesBlendConstants = usesConstantColor || usesConstantAlpha || usesConstantInAlphaSlot;
+	info->blendConstantAlphaOnly = usesConstantAlpha && !usesConstantColor;
+	if (usesConstantAlpha && usesConstantColor)
+		cemuLog_logDebugOnce(LogType::Force, "D3D12: Pipeline mixes constant color and constant alpha blend factors, results may be inaccurate");
+	desc.SampleMask = 0xFFFFFFFF;
+
+	// --- depth/stencil ---
+	const auto &depthControl = lcr.DB_DEPTH_CONTROL;
+	const bool hasDSV = fbo->HasDSV();
+	auto &ds = desc.DepthStencilState;
+	ds.DepthEnable = (hasDSV && !discardAllFragments && depthControl.get_Z_ENABLE()) ? TRUE : FALSE;
+	ds.DepthWriteMask = depthControl.get_Z_WRITE_ENABLE() ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+	ds.DepthFunc = D3D12Format::GetCompareFunc((uint32)depthControl.get_Z_FUNC());
+	const bool stencilEnable = hasDSV && !discardAllFragments && depthControl.get_STENCIL_ENABLE() && fbo->GetDepthView() && fbo->GetDSVFormat() != DXGI_FORMAT_D32_FLOAT && fbo->GetDSVFormat() != DXGI_FORMAT_D16_UNORM;
+	ds.StencilEnable = stencilEnable ? TRUE : FALSE;
+	info->usesStencil = stencilEnable;
+	if (stencilEnable)
+	{
+		const auto &refMaskF = lcr.DB_STENCILREFMASK;
+		const auto &refMaskB = lcr.DB_STENCILREFMASK_BF;
+		ds.StencilReadMask = (UINT8)refMaskF.get_STENCILMASK_F();
+		ds.StencilWriteMask = (UINT8)refMaskF.get_STENCILWRITEMASK_F();
+		info->stencilRef = refMaskF.get_STENCILREF_F();
+		ds.FrontFace.StencilFunc = D3D12Format::GetCompareFunc((uint32)depthControl.get_STENCIL_FUNC_F());
+		ds.FrontFace.StencilPassOp = D3D12Format::GetStencilOp((uint32)depthControl.get_STENCIL_ZPASS_F());
+		ds.FrontFace.StencilDepthFailOp = D3D12Format::GetStencilOp((uint32)depthControl.get_STENCIL_ZFAIL_F());
+		ds.FrontFace.StencilFailOp = D3D12Format::GetStencilOp((uint32)depthControl.get_STENCIL_FAIL_F());
+		if (depthControl.get_BACK_STENCIL_ENABLE())
+		{
+			ds.BackFace.StencilFunc = D3D12Format::GetCompareFunc((uint32)depthControl.get_STENCIL_FUNC_B());
+			ds.BackFace.StencilPassOp = D3D12Format::GetStencilOp((uint32)depthControl.get_STENCIL_ZPASS_B());
+			ds.BackFace.StencilDepthFailOp = D3D12Format::GetStencilOp((uint32)depthControl.get_STENCIL_ZFAIL_B());
+			ds.BackFace.StencilFailOp = D3D12Format::GetStencilOp((uint32)depthControl.get_STENCIL_FAIL_B());
+			// without the Agility SDK D3D12 has one set of masks and one reference value for both faces
+			if (refMaskB.get_STENCILMASK_B() != refMaskF.get_STENCILMASK_F() || refMaskB.get_STENCILWRITEMASK_B() != refMaskF.get_STENCILWRITEMASK_F() || refMaskB.get_STENCILREF_B() != refMaskF.get_STENCILREF_F())
+				cemuLog_logDebugOnce(LogType::Force, "D3D12: Separate back face stencil masks/reference are not supported, using front face values");
+		}
+		else
+			ds.BackFace = ds.FrontFace;
+	}
+	else
+	{
+		ds.StencilReadMask = 0xFF;
+		ds.StencilWriteMask = 0xFF;
+		ds.FrontFace = {D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_STENCIL_OP_KEEP, D3D12_COMPARISON_FUNC_ALWAYS};
+		ds.BackFace = ds.FrontFace;
+	}
+
+	// --- render targets ---
+	desc.NumRenderTargets = fbo->GetNumRTVs();
+	for (uint32 i = 0; i < 8; i++)
+		desc.RTVFormats[i] = (i < desc.NumRenderTargets) ? fbo->GetRTVFormat(i) : DXGI_FORMAT_UNKNOWN;
+	desc.DSVFormat = hasDSV ? fbo->GetDSVFormat() : DXGI_FORMAT_UNKNOWN;
+	desc.SampleDesc.Count = 1;
+	desc.SampleDesc.Quality = 0;
+	desc.NodeMask = 0;
+	desc.Flags = D3D12_PIPELINE_STATE_FLAG_NONE;
+	return true;
+}
+
+ID3D12PipelineState *D3D12PipelineCache::GetInternalPipeline(RendererShaderD3D12 *vs, RendererShaderD3D12 *ps, DXGI_FORMAT rtvFormat, DXGI_FORMAT dsvFormat, bool depthWrite, bool alphaBlend)
+{
+	uint64 key = vs->GetUniqueId();
+	key = key * 0x9E3779B97F4A7C15ull + ps->GetUniqueId();
+	key = key * 0x9E3779B97F4A7C15ull + (uint64)rtvFormat;
+	key = key * 0x9E3779B97F4A7C15ull + (uint64)dsvFormat;
+	key = key * 0x9E3779B97F4A7C15ull + (depthWrite ? 1 : 0) + (alphaBlend ? 2 : 0);
+	auto it = m_internalPipelines.find(key);
+	if (it != m_internalPipelines.end())
+		return it->second.Get();
+
+	vs->PreponeCompilation(true);
+	ps->PreponeCompilation(true);
+	if (!vs->IsValid() || !ps->IsValid())
+		return nullptr;
+
+	D3D12_GRAPHICS_PIPELINE_STATE_DESC desc{};
+	desc.pRootSignature = m_renderer->GetRootSignature();
+	desc.VS = vs->GetBytecode();
+	desc.PS = ps->GetBytecode();
+	desc.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+	desc.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
+	desc.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
+	desc.RasterizerState.DepthClipEnable = TRUE;
+	auto &rt = desc.BlendState.RenderTarget[0];
+	rt.RenderTargetWriteMask = (rtvFormat != DXGI_FORMAT_UNKNOWN) ? D3D12_COLOR_WRITE_ENABLE_ALL : 0;
+	rt.BlendEnable = alphaBlend ? TRUE : FALSE;
+	rt.SrcBlend = D3D12_BLEND_SRC_ALPHA;
+	rt.DestBlend = D3D12_BLEND_INV_SRC_ALPHA;
+	rt.BlendOp = D3D12_BLEND_OP_ADD;
+	rt.SrcBlendAlpha = D3D12_BLEND_ONE;
+	rt.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+	rt.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+	rt.LogicOp = D3D12_LOGIC_OP_NOOP;
+	desc.SampleMask = 0xFFFFFFFF;
+	desc.DepthStencilState.DepthEnable = depthWrite ? TRUE : FALSE;
+	desc.DepthStencilState.DepthWriteMask = depthWrite ? D3D12_DEPTH_WRITE_MASK_ALL : D3D12_DEPTH_WRITE_MASK_ZERO;
+	desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_ALWAYS;
+	desc.NumRenderTargets = (rtvFormat != DXGI_FORMAT_UNKNOWN) ? 1 : 0;
+	desc.RTVFormats[0] = rtvFormat;
+	desc.DSVFormat = dsvFormat;
+	desc.SampleDesc.Count = 1;
+
+	ComPtr<ID3D12PipelineState> pso;
+	HRESULT hr = m_renderer->GetDevice()->CreateGraphicsPipelineState(&desc, IID_PPV_ARGS(&pso));
+	D3D12_Checkpoint(m_renderer->GetDevice(), "internal pipeline created");
+	if (FAILED(hr))
+	{
+		cemuLog_log(LogType::Force, "D3D12: Failed to create internal pipeline: {}", D3D12_HResultToString(hr));
+		return nullptr;
+	}
+	ID3D12PipelineState *result = pso.Get();
+	m_internalPipelines.emplace(key, std::move(pso));
+	return result;
+}
+
+#endif // ENABLE_D3D12

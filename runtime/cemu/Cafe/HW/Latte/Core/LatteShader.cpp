@@ -349,7 +349,7 @@ void LatteShader_CreateRendererShader(LatteDecompilerShader* shader, bool compil
 	// check if a custom shader is present
 	std::string shaderSrc;
 
-	const std::string* customShaderSrc = GraphicPack2::FindCustomShaderSource(shader->baseHash, shader->auxHash, gpShaderType, g_renderer->GetType() == RendererAPI::Vulkan, g_renderer->GetType() == RendererAPI::Metal);
+	const std::string* customShaderSrc = GraphicPack2::FindCustomShaderSource(shader->baseHash, shader->auxHash, gpShaderType, RendererUsesVulkanGLSL(g_renderer->GetType()), g_renderer->GetType() == RendererAPI::Metal);
 	if (customShaderSrc)
 	{
 		shaderSrc.assign(*customShaderSrc);
@@ -579,6 +579,9 @@ void LatteSHRC_UpdateGSBaseHash(uint8* geometryShaderPtr, uint32 geometryShaderS
 	uint64 gsHash = gsHash1 + gsHash2;
 	gsHash += (uint64)_activeVertexShader->ringParameterCount;
 	gsHash += (LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] ? 21 : 0);
+	// BotWRecomp: D3D12 stage signatures depend on pixel shader imports.
+	if (g_renderer->GetType() == RendererAPI::D3D12)
+		gsHash += _activePSImportTable.key;
 	_shaderBaseHash_gs = gsHash;
 }
 
@@ -750,6 +753,7 @@ LatteDecompilerShader* LatteShader_CreateShaderFromDecompilerOutput(LatteDecompi
 	case RendererAPI::OpenGL:
 		shader->resourceMapping = decompilerOutput.resourceMappingGL;
 		break;
+	case RendererAPI::D3D12:
 	case RendererAPI::Vulkan:
 		shader->resourceMapping = decompilerOutput.resourceMappingVK;
 		break;
@@ -795,6 +799,8 @@ LatteDecompilerShader* LatteShader_CreateShaderFromDecompilerOutput(LatteDecompi
 void LatteShader_GetDecompilerOptions(LatteDecompilerOptions& options, LatteConst::ShaderType shaderType, bool geometryShaderEnabled)
 {
 	options.usesGeometryShader = geometryShaderEnabled;
+	options.declareAllPSInputs = g_renderer->GetType() == RendererAPI::D3D12;
+	options.flattenV2GInterface = g_renderer->GetType() == RendererAPI::D3D12;
 	options.spirvInstrinsics.hasRoundingModeRTEFloat32 = false;
 	options.useTFViaSSBO = g_renderer->UseTFViaSSBO();
 #ifdef ENABLE_VULKAN
