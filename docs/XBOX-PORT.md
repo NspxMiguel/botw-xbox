@@ -25,3 +25,8 @@ game returns to the menu (same gesture as NXbox).
   archives under content/, voice/sound archives). Players supply the mods; we ship none.
 - Graphic packs (Cemu format) and file-replacement mods load from the mods folder chosen in the
   launcher; later packs override earlier ones; each applied file is logged once.
+- The launcher's **Mods** screen manages them: lists everything in the mods folder (translation,
+  dubbing, FPS++, resolution packs), toggles each one, reorders them (lower = higher priority),
+  imports from a USB drive, and saves the choice; auto-launch boots with the saved mod set.
+  W3 (launcher UI) consumes W5 (graphic packs) and W6 (file overlay) through one small
+  `ModCatalog` interface: list(), setEnabled(id, bool), move(id, index), save().
