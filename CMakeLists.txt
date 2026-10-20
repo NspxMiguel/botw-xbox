@@ -48,6 +48,16 @@ target_compile_options(cemu_gpu PRIVATE -w -O2 -g1 "SHELL:-include Common/precom
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
   ${CMAKE_SOURCE_DIR}/runtime/src/*.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/*.mm)
+# ---- W1 platform sources (owned by W1) -------------------------------------------------------
+# Keep test mains and the other platform's implementation out of the application.
+list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/platform/")
+list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/clock.cpp)
+if(WIN32 OR BOTW_PLATFORM STREQUAL "win32" OR BOTW_PLATFORM STREQUAL "uwp")
+  list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/win32/platform.cpp)
+else()
+  list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/apple/platform.cpp)
+endif()
+# ---- end W1 platform sources ---------------------------------------------------------------
 add_executable(BotWRecomp ${RUNTIME_SOURCES} $<TARGET_OBJECTS:guest> $<TARGET_OBJECTS:cemu_gpu>)
 target_include_directories(BotWRecomp PRIVATE runtime/include runtime/src generated)
 target_compile_options(BotWRecomp PRIVATE -Wall -Wno-unused-function -Wno-unused-variable -fwrapv -mcpu=apple-m1

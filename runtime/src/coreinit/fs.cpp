@@ -1,10 +1,20 @@
 // coreinit FS (synchronous API) and nn_save. Guest paths: /vol/content -> <game>/content,
 // /vol/code -> <game>/code, /vol/save -> <user>/save. Handles index a host-side table.
-#include <dirent.h>
+#include "platform/logic.h"
 #include <errno.h>
+#include <filesystem>
 #include <stdio.h>
 #include <sys/stat.h>
-#include <unistd.h>
+#if defined(_WIN32)
+#include <io.h>
+#define fstat _fstat64
+#define stat _stat64
+#define fileno _fileno
+#define fseeko _fseeki64
+#ifndef S_ISDIR
+#define S_ISDIR(mode) (((mode) & _S_IFMT) == _S_IFDIR)
+#endif
+#endif
 
 #include <mutex>
 #include <string>
@@ -13,12 +23,31 @@
 #include "hle.h"
 #include "os.h"
 
+#if defined(__APPLE__)
 #include <TargetConditionals.h>
+#endif
 #if TARGET_OS_IOS  // iOS port: case-insensitive lookup in the game folder (ios/src/fs_case_ios.cpp)
 std::string botw_ios_fix_case(const std::string& host);
 #endif
 
 namespace {
+std::filesystem::path utf8_path(const std::string &text) {
+  return std::filesystem::path(std::u8string(
+      reinterpret_cast<const char8_t *>(text.data()), text.size()));
+}
+#if defined(_WIN32)
+int path_stat(const char *path, struct stat *out) {
+  return _wstat64(utf8_path(path).c_str(), out);
+}
+FILE *path_open(const char *path, const char *mode) {
+  return _wfopen(utf8_path(path).c_str(), utf8_path(mode).c_str());
+}
+#else
+int path_stat(const char *path, struct stat *out) { return stat(path, out); }
+FILE *path_open(const char *path, const char *mode) {
+  return fopen(path, mode);
+}
+#endif
 enum : int32_t {
     FS_OK = 0, FS_END = -2, FS_MAX = -3, FS_EXISTS = -5, FS_NOT_FOUND = -6, FS_NOT_FILE = -7, FS_NOT_DIR = -8,
     FS_PERMISSION = -10, FS_FATAL = -0x400,
@@ -27,7 +56,7 @@ constexpr uint32_t FLAG_DIR = 0x80000000u, FLAG_FILE = 0x01000000u;
 
 struct Handle {
     FILE* f = nullptr;
-    DIR* d = nullptr;
+    std::filesystem::directory_iterator *d = nullptr;
     std::string host;
 };
 std::mutex g_fs_lock;
@@ -40,27 +69,15 @@ std::string host_path(std::string p) { return botw_ios_fix_case(host_path_exact(
 #define host_path host_path_exact
 #endif
 std::string host_path(std::string p) {
-    if (p.empty() || p[0] != '/') p = g_cwd + "/" + p;
-    // normalise duplicate slashes
-    std::string n;
-    for (char ch : p)
-        if (!(ch == '/' && !n.empty() && n.back() == '/')) n += ch;
-    auto starts = [&](const char* pre) { return n.compare(0, strlen(pre), pre) == 0; };
-    if (starts("/vol/content")) return g_game_root + "/content" + n.substr(12);
-    if (starts("/vol/code")) return g_game_root + "/code" + n.substr(9);
-    if (starts("/vol/meta")) return g_game_root + "/meta" + n.substr(9);
-    if (starts("/vol/save")) return g_user_root + "/save" + n.substr(9);
-    if (starts("/vol/aoc")) return g_game_root + "/aoc" + n.substr(8);
-    return g_user_root + "/unknown_volume" + n;
+  return platform::guest_path(std::move(p), g_cwd, {g_game_root, g_user_root});
 }
 #if TARGET_OS_IOS
 #undef host_path
 #endif
 
 void mkdirs(const std::string& p) {
-    for (size_t i = 1; i < p.size(); i++)
-        if (p[i] == '/') mkdir(p.substr(0, i).c_str(), 0755);
-    mkdir(p.c_str(), 0755);
+  std::error_code error;
+  std::filesystem::create_directories(utf8_path(p), error);
 }
 
 uint32_t add_handle(Handle h) {
@@ -95,7 +112,7 @@ int32_t fail(PPCContext* c, int32_t err, uint32_t mask, const char* what, const 
 int32_t open_file(PPCContext* c, const std::string& gpath, const char* mode, uint32_t handle_out, uint32_t mask) {
     std::string hp = host_path(gpath);
     struct stat st;
-    bool exists = stat(hp.c_str(), &st) == 0;
+    bool exists = path_stat(hp.c_str(), &st) == 0;
     if (exists && S_ISDIR(st.st_mode)) return fail(c, FS_NOT_FILE, mask, "open", gpath);
     std::string m = mode;
     if (!exists && m.find('r') != std::string::npos && m.find('+') == std::string::npos)
@@ -108,7 +125,7 @@ int32_t open_file(PPCContext* c, const std::string& gpath, const char* mode, uin
     for (char ch : m)
         if (ch != 'b') hm += ch;
     hm += 'b';
-    FILE* f = fopen(hp.c_str(), hm.c_str());
+    FILE *f = path_open(hp.c_str(), hm.c_str());
     if (!f) return fail(c, errno == ENOENT ? FS_NOT_FOUND : FS_PERMISSION, mask, "open", gpath);
     std::lock_guard<std::mutex> l(g_fs_lock);
     uint32_t h = add_handle({f, nullptr, hp});
@@ -119,7 +136,12 @@ int32_t open_file(PPCContext* c, const std::string& gpath, const char* mode, uin
 
 int32_t open_dir(PPCContext* c, const std::string& gpath, uint32_t out, uint32_t mask) {
     std::string hp = host_path(gpath);
-    DIR* d = opendir(hp.c_str());
+    std::error_code error;
+    auto *d = new std::filesystem::directory_iterator(utf8_path(hp), error);
+    if (error) {
+      delete d;
+      d = nullptr;
+    }
     if (!d) return fail(c, FS_NOT_FOUND, mask, "opendir", gpath);
     std::lock_guard<std::mutex> l(g_fs_lock);
     mem::w32(out, add_handle({nullptr, d, hp}));
@@ -128,7 +150,8 @@ int32_t open_dir(PPCContext* c, const std::string& gpath, uint32_t out, uint32_t
 
 int32_t get_stat(PPCContext* c, const std::string& gpath, uint32_t out, uint32_t mask) {
     struct stat st;
-    if (stat(host_path(gpath).c_str(), &st) != 0) return fail(c, FS_NOT_FOUND, mask, "stat", gpath);
+    if (path_stat(host_path(gpath).c_str(), &st) != 0)
+      return fail(c, FS_NOT_FOUND, mask, "stat", gpath);
     fill_stat(out, st);
     return FS_OK;
 }
@@ -230,37 +253,45 @@ HLE_EXPORT(coreinit, FSReadDir) {
         return;
     }
     for (;;) {
-        struct dirent* e = readdir(h->d);
-        if (!e) {
-            RET(FS_END);
-            return;
-        }
-        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..") || e->d_name[0] == '.') continue;
-        struct stat st;
-        std::string full = h->host + "/" + e->d_name;
-        if (stat(full.c_str(), &st) != 0) continue;
-        fill_stat(out, st);
-        memset(mem::host(out + 0x64), 0, 0x80);
-        strncpy((char*)mem::host(out + 0x64), e->d_name, 0x7F);
-        RET(0);
+      if (*h->d == std::filesystem::directory_iterator{}) {
+        RET(FS_END);
         return;
+      }
+      auto entry = **h->d;
+      std::error_code error;
+      h->d->increment(error);
+      if (error)
+        *h->d = std::filesystem::directory_iterator{};
+      auto utf8 = entry.path().filename().u8string();
+      std::string name(utf8.begin(), utf8.end());
+      if (name.empty() || name[0] == '.')
+        continue;
+      struct stat st;
+      std::string full = h->host + "/" + name;
+      if (path_stat(full.c_str(), &st) != 0)
+        continue;
+      fill_stat(out, st);
+      memset(mem::host(out + 0x64), 0, 0x80);
+      strncpy((char *)mem::host(out + 0x64), name.c_str(), 0x7F);
+      RET(0);
+      return;
     }
 }
 HLE_EXPORT(coreinit, FSCloseDir) {
     std::lock_guard<std::mutex> l(g_fs_lock);
     Handle* h = get(ARG(2));
     if (h && h->d) {
-        closedir(h->d);
-        *h = Handle{};
+      delete h->d;
+      *h = Handle{};
     }
     RET(0);
 }
 HLE_EXPORT(coreinit, FSMakeDir) {
     std::string hp = host_path(mem::str(ARG(2)));
     struct stat st;
-    if (stat(hp.c_str(), &st) == 0) {
-        RET(fail(c, FS_EXISTS, ARG(3), "mkdir", mem::str(ARG(2))));
-        return;
+    if (path_stat(hp.c_str(), &st) == 0) {
+      RET(fail(c, FS_EXISTS, ARG(3), "mkdir", mem::str(ARG(2))));
+      return;
     }
     mkdirs(hp);
     RET(0);
@@ -296,9 +327,9 @@ HLE_EXPORT(nn_save, SAVEOpenDir) { RET(open_dir(c, save_path(ARG(2), mem::str(AR
 HLE_EXPORT(nn_save, SAVEMakeDir) {
     std::string hp = host_path(save_path(ARG(2), mem::str(ARG(3))));
     struct stat st;
-    if (stat(hp.c_str(), &st) == 0) {
-        RET(fail(c, FS_EXISTS, ARG(4), "mkdir", hp));
-        return;
+    if (path_stat(hp.c_str(), &st) == 0) {
+      RET(fail(c, FS_EXISTS, ARG(4), "mkdir", hp));
+      return;
     }
     mkdirs(hp);
     RET(0);
@@ -308,8 +339,11 @@ HLE_EXPORT(nn_save, SAVEMakeDir) {
 static int32_t remove_path(PPCContext* c, const std::string& gpath, uint32_t mask) {
     std::string hp = host_path(gpath);
     struct stat st;
-    if (stat(hp.c_str(), &st) != 0) return fail(c, FS_NOT_FOUND, mask, "remove", gpath);
-    if ((S_ISDIR(st.st_mode) ? rmdir(hp.c_str()) : unlink(hp.c_str())) != 0) return fail(c, FS_PERMISSION, mask, "remove", gpath);
+    if (path_stat(hp.c_str(), &st) != 0)
+      return fail(c, FS_NOT_FOUND, mask, "remove", gpath);
+    std::error_code error;
+    if (!std::filesystem::remove(utf8_path(hp), error) || error)
+      return fail(c, FS_PERMISSION, mask, "remove", gpath);
     TRACE("FS remove %s", gpath.c_str());
     return FS_OK;
 }

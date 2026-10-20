@@ -1,6 +1,6 @@
 // Guest threads: every OSThread runs on its own host thread with its own PPCContext.
 #pragma once
-#include <pthread.h>
+#include "platform/platform.h"
 
 #include <atomic>
 #include <chrono>
@@ -27,7 +27,7 @@ struct GuestThread {
     int suspend = 1;
     bool started = false, exited = false;
     bool is_main = false;
-    pthread_t host_tid{};  // for watchdog stack dumps
+    platform::ThreadId host_tid{}; // for watchdog stack dumps
     uint32_t exit_value = 0;
     uint32_t entry = 0;
     int core = 1;
@@ -54,7 +54,7 @@ uint32_t sda_base();
 // call stack (symbolize with tools/symbolize.sh: #line = guest address).
 void dump(bool stacks = false);
 // Log one host call stack of a non-guest thread (e.g. Cemu's GPU thread) as "<label> host frames".
-void sample_host(pthread_t th, const char* label);
+void sample_host(platform::ThreadId th, const char *label);
 
 // Main-thread blocked time per wait kind (frame pacing analysis); report() returns and resets it.
 void note_main_wait(const char* kind, uint64_t ns);

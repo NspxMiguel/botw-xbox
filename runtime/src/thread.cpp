@@ -1,23 +1,12 @@
 #include "thread.h"
-
-#include <execinfo.h>
-#include <mach-o/dyld.h>
-#include <pthread.h>
-#include <sched.h>
-#include <signal.h>
-#include <time.h>
-#include <unistd.h>
+#include "platform/logic.h"
+#include <cstdlib>
 
 #include <unordered_map>
 #include <vector>
 
 #include "hle.h"
 #include "loader.h"
-
-#include <TargetConditionals.h>
-#if TARGET_OS_IOS  // iOS port: stack size vs. the VA limit without extended VA (ios/src/vm_ios.cpp)
-size_t botw_ios_stack_size(size_t want);
-#endif
 
 namespace threads {
 std::mutex g_klock;
@@ -29,12 +18,12 @@ constexpr size_t kHostStack = 64u << 20;  // guest recursion maps onto the host 
 
 void run_thread(GuestThread* t) {
     t_current = t;
-    t->host_tid = pthread_self();
+    t->host_tid = platform::current_thread();
     // The game's main thread and the light timing threads (audio, alarms, GX2 callbacks) get the highest QoS so
     // the scheduler keeps them on performance cores (a phone has two); worker threads one step below.
     const bool critical = t->is_main || t->name == "AX" || t->name == "alarms" || t->name == "GX2 callbacks";
-    pthread_set_qos_class_self_np(critical ? QOS_CLASS_USER_INTERACTIVE : QOS_CLASS_USER_INITIATED, 0);
-    pthread_setname_np(t->name.empty() ? "guest" : t->name.c_str());
+    platform::configure_thread(t->name.empty() ? "guest" : t->name.c_str(),
+                               critical);
     PPCContext* c = &t->ctx;
     c->lr = 0;
     rt_call(c, t->entry);
@@ -50,16 +39,12 @@ void run_thread(GuestThread* t) {
 
 void launch(GuestThread* t) {
     t->started = true;
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-#if TARGET_OS_IOS
-    pthread_attr_setstacksize(&attr, botw_ios_stack_size(kHostStack));
-#else
-    pthread_attr_setstacksize(&attr, kHostStack);
-#endif
-    pthread_t th;
-    pthread_create(&th, &attr, [](void* p) -> void* { run_thread((GuestThread*)p); return nullptr; }, t);
-    pthread_detach(th);
+    if (!platform::launch_detached(
+            [](void *p) { run_thread(static_cast<GuestThread *>(p)); }, t,
+            kHostStack)) {
+      LOG("FATAL: cannot launch guest thread %s", t->name.c_str());
+      std::abort();
+    }
 }
 }  // namespace
 
@@ -102,61 +87,39 @@ std::string main_wait_report() {
     return s + " (ms/s)";
 }
 
-namespace {
-std::atomic<const char*> g_sample_label{"?"};  // name for non-guest threads (sample_host)
-void on_stack_signal(int) {  // runs on the interrupted thread
-    void* frames[48];
-    int n = backtrace(frames, 48);
-    char line[2048];
-    int k = snprintf(line, sizeof line, "  %s host frames (base 0x%lx):", current_name() ? current_name() : g_sample_label.load(),
-                     (unsigned long)_dyld_get_image_header(0));
-    for (int i = 2; i < n && k < (int)sizeof line - 24; i++) k += snprintf(line + k, sizeof line - k, " %p", frames[i]);
-    LOG("%s", line);
-}
-}  // namespace
-
-void install_stack_signal() {
-    static bool installed = [] {
-        struct sigaction sa = {};
-        sa.sa_handler = on_stack_signal;
-        sigaction(SIGUSR2, &sa, nullptr);
-        return true;
-    }();
-    (void)installed;
-}
-
-void sample_host(pthread_t th, const char* label) {
-    install_stack_signal();
-    g_sample_label = label;
-    pthread_kill(th, SIGUSR2);
+void sample_host(platform::ThreadId th, const char *label) {
+  platform::sample_thread(th, label);
 }
 
 void dump(bool stacks) {
-    std::vector<pthread_t> running;
-    {
-        std::lock_guard<std::mutex> l(g_klock);
-        int suspended = 0;
-        for (auto& [os, t] : g_threads) {
-            if (t->exited) continue;
-            if (!t->started) {
-                suspended++;
-                continue;
-            }
-            const char* k = t->wait_kind;
-            if (k) LOG("thread %-32s %08x entry %08x core %d: %s %08x (lr %08x)", t->name.c_str(), os, t->entry, t->core, k,
-                       t->wait_obj, t->wait_lr);
-            else {
-                LOG("thread %-32s %08x entry %08x core %d: running (lr %08x)", t->name.c_str(), os, t->entry, t->core, t->ctx.lr);
-                if (t->host_tid) running.push_back(t->host_tid);
-            }
-        }
-        LOG("%d threads created but never started", suspended);
+  std::vector<platform::ThreadId> running;
+  {
+    std::lock_guard<std::mutex> l(g_klock);
+    int suspended = 0;
+    for (auto &[os, t] : g_threads) {
+      if (t->exited)
+        continue;
+      if (!t->started) {
+        suspended++;
+        continue;
+      }
+      const char *k = t->wait_kind;
+      if (k)
+        LOG("thread %-32s %08x entry %08x core %d: %s %08x (lr %08x)",
+            t->name.c_str(), os, t->entry, t->core, k, t->wait_obj, t->wait_lr);
+      else {
+        LOG("thread %-32s %08x entry %08x core %d: running (lr %08x)",
+            t->name.c_str(), os, t->entry, t->core, t->ctx.lr);
+        if (t->host_tid)
+          running.push_back(t->host_tid);
+      }
     }
+    LOG("%d threads created but never started", suspended);
+  }
     if (!stacks) return;
-    install_stack_signal();
-    for (pthread_t th : running) {
-        pthread_kill(th, SIGUSR2);
-        usleep(50000);
+    for (platform::ThreadId th : running) {
+      platform::sample_thread(th, "guest");
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 }
 
@@ -317,7 +280,8 @@ HLE_EXPORT(coreinit, OSSetThreadName) {
     std::lock_guard<std::mutex> l(g_klock);
     if (GuestThread* t = get(os)) {
         t->name = name ? mem::str(name) : "";
-        if (t == current()) pthread_setname_np(t->name.c_str());
+        if (t == current())
+          platform::name_thread(t->name.c_str());
     }
 }
 
@@ -358,20 +322,20 @@ HLE_EXPORT(coreinit, OSSetThreadSpecific) {
 
 HLE_EXPORT(coreinit, OSGetCoreId) { RET(current() ? current()->core : 1); }
 HLE_EXPORT(coreinit, OSGetStackPointer) { RET(c->r[1]); }
-HLE_EXPORT(coreinit, OSYieldThread) { sched_yield(); }
+HLE_EXPORT(coreinit, OSYieldThread) { std::this_thread::yield(); }
 HLE_EXPORT(coreinit, OSBlockThreadsOnExit) {}
 
 // void OSSleepTicks(OSTime ticks)
 HLE_EXPORT(coreinit, OSSleepTicks) {
     int64_t ticks = (int64_t)ARG64(0);
     if (ticks <= 0) {
-        sched_yield();
-        return;
+      std::this_thread::yield();
+      return;
     }
-    uint64_t ns = (uint64_t)((__int128)ticks * 1000000000 / 62156250);
-    struct timespec ts = {(time_t)(ns / 1000000000), (long)(ns % 1000000000)};
+    uint64_t ns = platform::scale_ticks(static_cast<uint64_t>(ticks), 62156250,
+                                        1000000000);
     threads::WaitMark w("sleep", (uint32_t)(ns / 1000));
-    nanosleep(&ts, nullptr);
+    std::this_thread::sleep_for(std::chrono::nanoseconds(ns));
 }
 
 HLE_EXPORT(coreinit, OSInitThreadQueue) {
