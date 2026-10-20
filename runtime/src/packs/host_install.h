@@ -2,9 +2,29 @@
 #include "../loader.h"
 #include "../log.h"
 #include "../mem.h"
+#include "../mods/catalog.h"
+#include "../os.h"
+#include <cstdlib>
 #include "loaded_rpx.h"
 
 namespace packs {
+// The compiled plan minus the packs switched off in the launcher's Mods screen (mods/enabled.txt).
+inline const BuildPlan &selected_plan() {
+  static const BuildPlan plan = [] {
+    if (compiled_plan().packs.empty())
+      return compiled_plan();
+    try {
+      const char *root = std::getenv("BOTW_MODS_ROOT");
+      mods::ModCatalog catalog;
+      catalog.load(root ? root : g_user_root + "/mods", compiled_plan());
+      return mods::filtered_plan(compiled_plan(), catalog);
+    } catch (const std::exception &e) {
+      LOG("Mods selection unreadable, using every pack: %s", e.what());
+      return compiled_plan();
+    }
+  }();
+  return plan;
+}
 inline void install_loaded(LoadedRpx &snapshot, RendererHooks &renderer) {
   const GuestMemory memory{
       &snapshot,
@@ -25,12 +45,12 @@ inline void install_loaded(LoadedRpx &snapshot, RendererHooks &renderer) {
         std::memcpy(mem::host(address), bytes, size);
       }};
   std::string error;
-  if (!install(compiled_plan(), snapshot.hash, memory, renderer, error)) {
+  if (!install(selected_plan(), snapshot.hash, memory, renderer, error)) {
     LOG("Graphic packs disabled: %s", error.c_str());
     return;
   }
   static bool timing_logged = false;
-  if (has_timing_pack(compiled_plan()) && !timing_logged) {
+  if (has_timing_pack(selected_plan()) && !timing_logged) {
     timing_logged = true;
     LOG("Graphic pack FPS++/vsyncFrequency detected; game/fps.cpp g_target_fps "
         "remains authoritative (no additional pack pacing)");
