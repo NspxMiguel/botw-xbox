@@ -1,8 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
          xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
-         IgnorableNamespaces="uap">
+         xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
+         IgnorableNamespaces="uap mp">
   <Identity Name="BotWRecompiled" Publisher="CN=BotWRecompiled" Version="1.0.0.0" ProcessorArchitecture="x64" />
+  <mp:PhoneIdentity PhoneProductId="5f0b7c1e-2d4a-4b8e-9c3f-0b7a1d2e3f40" PhonePublisherId="00000000-0000-0000-0000-000000000000" />
   <Properties>
     <DisplayName>BotW Xbox Edition</DisplayName>
     <PublisherDisplayName>BotW Recompiled contributors</PublisherDisplayName>
