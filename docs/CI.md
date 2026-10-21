@@ -81,7 +81,7 @@ deployment tools. The private key is never exported or uploaded. The packaging r
 ### Player-owned game build
 
 Static recompilation happens **on the player's computer**, using the player's own supported Wii U
-dump (USA v208/1.6.0; see README for the hash and dumping instructions):
+dump (USA v208/1.5.0; see README for the hash and dumping instructions):
 
 ```sh
 uv run python -I tools/recompile.py /path/to/game/code/U-King.rpx generated

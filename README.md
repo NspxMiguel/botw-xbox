@@ -31,7 +31,7 @@ shaders compile on first use, so the first run hitches; DLC is untested. Details
   iOS platform installed) and [Homebrew](https://brew.sh).
 - **An iPhone on iOS 18 or later**, A14 chip or newer. Only an 8 GB iPhone 16 Pro has been tested;
   phones with less memory will probably run out of it. A free Apple ID is enough to sign the app.
-- **The game, as files**: Breath of the Wild for Wii U, **USA, with update 1.6.0 (v208)**, as a
+- **The game, as files**: Breath of the Wild for Wii U, **USA, with update 1.5.0 (v208)**, as a
   folder containing `code/`, `content/` and `meta/`. The recompiler and the game patches are made
   for that exact executable. Check yours:
 
@@ -52,7 +52,7 @@ games or keys, and no key ever needs to reach the Xbox: the Xbox only takes the 
    drive formatted as FAT32 or exFAT.
 2. Install [Dumpling](https://github.com/emiyl/dumpling) and open it from the Wii U menu.
 3. Choose **Dump a game**, select Breath of the Wild and tick **Game**, **Update** and **DLC**
-   (the update must be **1.6.0 / v208**; update it from the eShop first if needed).
+   (the update must be **1.5.0 / v208**; update it from the eShop first if needed).
 4. Dumpling writes `code/`, `content/` and `meta/` folders for the base game, the update and the
    DLC (`/dumpling/Games/...` on the chosen drive).
 5. Merge them into one folder: copy the base game, then copy the update's `code/`, `content/` and
@@ -83,7 +83,7 @@ elsewhere, set `BOTW_GAME=/path/to/game`.
 
 The first launch opens a controller-driven setup, with an on-screen guide and a QR code for
 [wiiu.hacks.guide](https://wiiu.hacks.guide/). Use your own Wii U dump of Breath of the Wild
-**1.6.0 / v208**. The recommended layout on an exFAT or NTFS USB drive is `BotW/code/`,
+**1.5.0 / v208**. The recommended layout on an exFAT or NTFS USB drive is `BotW/code/`,
 `BotW/content/`, `BotW/meta/`, and optionally `BotW/aoc/` for DLC. Decrypted folders need no keys.
 
 Setup scans removable drives automatically (through two folder levels), also checking
