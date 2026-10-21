@@ -5,6 +5,9 @@
 #include <time.h>
 
 #include <mutex>
+#ifdef _WIN32
+#include <chrono>
+#endif
 
 int g_log_level = 0;
 static FILE* g_log_file = nullptr;
@@ -18,10 +21,17 @@ void log_write(const char* fmt, ...) {
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
+#ifdef _WIN32
+    using clock = std::chrono::steady_clock;
+    static const auto t0 = clock::now();
+    double t = std::chrono::duration<double>(clock::now() - t0).count();
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     static double t0 = ts.tv_sec + ts.tv_nsec * 1e-9;
     double t = ts.tv_sec + ts.tv_nsec * 1e-9 - t0;
+
+#endif
     std::lock_guard<std::recursive_mutex> l(g_log_lock);
     fprintf(stderr, "[%8.3f] %s\n", t, buf);
     if (g_log_file) {

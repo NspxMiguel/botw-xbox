@@ -2,6 +2,7 @@
 // wrappers, guest pointers and the handful of runtime services that code expects, mapped onto
 // this runtime (g_mem, mem::sys_alloc, guest_call, LOG).
 #pragma once
+#include "../../include/byte_swap.h"
 #include <concepts>
 #include <mutex>
 #include <span>
@@ -16,14 +17,14 @@ typedef float float32;
 
 extern uint8* memory_base;  // == g_mem (set by mem::init)
 
-inline uint16 _swapEndianU16(uint16 v) { return __builtin_bswap16(v); }
-inline sint16 _swapEndianS16(sint16 v) { return (sint16)__builtin_bswap16((uint16)v); }
-inline sint32 _swapEndianS32(sint32 v) { return (sint32)__builtin_bswap32((uint32)v); }
-inline uint64 _swapEndianU64(uint64 v) { return __builtin_bswap64(v); }
+inline uint16 _swapEndianU16(uint16 v) { return botw_bswap16(v); }
+inline sint16 _swapEndianS16(sint16 v) { return (sint16)botw_bswap16((uint16)v); }
+inline sint32 _swapEndianS32(sint32 v) { return (sint32)botw_bswap32((uint32)v); }
+inline uint64 _swapEndianU64(uint64 v) { return botw_bswap64(v); }
 inline float _swapEndianF32(float v) {
     uint32 u;
     memcpy(&u, &v, 4);
-    u = __builtin_bswap32(u);
+    u = botw_bswap32(u);
     memcpy(&v, &u, 4);
     return v;
 }

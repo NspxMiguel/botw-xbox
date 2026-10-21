@@ -102,3 +102,39 @@ selection on the console supplies data; it does not turn the CI runtime-only App
 build. The local UWP guest-link and packaging path remains pending until the platform, renderer,
 host and CMake integrations above are complete. Neither generated C++ nor the resulting game-bearing
 binary/package belongs in this repository or its Actions artifacts.
+
+### Local UWP build with clang-cl + xwin
+
+On the Mac, the local preset uses LLVM's clang-cl/lld-link and the unpacked Microsoft
+Windows SDK 10.0.26100 + MSVC CRT 14.44. No Windows host or network is needed once the
+SDK and third-party dependency artifact have been unpacked:
+
+```sh
+cmake --preset local-uwp-clang
+cmake --build --preset local-uwp-clang
+```
+
+`XWIN_ROOT` defaults to `~/.local/share/nxbox/xwin/sdk` (with `crt/include`,
+`crt/lib/x86_64/store` and `sdk/include/10.0.26100`). `VCPKG_UWP_ROOT` defaults to
+`~/.local/share/nxbox/vcpkg-uwp`; unpack the `vcpkg-uwp-deps` artifact there so it contains
+`x64-uwp` and `x64-windows`. Pass either cache variable with `-D` to override it.
+`BOTW_DXC_ROOT` selects the desktop DXC headers/DLL tree, defaulting to the sibling
+`x64-windows` tree (or the installed host triplet under `VCPKG_INSTALLATION_ROOT`).
+The store CRT library directory comes before the desktop CRT; the executable links
+WindowsApp and carries `/APPCONTAINER`. This validates compilation/linking, not execution
+or Xbox package certification. The local default is game-free, like CI.
+
+For a player-owned gameplay build, keep a separate build directory and point at the
+existing local generated sources; CMake reads them in place:
+
+```sh
+cmake --preset local-uwp-clang -B build/local-uwp-game \
+  -DBOTW_BUILD_GAME=ON -DBOTW_GENERATED_DIR=/absolute/path/to/generated
+cmake --build build/local-uwp-game --target BotWRecomp -j 2
+```
+
+`BOTW_GENERATED_DIR` defaults to `${CMAKE_SOURCE_DIR}/generated`. Never copy generated
+sources or gameplay binaries into the repository, CI inputs, caches or artifacts.
+Check each executable with `file`, then use `llvm-objdump --private-headers` to verify
+APPCONTAINER and `llvm-objdump -p` to inspect DLL imports. The C++ runtime imports must
+use `vcruntime140_app.dll` / `msvcp140_app.dll`, with no desktop `vcruntime140.dll`.

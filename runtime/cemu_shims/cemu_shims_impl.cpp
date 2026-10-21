@@ -72,17 +72,35 @@ uint8* memory_getPointerFromPhysicalOffset(uint32 p) { return memory_base + p; }
 uint32 memory_getVirtualOffsetFromPointer(void* ptr) { return ptr ? (uint32)((uint8*)ptr - memory_base) : 0; }
 uint8* memory_getPointerFromVirtualOffset(uint32 v) { return memory_base + v; }
 uint8* memory_getPointerFromVirtualOffsetAllowNull(uint32 v) { return v ? memory_base + v : nullptr; }
-void memory_writeDouble(uint32 a, double v) { uint64 u; memcpy(&u, &v, 8); *(uint64*)(memory_base + a) = __builtin_bswap64(u); }
-void memory_writeFloat(uint32 a, float v) { uint32 u; memcpy(&u, &v, 4); *(uint32*)(memory_base + a) = __builtin_bswap32(u); }
-void memory_writeU32(uint32 a, uint32 v) { *(uint32*)(memory_base + a) = __builtin_bswap32(v); }
-void memory_writeU16(uint32 a, uint16 v) { *(uint16*)(memory_base + a) = __builtin_bswap16(v); }
+void memory_writeDouble(uint32 a, double v) {
+    uint64 u;
+    memcpy(&u, &v, 8);
+    *(uint64 *)(memory_base + a) = _swapEndianU64(u);
+}
+void memory_writeFloat(uint32 a, float v) {
+    uint32 u;
+    memcpy(&u, &v, 4);
+    *(uint32 *)(memory_base + a) = _swapEndianU32(u);
+}
+void memory_writeU32(uint32 a, uint32 v) { *(uint32 *)(memory_base + a) = _swapEndianU32(v); }
+void memory_writeU16(uint32 a, uint16 v) { *(uint16 *)(memory_base + a) = _swapEndianU16(v); }
 void memory_writeU8(uint32 a, uint8 v) { memory_base[a] = v; }
-void memory_writeU64(uint32 a, uint64 v) { *(uint64*)(memory_base + a) = __builtin_bswap64(v); }
-double memory_readDouble(uint32 a) { uint64 u = __builtin_bswap64(*(uint64*)(memory_base + a)); double d; memcpy(&d, &u, 8); return d; }
-float memory_readFloat(uint32 a) { uint32 u = __builtin_bswap32(*(uint32*)(memory_base + a)); float f; memcpy(&f, &u, 4); return f; }
-uint64 memory_readU64(uint32 a) { return __builtin_bswap64(*(uint64*)(memory_base + a)); }
-uint32 memory_readU32(uint32 a) { return __builtin_bswap32(*(uint32*)(memory_base + a)); }
-uint16 memory_readU16(uint32 a) { return __builtin_bswap16(*(uint16*)(memory_base + a)); }
+void memory_writeU64(uint32 a, uint64 v) { *(uint64 *)(memory_base + a) = _swapEndianU64(v); }
+double memory_readDouble(uint32 a) {
+    uint64 u = _swapEndianU64(*(uint64 *)(memory_base + a));
+    double d;
+    memcpy(&d, &u, 8);
+    return d;
+}
+float memory_readFloat(uint32 a) {
+    uint32 u = _swapEndianU32(*(uint32 *)(memory_base + a));
+    float f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+uint64 memory_readU64(uint32 a) { return _swapEndianU64(*(uint64 *)(memory_base + a)); }
+uint32 memory_readU32(uint32 a) { return _swapEndianU32(*(uint32 *)(memory_base + a)); }
+uint16 memory_readU16(uint32 a) { return _swapEndianU16(*(uint16 *)(memory_base + a)); }
 uint8 memory_readU8(uint32 a) { return memory_base[a]; }
 
 // ---- CPU / time ---------------------------------------------------------------------------------
