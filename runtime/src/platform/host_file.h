@@ -26,7 +26,7 @@ inline std::filesystem::path utf8_path(const std::string &text) { return text; }
 #endif
 
 #if defined(BOTW_PLATFORM_UWP)
-using Stat = struct _stat64;
+using Stat = struct ::_stat64;
 
 inline int stat_path(const char *path, Stat *out) {
     WIN32_FILE_ATTRIBUTE_DATA data;
@@ -90,7 +90,7 @@ inline bool list_dir(const std::string &dir, std::vector<std::string> &names) {
 }
 #else
 #if defined(_WIN32)
-using Stat = struct _stat64;
+using Stat = struct ::_stat64;
 inline int stat_path(const char *path, Stat *out) { return _wstat64(utf8_path(path).c_str(), out); }
 inline FILE *open_path(const char *path, const char *mode) {
     return _wfopen(utf8_path(path).c_str(), utf8_path(mode).c_str());
