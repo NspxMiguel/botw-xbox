@@ -13,6 +13,7 @@
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.UI.Core.h>
 #if __has_include(<gamingdeviceinformation.h>)
+#include <combaseapi.h> // STDAPI, used by gamingdeviceinformation.h
 #include <gamingdeviceinformation.h>
 #define BOTW_HAS_GAMING_DEVICE_INFO 1
 #endif
