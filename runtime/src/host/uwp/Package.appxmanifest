@@ -160,6 +160,24 @@
               <uap:FileType>.stsc</uap:FileType>
               <uap:FileType>.sword</uap:FileType>
               <uap:FileType>.text</uap:FileType>
+              <uap:FileType>.bfma
+.bfsar
+.btsnd
+.h264
+.jpg
+.mp4
+.sbfarc
+.sbitemico
+.sbmapopen
+.sbmaptex
+.sbreviewtex
+.sbstftex
+.sesetlist
+.sfmc
+.shktmrb
+.srsizetable
+.sstats
+.tscb</uap:FileType>
             </uap:SupportedFileTypes>
           </uap:FileTypeAssociation>
         </uap:Extension>
