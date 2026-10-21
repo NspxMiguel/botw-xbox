@@ -1,6 +1,7 @@
 // coreinit FS (synchronous API) and nn_save. Guest paths: /vol/content -> <game>/content,
 // /vol/code -> <game>/code, /vol/save -> <user>/save. Handles index a host-side table.
 #include "platform/logic.h"
+#include "platform/host_file.h"
 #include <errno.h>
 #include <filesystem>
 #include <stdio.h>
@@ -37,19 +38,9 @@ std::filesystem::path utf8_path(const std::string &text) {
   return std::filesystem::path(std::u8string(
       reinterpret_cast<const char8_t *>(text.data()), text.size()));
 }
-#if defined(_WIN32)
-int path_stat(const char *path, struct stat *out) {
-  return _wstat64(utf8_path(path).c_str(), out);
-}
-FILE *path_open(const char *path, const char *mode) {
-  return _wfopen(utf8_path(path).c_str(), utf8_path(mode).c_str());
-}
-#else
-int path_stat(const char *path, struct stat *out) { return stat(path, out); }
-FILE *path_open(const char *path, const char *mode) {
-  return fopen(path, mode);
-}
-#endif
+// Through host_file: on UWP the game folder may be on a USB drive (FromApp APIs only).
+int path_stat(const char *path, struct stat *out) { return host_file::stat_path(path, out); }
+FILE *path_open(const char *path, const char *mode) { return host_file::open_path(path, mode); }
 enum : int32_t {
     FS_OK = 0, FS_END = -2, FS_MAX = -3, FS_EXISTS = -5, FS_NOT_FOUND = -6, FS_NOT_FILE = -7, FS_NOT_DIR = -8,
     FS_PERMISSION = -10, FS_FATAL = -0x400,
@@ -58,7 +49,6 @@ constexpr uint32_t FLAG_DIR = 0x80000000u, FLAG_FILE = 0x01000000u;
 
 struct Handle {
     FILE* f = nullptr;
-    std::filesystem::directory_iterator *d = nullptr;
     std::string host;
     std::shared_ptr<std::vector<vfs::Entry>> overlay_entries{};
     size_t overlay_position = 0;
@@ -96,7 +86,7 @@ void mkdirs(const std::string& p) {
 
 uint32_t add_handle(Handle h) {
     for (size_t i = 1; i < g_handles.size(); i++)
-        if (!g_handles[i].f && !g_handles[i].d && !g_handles[i].overlay_entries) {
+        if (!g_handles[i].f && !g_handles[i].overlay_entries) {
             g_handles[i] = h;
             return (uint32_t)i;
         }
@@ -144,7 +134,7 @@ int32_t open_file(PPCContext* c, const std::string& gpath, const char* mode, uin
     FILE *f = path_open(hp.c_str(), hm.c_str());
     if (!f) return fail(c, errno == ENOENT ? FS_NOT_FOUND : FS_PERMISSION, mask, "open", gpath);
     std::lock_guard<std::mutex> l(g_fs_lock);
-    uint32_t h = add_handle({f, nullptr, hp});
+    uint32_t h = add_handle({f, hp});
     mem::w32(handle_out, h);
     TRACE("FS open %s (%s) -> %u", gpath.c_str(), mode, h);
     return FS_OK;
@@ -166,15 +156,19 @@ int32_t open_dir(PPCContext* c, const std::string& gpath, uint32_t out, uint32_t
             return FS_OK;
         }
     }
-    std::error_code error;
-    auto *d = new std::filesystem::directory_iterator(utf8_path(hp), error);
-    if (error) {
-      delete d;
-      d = nullptr;
-    }
-    if (!d) return fail(c, FS_NOT_FOUND, mask, "opendir", gpath);
+    // Listed once up front and replayed like overlay entries, so USB folders work on UWP too.
+    std::vector<std::string> names;
+    if (!host_file::list_dir(hp, names))
+        return fail(c, FS_NOT_FOUND, mask, "opendir", gpath);
+    auto entries = std::make_shared<std::vector<vfs::Entry>>();
+    for (auto &name : names)
+        if (!name.empty() && name[0] != '.')
+            entries->push_back({name, hp + "/" + name});
+    Handle handle;
+    handle.host = hp;
+    handle.overlay_entries = std::move(entries);
     std::lock_guard<std::mutex> l(g_fs_lock);
-    mem::w32(out, add_handle({nullptr, d, hp}));
+    mem::w32(out, add_handle(std::move(handle)));
     return FS_OK;
 }
 
@@ -301,40 +295,12 @@ HLE_EXPORT(coreinit, FSReadDir) {
         RET(FS_END);
         return;
     }
-    if (!h || !h->d) {
-        RET(FS_FATAL);
-        return;
-    }
-    for (;;) {
-      if (*h->d == std::filesystem::directory_iterator{}) {
-        RET(FS_END);
-        return;
-      }
-      auto entry = **h->d;
-      std::error_code error;
-      h->d->increment(error);
-      if (error)
-        *h->d = std::filesystem::directory_iterator{};
-      auto utf8 = entry.path().filename().u8string();
-      std::string name(utf8.begin(), utf8.end());
-      if (name.empty() || name[0] == '.')
-        continue;
-      struct stat st;
-      std::string full = h->host + "/" + name;
-      if (path_stat(full.c_str(), &st) != 0)
-        continue;
-      fill_stat(out, st);
-      memset(mem::host(out + 0x64), 0, 0x80);
-      strncpy((char *)mem::host(out + 0x64), name.c_str(), 0x7F);
-      RET(0);
-      return;
-    }
+    RET(h ? FS_END : FS_FATAL);
 }
 HLE_EXPORT(coreinit, FSCloseDir) {
     std::lock_guard<std::mutex> l(g_fs_lock);
     Handle* h = get(ARG(2));
-    if (h && (h->d || h->overlay_entries)) {
-        delete h->d;
+    if (h && h->overlay_entries) {
         *h = Handle{};
     }
     RET(0);

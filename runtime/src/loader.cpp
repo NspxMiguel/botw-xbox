@@ -1,3 +1,4 @@
+#include "platform/host_file.h"
 #include "loader.h"
 
 #include <stdio.h>
@@ -51,7 +52,7 @@ bool load_main(const std::string &path) {
     LOG("loader: this runtime-only build cannot execute a game; rebuild with BOTW_BUILD_GAME=ON");
     return false;
 #else
-    FILE* f = fopen(path.c_str(), "rb");
+    FILE* f = host_file::open_path(path.c_str(), "rb");  // the RPX may be on a USB drive (UWP)
     if (!f) {
         LOG("loader: cannot open %s", path.c_str());
         return false;

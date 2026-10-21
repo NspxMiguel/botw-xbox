@@ -1,5 +1,5 @@
 // Virtual tilt: full right stick up for one second tilts the virtual GamePad; release eases it back flat.
-// c++ -std=c++20 -Iruntime/src runtime/src/input/tests/tilt_test.cpp runtime/src/input/motion.cpp && ./a.out
+// c++ -std=c++20 -Iruntime/src runtime/src/input/tests/tilt_test.cc runtime/src/input/motion.cpp && ./a.out
 #include <cassert>
 #include <cmath>
 #include <cstdio>

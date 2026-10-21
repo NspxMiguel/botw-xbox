@@ -1,3 +1,4 @@
+#include "../platform/host_file.h"
 #include "loaded_rpx.h"
 #include <algorithm>
 #include <atomic>
@@ -77,9 +78,16 @@ bool load_rpx(const BuildPlan &plan, const std::string &path,
   error.clear();
   if (plan.packs.empty() && plan.initial_memory.empty())
     return load(path);
-  std::ifstream input(path, std::ios::binary);
-  std::vector<uint8_t> raw((std::istreambuf_iterator<char>(input)), {});
-  if (!input.bad() && !raw.empty()) {
+  std::vector<uint8_t> raw;
+  bool read_ok = false;
+  if (FILE *input = host_file::open_path(path.c_str(), "rb")) {  // may be on a USB drive (UWP)
+    char buffer[1 << 16];
+    for (size_t n; (n = std::fread(buffer, 1, sizeof buffer, input)) > 0;)
+      raw.insert(raw.end(), buffer, buffer + n);
+    read_ok = !std::ferror(input);
+    std::fclose(input);
+  }
+  if (read_ok && !raw.empty()) {
     static std::atomic<unsigned> serial{0};
     const auto stamp =
         std::chrono::steady_clock::now().time_since_epoch().count();
