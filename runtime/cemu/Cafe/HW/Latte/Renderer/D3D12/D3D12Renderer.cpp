@@ -31,6 +31,9 @@
 #include <imgui.h>
 #include "imgui/imgui_extension.h"
 
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12SimSeriesS.h"
+#include "../../../../../../src/sim_series_s.h"
+
 #include <dxgi1_4.h>
 #include <chrono>
 #include <thread>
@@ -92,6 +95,17 @@ D3D12Renderer::D3D12Renderer()
 		throw std::runtime_error(err);
 	RendererShaderD3D12::Init();
 
+	if (sim_series_s::settings().enabled)
+		try
+		{
+			m_simSeriesS = std::make_unique<D3D12SimSeriesS>(*this, m_queue.Get());
+		}
+		catch (const std::exception& e)
+		{
+			// Diagnostic mode only: never keep the game from starting.
+			cemuLog_log(LogType::Force, "Series S simulation unavailable: {}", e.what());
+		}
+
 	// first command list
 	ResetCommandList();
 	D3D12_Checkpoint(m_device.Get(), "renderer constructed");
@@ -102,6 +116,7 @@ D3D12Renderer::~D3D12Renderer()
 	// Shutdown() is expected to have been called already
 	if (m_device)
 		WaitForIdle();
+	m_simSeriesS.reset();
 	occlusionQuery_destroyAll();
 	m_imgui.reset();
 	m_pipelineCache.reset();
@@ -435,6 +450,8 @@ void D3D12Renderer::ResetCommandList()
 	InvalidateDrawState();
 	BindRootSignatureAndHeaps();
 	occlusionQuery_notifyBeginCommandList();
+	if (m_simSeriesS)
+		m_simSeriesS->BeginSegment();
 	D3D12_Checkpoint(m_device.Get(), "command list reset");
 }
 
@@ -442,6 +459,8 @@ void D3D12Renderer::SubmitCommandList(bool waitIdle)
 {
 	occlusionQuery_notifyEndCommandList();
 	FlushBarriers();
+	if (m_simSeriesS)
+		m_simSeriesS->EndSegment();
 	HRESULT hr = m_cmdList->Close();
 	if (FAILED(hr))
 		HandleDeviceError(hr, "ID3D12GraphicsCommandList::Close");
@@ -926,6 +945,8 @@ void D3D12Renderer::PresentSwapChain(bool mainWindow)
 		m_cmdList->ClearRenderTargetView(swapChain->GetCurrentRTV(), clearColor, 0, nullptr);
 	}
 	TransitionResource(swapChain->GetCurrentBackbuffer(), swapChain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_PRESENT);
+	if (mainWindow && m_simSeriesS)
+		m_simSeriesS->EndFrame();
 	SubmitCommandList(false);
 	if (!swapChain->Present(vsync != 0 ? 1 : 0))
 		HandleDeviceError(m_device->GetDeviceRemovedReason(), "Present");

@@ -25,6 +25,7 @@ class D3D12PipelineCache;
 struct D3D12PipelineInfo;
 class D3D12ImGuiRenderer;
 class D3D12FrameInterpolator;
+class D3D12SimSeriesS;
 class LatteQueryObjectD3D12;
 struct LatteDecompilerShader;
 
@@ -345,6 +346,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	D3D12FormatSupport m_formatSupport;
 	D3D_SHADER_MODEL m_highestShaderModel = D3D_SHADER_MODEL_5_1;
 	D3D12_RESOURCE_BINDING_TIER m_bindingTier = D3D12_RESOURCE_BINDING_TIER_1;
+
+	std::unique_ptr<D3D12SimSeriesS> m_simSeriesS;
 
 	// command recording
 	struct CommandAllocatorEntry

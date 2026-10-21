@@ -27,6 +27,7 @@ struct GuestThread {
     int suspend = 1;
     bool started = false, exited = false;
     bool is_main = false;
+    uint64_t sim_waited_ns = 0;    // Main-thread-only cumulative blocked time for simulation.
     platform::ThreadId host_tid{}; // for watchdog stack dumps
     uint32_t exit_value = 0;
     uint32_t entry = 0;

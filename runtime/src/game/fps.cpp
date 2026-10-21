@@ -11,6 +11,8 @@
 #include <cstring>
 
 #include "hooks.h"
+#include "../sim_series_s.h"
+#include "../thread.h"
 
 namespace {
 constexpr int kAvgFrames = 8;
@@ -47,6 +49,9 @@ BOTW_HOOK(0x031facec) {  // lwz r0, 8(r1): swap count, compared against the flip
 
 // stw r0, 120(r30) in the framework's frame function: r0:r12 = OSGetSystemTime ticks since last frame
 BOTW_HOOK(0x031fa97c) {
+    if (sim_series_s::settings().enabled)
+        if (auto *thread = threads::current(); thread && thread->is_main)
+            sim_series_s::cpu_frame(thread->sim_waited_ns);
     if (!fps60()) return;
     if (g_dt_n == 0) data_patches();
     uint64_t ticks = ((uint64_t)c->r[0] << 32) | c->r[12];

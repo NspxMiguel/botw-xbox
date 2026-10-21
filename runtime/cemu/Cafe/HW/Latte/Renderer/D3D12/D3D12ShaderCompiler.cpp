@@ -139,13 +139,15 @@ bool _CompileFXC(D3D12Const::Stage stage, const std::string &hlsl, std::vector<u
 
 // --- DXC ---
 
-bool _CompileDXC(D3D12Const::Stage stage, const std::string &hlsl, std::vector<uint8> &bytecodeOut, std::string &logOut)
+bool _CompileDXC(D3D12Const::Stage stage, const std::string &hlsl, std::vector<uint8> &bytecodeOut, std::string &logOut, bool compute = false)
 {
 	const wchar_t *target = L"vs_6_0";
 	if (stage == D3D12Const::Stage::Pixel)
 		target = L"ps_6_0";
 	else if (stage == D3D12Const::Stage::Geometry)
 		target = L"gs_6_0";
+	if (compute)
+		target = L"cs_6_0";
 	// one compiler instance per call, IDxcCompiler is not thread safe
 	ComPtr<IDxcLibrary> library;
 	ComPtr<IDxcCompiler> compiler;
@@ -424,6 +426,13 @@ const char *D3D12ShaderCompiler::GetBackendName()
 		return "spirv_to_dxil";
 	}
 	return "unknown";
+}
+
+bool D3D12ShaderCompiler::CompileComputeHLSL(const std::string &source, std::vector<uint8> &bytecode, std::string &log)
+{
+	if (!s_compiler.dxcCreateInstance && !_InitDXC(log))
+		return false;
+	return _CompileDXC(D3D12Const::Stage::Vertex, source, bytecode, log, true);
 }
 
 bool D3D12ShaderCompiler::CompileHLSL(D3D12Const::Stage stage, const std::string &hlslSource, std::vector<uint8> &bytecodeOut, std::string &logOut)

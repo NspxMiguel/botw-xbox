@@ -38,6 +38,9 @@ bool CompileGLSL(D3D12Const::Stage stage, const std::string &glslSource, std::ve
 // HLSL -> bytecode with FXC (DXBC, shader model 5.1) or DXC (DXIL, shader model 6.0), depending on the backend
 bool CompileHLSL(D3D12Const::Stage stage, const std::string &hlslSource, std::vector<uint8> &bytecodeOut, std::string &logOut);
 
+// Always DXC cs_6_0, independent of the game shader backend.
+bool CompileComputeHLSL(const std::string &source, std::vector<uint8> &bytecode, std::string &log);
+
 inline D3D12Const::Stage StageFromShaderType(RendererShader::ShaderType type)
 {
 	switch (type)
