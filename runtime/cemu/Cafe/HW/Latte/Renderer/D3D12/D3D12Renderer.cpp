@@ -979,14 +979,25 @@ void D3D12Renderer::PresentSwapChain(bool mainWindow)
 		const float clearColor[4] = {0, 0, 0, 1};
 		m_cmdList->ClearRenderTargetView(swapChain->GetCurrentRTV(), clearColor, 0, nullptr);
 	}
-	if (mainWindow && m_ffx)
-	{
-		m_ffx->PreparePresent();
-		swapChain->SetFrameGeneration(m_ffx->Generating());
-	}
-	TransitionResource(swapChain->GetCurrentBackbuffer(), swapChain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_PRESENT);
 	if (mainWindow && m_simSeriesS)
 		m_simSeriesS->EndFrame();
+	if (mainWindow && m_ffx)
+	{
+#if defined(BOTW_PLATFORM_UWP)
+		m_ffx->PreparePresent(swapChain->GetTargetType() == D3D12SwapChain::TargetType::CoreWindow && uwp::quick_menu.requested.load());
+#else
+		m_ffx->PreparePresent();
+#endif
+		swapChain->SetFrameGeneration(m_ffx->Generating());
+		if (m_ffx->PresentGenerated())
+		{
+			const HRESULT removed = m_device->GetDeviceRemovedReason();
+			if (FAILED(removed))
+				HandleDeviceError(removed, "Manual FG Present");
+			return;
+		}
+	}
+	TransitionResource(swapChain->GetCurrentBackbuffer(), swapChain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_PRESENT);
 	SubmitCommandList(false);
 #if defined(BOTW_PLATFORM_UWP)
 	if (mainWindow && uwp::quick_menu.requested.load())

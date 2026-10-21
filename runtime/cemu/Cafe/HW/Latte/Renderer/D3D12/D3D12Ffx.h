@@ -16,6 +16,7 @@ class D3D12Ffx
 				 ID3D12Resource *output, D3D12_RESOURCE_STATES &outputState,
 				 LatteTextureD3D12 *depth);
 	void PreparePresent(bool paused = false);
+	bool PresentGenerated(); // CoreWindow only; presents generated then real, on the game queue
 	void EndFrame();
 	bool Generating() const;
 

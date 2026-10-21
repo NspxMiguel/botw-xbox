@@ -23,6 +23,29 @@ int main() {
             }
         }
     }
+    for (auto console : {Console::Desktop, Console::SeriesX, Console::SeriesS}) {
+        for (int fps : {0, 30, 45, 60, 120}) {
+            for (double hz : {0., 30., 59.94, 60., 90., 119.88, 120., 144.}) {
+                const unsigned expected = console != Console::SeriesX                ? 0
+                                          : fps == 30 && (hz == 59.94 || hz == 60)   ? 1
+                                          : fps == 60 && (hz == 119.88 || hz == 120) ? 1
+                                                                                     : 0;
+                assert(core_window_fg_interval(console, fps, hz) == expected);
+            }
+        }
+    }
+    assert(
+        !core_window_fg_interval(Console::SeriesX, 30, std::numeric_limits<double>::quiet_NaN()));
+    assert(!core_window_fg_interval(Console::SeriesX, 60, std::numeric_limits<double>::infinity()));
+    // Hysteresis uses actual frame time at 120 Hz; stable 60 fps stays disabled.
+    FrameGenerationPolicy high_refresh_policy;
+    for (int i = 0; i < 600; ++i)
+        assert(!high_refresh_policy.update(16.67, 120, false, i * 16.67));
+    high_refresh_policy = {};
+    for (int i = 0; i < 29; ++i)
+        assert(!high_refresh_policy.update(19, 120, false, 10000 + i * 19));
+    assert(high_refresh_policy.update(19, 120, false, 10000 + 29 * 19));
+    assert(!high_refresh_policy.update(19, 120, true, 11000));
     History history;
     History::Image image{};
     assert(history.update(image, 16.67));

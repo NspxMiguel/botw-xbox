@@ -17,13 +17,13 @@ renderer initialization; provider versions are queried and explicitly pinned to
 | FG provider, context, wrapper, prepare, callback, or configuration fails | One FG failure line; retain FSR 3.1 upscaling without FG |
 | FSR 3.1 contexts available and usable scene depth exists this frame | Actual FidelityFX upscale dispatch, followed by the existing RCAS output pass |
 | This frame has no usable scene depth | FSR 1 for this frame; invalidate temporal history |
-| FG context and wrapped swapchain available, frame prepared, refresh rule satisfied | Actual FidelityFX FG prepare/configure/dispatch callback and swapchain presentation |
+| FG context available, frame prepared, refresh rule satisfied | HWND: SDK callback/wrapper presentation; CoreWindow: direct FG dispatch and caller-owned paired presentation |
 | `BOTW_UPSCALER=fsr1` / `off` | Force spatial FSR / output scaling; the optional loader is not loaded |
 | `BOTW_UPSCALER=fsr3` | Attempt FSR 3.1 with the same mandatory fallbacks |
 
 The signed desktop DLLs import desktop CRT, USER32, WINMM and VERSION. Successful
 cross-compilation does **not** establish that these binaries load on Xbox UWP.
-Missing dependencies and rejected CoreWindow wrapping are expected failure cases;
+Missing dependencies and unsupported manual presentation are expected failure cases;
 they must leave the game playable; FG-only failures retain FSR 3.1 upscaling. There is no custom
 blend/interpolator substituted for FidelityFX frame generation.
 
@@ -35,7 +35,7 @@ capped at 1440p; a 1080p output remains 1080p. Internal scale may be below 1 to
 preserve balanced at 1080p. Automatic scale is used only when the quick menu, saved scale, and quality preset
 leave it unset. Explicit resolution graphic packs retain their existing texture-rule authority.
 
-FG requires a reported display mode of at least 59 Hz and a prepared real frame.
+The HWND wrapper requires a reported display mode of at least 59 Hz and a prepared real frame.
 It enables after a 30-frame mean above 18.0 ms and disables after a 120-frame mean
 below 15.5 ms. Timing transitions are at least two seconds apart. Stable 60 fps,
 including on 120 Hz displays, does not cross the enable threshold. Unknown refresh,
@@ -44,7 +44,40 @@ HDMI mode changes refresh the cached rate; desktop falls back to the current DXG
 output mode, never inferred Present throughput. Generated frames do not advance
 the guest clock.
 
-The quick menu disables FG and drains pending SDK presents while retaining all
+CoreWindow uses the frame-generation context directly, with
+`FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY`, a null swapchain/callback,
+and `ffxDispatchDescFrameGeneration::presentColor` / `outputs[0]`. The HWND
+wrapper path is retained. Automatic CoreWindow FG is Series X only: guest 30 on
+60 Hz produces 60 presents/s; guest 60 on 120 Hz produces 120 presents/s.
+Guest 30 on 120 Hz is ineligible: select a 60 Hz panel mode for 30 -> 60 FG,
+or keep FG off to avoid its cost at 120 Hz.
+Fractional 59.94/119.88 Hz modes are accepted; unknown/other modes and Series S
+fail closed. Guest 60 on 60 Hz is always ineligible, even if measured performance
+drops below 60. The existing real-frame hysteresis/cooldown remains, using actual
+frame time at both refresh rates; stable guest 60 does not cross the enable
+threshold. Guest clock selection includes the FPS++ cutscene cap.
+
+Manual presentation copies the final composed backbuffer into an owned RGBA8
+texture and dispatches FG into a second UAV texture on the same direct queue.
+It copies/presents generated then real, using HDMI-derived vblank intervals to
+space them half a guest frame apart. A waitable CoreWindow swapchain with maximum
+frame latency one bounds the queued presentation latency; each wait is capped
+at one guest-frame duration. No additional frame-history presentation queue or
+CPU sleep is introduced. If waitable creation fails, native creation retries
+without it and FG stays off. Missing pacing, allocation, prepare, configuration,
+dispatch or present errors retire only FG and preserve the upscaler. A latency
+wait timeout skips generation for that frame without retiring FG; three timeouts
+without a completed generated/real pair trigger a two-second retry cooldown.
+Failed history or final real presents fall back to normal real presentation. First
+frames after enable, pause and image cuts prime history and present only real
+color at the normal present interval. Both owned textures are drained before
+resize/retirement; they add about 63.3 MiB at 3840x2160.
+
+The manual path intentionally interpolates the final image including HUD, text,
+RCAS and host overlays; HUD ghosting/distortion is an accepted tradeoff. There
+is no trivially available HUD-less final color.
+
+The quick menu disables FG and drains pending SDK presents (where wrapped) while retaining all
 contexts, resources and the wrapped swapchain. Its snapshot and screenshots use
 the wrapped current backbuffer that received the final output pass. On close, the
 renderer refreshes the backbuffer index and resumes normal preparation on the
@@ -56,8 +89,8 @@ and wait for GPU work before destroying affected contexts or resources. FG-only
 retirement leaves the upscale context and its resources intact. SDK 2.3.0's
 replacement contract consumes the input chain reference and returns a new chain;
 all other references and buffer views are released before the call. Its HWND-only
-replacement implementation cannot wrap CoreWindow or composition chains, so those
-surfaces keep their native chain and FSR 3.1 upscaling without FG. On FG retirement,
+replacement implementation is used only for HWND chains. CoreWindow retains its
+native chain and uses manual FG; composition retains upscaling without FG. On FG retirement,
 the disabled replacement remains presentable, as supported by the SDK. Recovery
 uses the shared native creation path if there is no usable chain; recreation is
 non-throwing and preserves an existing presentable chain on failure. Failed
@@ -132,3 +165,20 @@ Validated on macOS with the local clang-cl/xwin UWP preset (`BOTW_BUILD_GAME=0`)
 
 Temporary package files and build intermediates were removed after validation.
 No game execution or Xbox hardware validation was performed.
+
+### CoreWindow hardware validation still required
+
+The SDK distribution here supplies public headers and signed provider DLLs, not
+the frame-generation provider source. Build/syntax validation cannot establish
+that the pinned 3.1 provider accepts the no-notify configuration on Xbox or that
+its desktop dependencies load there. On Series X, verify DLL loading and the
+D3D12 debug layer (prepare/dispatch states and UAV hazards), 30->60 and 60->120
+cadence with HDMI 60/120 modes, fractional refresh, generated/real ordering,
+input-to-photon latency, HUD artifacts, GPU cost, resize, quick-menu resume and
+forced FG failure while upscaling continues. The one-frame queue bound is a
+configuration guarantee; measured presentation/scanout latency remains unverified.
+
+The CoreWindow change passed `fsr3_policy_test`, full clang-cl/xwin UWP executable
+builds with and without the SDK, and `validation/syntax_check.py --uwp` with and
+without SDK headers (33/33 translation units each). One build directory was
+reused and removed afterward. These checks do not execute the game or SDK DLLs.
