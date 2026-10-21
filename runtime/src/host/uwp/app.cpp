@@ -2,6 +2,7 @@
 #if defined(BOTW_PLATFORM_UWP)
 #include "../../host/window.h"
 #include "../../latte/latte.h"
+#include "../../log.h"
 #include "../../mods/catalog.h"
 #include "../../mods/gamebanana.h"
 #include "../../mods/zip_install.h"
@@ -2428,7 +2429,21 @@ SDL_Window *g_win_ptr() { return nullptr; }
 } // namespace window
 void botw_window_phys_size(int &w, int &h) { window::drawable_size(&w, &h); }
 int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    init_apartment(apartment_type::single_threaded);
+    // Multi-threaded like the C++/WinRT CoreApplication template: Run() sets up the view's own
+    // ASTA, and a single-threaded apartment here kills the process before activation on Xbox.
+    init_apartment();
+    // Log and crash filter first, so a failure anywhere in the launcher or the game leaves a trace
+    // in LocalState (the console shows no dialog).
+    auto local = winrt::to_string(winrt::Windows::Storage::ApplicationData::Current().LocalFolder().Path());
+    log_set_file((local + "\\runtime.log").c_str());
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS *e) -> LONG {
+        auto pc = reinterpret_cast<uintptr_t>(e->ExceptionRecord->ExceptionAddress);
+        auto exe = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        LOG("FATAL exception 0x%08lx at exe+0x%llx (pc 0x%llx)", e->ExceptionRecord->ExceptionCode,
+            (unsigned long long)(pc - exe), (unsigned long long)pc);
+        return EXCEPTION_CONTINUE_SEARCH;
+    });
+    LOG("BotW Xbox Recomp starting");
     CoreApplication::Run(make<App>());
     return 0;
 }

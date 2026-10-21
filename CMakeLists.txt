@@ -248,7 +248,7 @@ if(BOTW_PLATFORM STREQUAL "uwp")
     # DLLs NXbox does not import: load them on first use, so a console without one still starts and logs it.
     target_link_options(BotWRecomp PRIVATE /DELAYLOAD:D3DCOMPILER_47.dll /DELAYLOAD:XAudio2_9.dll
                         /DELAYLOAD:api-ms-win-gaming-deviceinformation-l1-1-0.dll
-                        /DELAYLOAD:api-ms-win-core-memory-l1-1-6.dll /DELAYLOAD:api-ms-win-core-psapi-l1-1-0.dll)
+                        /DELAYLOAD:api-ms-win-core-memory-l1-1-6.dll /DELAYLOAD:api-ms-win-core-psapi-l1-1-0.dll /DELAYLOAD:libcrypto-3-x64.dll)
     target_link_libraries(BotWRecomp PRIVATE delayimp)
   endif()
 endif()
