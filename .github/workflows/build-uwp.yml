@@ -35,6 +35,16 @@ jobs:
           # Shader translators run on the build host, outside the UWP sandbox.
           & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install --triplet x64-windows 'glslang[tools]' spirv-cross directx-dxc
           if ($LASTEXITCODE -ne 0) { throw 'Host shader tool installation failed' }
+      - name: Export third-party UWP libraries for local game builds
+        # Game code is compiled only on the player's machine (clang-cl + xwin, docs/CI.md);
+        # it links against these vcpkg trees. No game data is involved.
+        run: |
+          Compress-Archive -Path "$env:VCPKG_INSTALLATION_ROOT/installed/x64-uwp", "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -DestinationPath vcpkg-uwp-deps.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vcpkg-uwp-deps
+          retention-days: 30
+          path: vcpkg-uwp-deps.zip
       - name: Configure MSVC UWP x64 D3D12 runtime and launcher
         run: |
           cmake --preset ci-uwp
