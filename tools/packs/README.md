@@ -41,6 +41,78 @@ python3 -I tools/packs/recompile.py /external/game/code/U-King.rpx generated \
 # Optional: --llvm-mc /path/to/llvm-mc
 ```
 
+## Remaster selection
+
+Generate a console-specific selection from a player-supplied
+`graphicPacks/BreathOfTheWild` directory:
+
+```sh
+python3 -I tools/packs/preset.py remaster --console series_s \
+  /external/graphicPacks/BreathOfTheWild -o /external/selection.json
+# Use --console series_x for Xbox Series X.
+```
+
+The version 1 manifest references the original folders with paths relative to the
+manifest. No pack, shader or patch files are copied. Every selected category and
+preset is validated against `rules.txt`, including preset visibility/conditions.
+A changed or missing name is an error naming the pack and selection. Missing
+optional pack folders produce warnings and are skipped; `Mods/FPS++` is required.
+A present pack with missing or invalid rules is an error.
+
+The single selection table lives in `preset.py` and is shared by the build entry
+point. Choices match the inspected official pack revision exactly:
+
+| Setting | Series S | Series X |
+| --- | --- | --- |
+| FPS++ Mode / FPS Limit | Normal Settings / 60FPS Limit (Default) | Same |
+| Graphics Shadows | Ultra (300%) | Extreme (400%, Unstable) |
+| Graphics Shadow Draw Distance | High (Default) | Very High (Recommended) |
+| Graphics Anti-Aliasing | Normal FXAA (Default) | Same |
+| Enhancements Clarity | t3nka Neutral+ | Same |
+| Enhancements Reflection Range | Pack default (4 samples) | Medium (8 samples) |
+| Draw Distance NPCs / objects | Medium (1x) | High (1.25x) |
+| Draw Distance Trees (2D Billboards) | High | High |
+| Draw Distance Grass Blades Density | Medium (Default) | High |
+
+FPS++ explicitly owns timing (`timing: true`). Neutral+ keeps the color treatment
+close to natural; Series S uses lower shadow and scene detail to reduce cost.
+Series X takes the highest shadow tier not labelled "Not Recommended" in this
+revision; upstream labels that tier **Unstable**, so this is not a stability or
+60 fps performance claim. Neither console selects Resolution: FSR owns render
+resolution. Texture Distance Detail (LOD) and Anisotropic Filtering are omitted
+because D3D12 rejects LOD/anisotropy/format overrides. "High" tree billboards
+extend geometric detail without selecting texture LOD bias.
+
+No Workarounds are selected. AMDShaderCrash is explicitly OpenGL-only;
+GrassWorkaround is Vulkan-only. The other supplied workarounds target
+OpenGL, NVIDIA or Vulkan/ReShade, rather than the Xbox D3D12/AMD path.
+
+Generate and consume a temporary manifest directly during recompilation:
+
+```sh
+python3 -I tools/packs/recompile.py /external/game/code/U-King.rpx generated \
+  --preset remaster --console series_x \
+  --graphic-packs /external/graphicPacks/BreathOfTheWild
+```
+
+`--preset` and `--packs` are mutually exclusive. `--console` and `--graphic-packs`
+are required with `--preset` and cannot accompany `--packs`. Temporary manifests
+are removed after loading; resolved pack paths continue to reference the player's
+original directory.
+
+**Current runtime limitation:** this validates selection names, not the full
+pack build or rendering. Omitting a category does not suppress a pack's default
+presets or unconditional `[TextureRedefine]` sections. The inspected Graphics
+pack still emits resolution and format overrides, Enhancements emits anisotropy,
+and DrawDistance emits relative LOD bias. The current D3D12 validator rejects
+those unsupported fields; accepting Graphics texture rules would also disable
+built-in scaling even without an explicit Resolution selection (see
+[`runtime/src/packs/README.md`](../../runtime/src/packs/README.md)). Thus a
+versioned texture-filtering/build and renderer adaptation is still needed before
+this selection can provide an operational zero-configuration FSR remaster.
+The preset generator does not silently rewrite the player's rules or claim
+that selecting fewer categories removes those rules.
+
 This entry point installs an invocation-local `Image` hook into `tools/recompile.py`:
 load/decompress/relocate RPX -> resolve packs -> assemble and validate every write ->
 patch the guest Image -> analyze PPC -> generate C++. The source RPX is never modified.
@@ -157,6 +229,7 @@ for code-patch changes.
 ## Validation
 
 ```sh
+python3 -m pytest tools/packs/tests -q
 python3 -m unittest discover -s tools/packs/tests -v
 ```
 
