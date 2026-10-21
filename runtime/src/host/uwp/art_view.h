@@ -180,7 +180,7 @@ class ArtView {
             return 0;
         for (int i = 1; i <= 2; ++i) {
             float cy = 56 + (i - 1) * 64;
-            if ((x - 1224) * (x - 1224) + (y - cy) * (y - cy) <= 24 * 24)
+            if ((x - 56) * (x - 56) + (y - cy) * (y - cy) <= 24 * 24)
                 return i;
         }
         return -1;
@@ -249,13 +249,15 @@ class ArtView {
         target->DrawEllipse(D2D1::Ellipse(center, 24, 24), brush.Get(), 1);
         if (focus == 0 || loading) {
             float alpha = loading && reduced_motion ? float(.55 + .25 * std::sin(seconds * 2.1)) : 1.f;
-            brush->SetColor(D2D1::ColorF(accent.r, accent.g, accent.b, alpha));
+            brush->SetColor(white(alpha));
             target->DrawEllipse(D2D1::Ellipse(center, 155, 155), brush.Get(), 3);
         }
         // Accessibility names: disc = Play, gear = Settings, stacked boxes = Mods.
         for (int i = 1; i <= 2 && !loading; ++i) {
-            auto c = D2D1::Point2F(1224, 56 + (i - 1) * 64.f);
-            brush->SetColor(focus == i ? D2D1::ColorF(accent.r, accent.g, accent.b) : black(.9f));
+            // Top-left: the hero art's logo fills the top-right corner.
+            auto c = D2D1::Point2F(56, 56 + (i - 1) * 64.f);
+            // Focus is white: the accent comes from the art itself and vanishes on top of it.
+            brush->SetColor(focus == i ? white() : black(.9f));
             target->FillEllipse(D2D1::Ellipse(c, 24, 24), brush.Get());
             brush->SetColor(focus == i ? black() : white());
             if (i == 1) {

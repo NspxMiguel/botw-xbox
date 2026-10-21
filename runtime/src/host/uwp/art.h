@@ -111,11 +111,11 @@ struct GameArt {
     }
 };
 inline int home_focus(int focus, int direction) {
-    if (focus == 0 && (direction == 0 || direction == 1))
+    if (focus == 0 && (direction == 0 || direction == 3))  // icons sit top-left
         return 1;
     if (focus == 1 && direction == 2)
         return 2;
-    if (focus == 2 && (direction == 2 || direction == 3))
+    if (focus == 2 && (direction == 2 || direction == 1))
         return 0;
     if (focus == 2 && direction == 0)
         return 1;

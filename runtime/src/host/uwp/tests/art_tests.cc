@@ -146,9 +146,9 @@ int main() {
     }
     CHECK(std::abs(disc_angle(1.2 - 1e-8, true, false) - disc_angle(1.2 + 1e-8, true, false)) < .0001);
     CHECK(disc_angle(INFINITY, true, false) == 0);
-    CHECK(home_focus(0, 0) == 1 && home_focus(0, 1) == 1);
+    CHECK(home_focus(0, 0) == 1 && home_focus(0, 3) == 1 && home_focus(0, 1) == 0);
     CHECK(home_focus(1, 0) == 1 && home_focus(1, 2) == 2);
-    CHECK(home_focus(2, 2) == 0 && home_focus(2, 3) == 0);
+    CHECK(home_focus(2, 2) == 0 && home_focus(2, 1) == 0);
     std::cout << "TGA, accent, disc_angle monotonic/continuous/900 deg per second plateau/reduced motion and "
                  "focus tests passed\n";
 }
