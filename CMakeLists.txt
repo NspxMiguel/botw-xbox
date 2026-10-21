@@ -179,6 +179,8 @@ file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/mods/")
 list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/mods/catalog.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/mods/json_min.cpp
+  ${CMAKE_SOURCE_DIR}/runtime/src/mods/store.cpp
+  ${CMAKE_SOURCE_DIR}/runtime/src/mods/archive_install.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/mods/gamebanana.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/mods/zip_install.cpp)
 # END W8 mods
@@ -274,6 +276,14 @@ else()
   set(BOTW_ZSTD_TARGET zstd::libzstd)
 endif()
 target_link_libraries(cemu_gpu PRIVATE fmt::fmt OpenSSL::Crypto ${BOTW_ZSTD_TARGET})
+# The upstream libarchive package excludes UWP. A separately validated sandbox
+# build can opt in; ordinary Xbox builds retain the transactional ZIP backend.
+option(BOTW_MOD_LIBARCHIVE "Enable packaged libarchive for 7z/RAR mods" OFF)
+if(BOTW_MOD_LIBARCHIVE)
+  find_package(LibArchive REQUIRED)
+  target_compile_definitions(BotWRecomp PRIVATE BOTW_MOD_LIBARCHIVE=1)
+  target_link_libraries(BotWRecomp PRIVATE LibArchive::LibArchive)
+endif()
 target_link_libraries(BotWRecomp PRIVATE ZLIB::ZLIB fmt::fmt OpenSSL::Crypto ${BOTW_ZSTD_TARGET})
 if(BOTW_PLATFORM STREQUAL "apple")
   target_compile_options(

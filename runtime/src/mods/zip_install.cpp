@@ -196,6 +196,18 @@ void extract(Archive &a, const Entry &e, const fs::path &root) {
     if (!out)
         bad();
 }
+fs::path unique_dir(const fs::path &root, const std::string &name) {
+    for (unsigned i = 0; i < 100000; ++i) {
+        auto p = root / path8(name + (i ? " (" + std::to_string(i + 1) + ")" : ""));
+        std::error_code error;
+        if (fs::create_directory(p, error))
+            return p;
+        if (error && error != std::errc::file_exists)
+            throw fs::filesystem_error("Create unique mod directory", p, error);
+    }
+    bad();
+}
+} // namespace
 fs::path find_root(const fs::path &root, int depth, bool graphics) {
     if (graphics ? fs::is_regular_file(root / "rules.txt")
                  : fs::is_directory(root / "content") || fs::is_directory(root / "aoc"))
@@ -214,19 +226,19 @@ fs::path find_root(const fs::path &root, int depth, bool graphics) {
     }
     return {};
 }
-fs::path unique_dir(const fs::path &root, const std::string &name) {
-    for (unsigned i = 0; i < 100000; ++i) {
-        auto p = root / path8(name + (i ? " (" + std::to_string(i + 1) + ")" : ""));
-        std::error_code error;
-        if (fs::create_directory(p, error))
-            return p;
-        if (error && error != std::errc::file_exists)
-            throw fs::filesystem_error("Create unique mod directory", p, error);
+bool selected_pack_directory(const fs::path &directory, std::string_view selection) {
+    auto modern = selection.find("BreathOfTheWild/");
+    if (modern != selection.npos) {
+        auto suffix = std::string(selection.substr(modern));
+        auto candidate = directory.generic_u8string();
+        std::string path(candidate.begin(), candidate.end());
+        return path == suffix || (path.size() > suffix.size() && path.ends_with("/" + suffix));
     }
-    bad();
+    auto name = fs::path(std::string(selection)).filename();
+    return name.string().starts_with("BreathOfTheWild_") && directory.filename() == name;
 }
-} // namespace
-InstallResult install_zip(const fs::path &archive, const fs::path &root, std::string_view name) {
+InstallResult install_zip(const fs::path &archive, const fs::path &root, std::string_view name,
+                          std::string_view pack_path) {
     Archive a(archive);
     auto list = entries(a);
     fs::create_directories(root / ".downloads");
@@ -235,9 +247,21 @@ InstallResult install_zip(const fs::path &archive, const fs::path &root, std::st
     try {
         for (auto &e : list)
             extract(a, e, staging);
-        auto source = find_root(staging, 0, false);
-        bool graphics = source.empty();
-        if (graphics)
+        fs::path source;
+        if (!pack_path.empty()) {
+            // Match an exact BotW pack directory inside a release, never the first pack in the ZIP.
+            for (auto &entry : fs::recursive_directory_iterator(staging))
+                if (entry.is_directory() && selected_pack_directory(entry.path(), pack_path) &&
+                    fs::is_regular_file(entry.path() / "rules.txt")) {
+                    source = entry.path();
+                    break;
+                }
+            if (source.empty())
+                bad();
+        } else
+            source = find_root(staging, 0, false);
+        bool graphics = !pack_path.empty() || source.empty();
+        if (graphics && source.empty())
             source = find_root(staging, 0, true);
         if (source.empty())
             bad();

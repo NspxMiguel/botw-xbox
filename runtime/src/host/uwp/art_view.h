@@ -3,6 +3,7 @@
 // Header-only so the host's existing source list remains sufficient.
 #include "art.h"
 #include "materials.h"
+#include "store_view.h"
 #include "ui_style.h"
 #include <chrono>
 #include <d2d1.h>
@@ -11,6 +12,7 @@
 #include <d3d11.h>
 #include <dwrite.h>
 #include <dxgi1_2.h>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <wrl/client.h>
@@ -49,7 +51,8 @@ class ArtView {
     std::chrono::steady_clock::time_point last_tick{};
     double elapsed = 0;
     Ptr<IDWriteFactory> fonts;
-    Ptr<IDWriteTextFormat> title_font, body_font, mono_font;
+    Ptr<IDWriteTextFormat> title_font, body_font, mono_font, store_title_font, store_card_font,
+        store_body_font, store_meta_font;
     Ptr<ID2D1Bitmap> hero, disc;
     Ptr<ID2D1PathGeometry> disc_mask;
     Ptr<ID2D1Layer> disc_layer;
@@ -82,6 +85,13 @@ class ArtView {
     }
 
   public:
+    StoreView store;
+    std::map<std::string, Ptr<ID2D1Bitmap>> thumbnails;
+    void store_image(const std::string &url, const ArtImage &image) {
+        if (thumbnails.size() >= 18)
+            thumbnails.erase(thumbnails.begin());
+        thumbnails[url] = bitmap(image);
+    }
     bool shown = false, loading = false;
     bool missing_game = false, silver_setup = false;
     double flip_time = -1;
@@ -113,6 +123,10 @@ class ArtView {
         }
     }
     void navigate(int direction) {
+        if (store.active) {
+            store.navigate(direction, focus);
+            return;
+        }
         // 0 up, 1 right, 2 down, 3 left. Disc=Play, gear=Settings, boxes=Mods.
         if (mods_mode || setup_mode) {
             step(direction == 0 || direction == 3 ? -1 : 1);
@@ -194,6 +208,25 @@ class ArtView {
                                       DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                       art_style::body_size, L"", &body_font));
         check(target->CreateSolidColorBrush(art_style::white(), &brush));
+        check(fonts->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                      art_style::store_title_size, L"", &store_title_font));
+        check(fonts->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                      art_style::store_card_size, L"", &store_card_font));
+        check(fonts->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                      art_style::store_body_size, L"", &store_body_font));
+        check(fonts->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                      art_style::store_meta_size, L"", &store_meta_font));
+        Ptr<IDWriteInlineObject> ellipsis;
+        check(fonts->CreateEllipsisTrimmingSign(store_card_font.Get(), &ellipsis));
+        DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        check(store_card_font->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP));
+        check(store_card_font->SetTrimming(&trimming, ellipsis.Get()));
+        check(store_meta_font->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP));
+        check(store_meta_font->SetTrimming(&trimming, ellipsis.Get()));
         check(fonts->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                       DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                       art_style::body_size, L"", &mono_font));
@@ -226,6 +259,31 @@ class ArtView {
     int hit(float x, float y) const {
         x *= art_style::width / pixel_w;
         y *= art_style::height / pixel_h;
+        if (store.active) {
+            if (store.detail) {
+                if (x >= 724 && y >= 430 && y < 634)
+                    return std::clamp(int((y - 430) / 64) * 2 + (x >= 970 ? 1 : 0), 0, 5);
+                return -1;
+            }
+            if (store.error && y >= 642 && y < 684 && x >= 300)
+                return -70;
+            if (y >= 52 && y < 102) {
+                if (x >= 820)
+                    return -50;
+                if (x >= 300)
+                    return -60 - std::clamp(int((x - 300) / 164), 0, 2);
+            }
+            if (y >= 126 && y < 174 && x >= 300)
+                return -40 - std::clamp(int((x - 300) / 180), 0, 4);
+            if (x >= 48 && x < 276 && y >= 204 && y < 636)
+                return -20 - std::clamp(int((y - 204) / 48), 0, 8);
+            if (x >= 300 && x < 1216 && y >= 200 && y < 640) {
+                int i = int((y - 200) / 230) * 3 + int((x - 300) / 312) + int(store.first(focus));
+                if (i < int(store.cards.size()))
+                    return i;
+            }
+            return -1;
+        }
         if (mods_mode || setup_mode) {
             auto first = first_row();
             for (size_t i = first; i < rows.size() && i < first + (diagnostics_mode ? 7
@@ -328,6 +386,280 @@ class ArtView {
         frame_saved = true;
         check(swapchain->Present(1, 0));
     }
+    Spring store_pop;
+    int store_previous_focus = -999;
+    void draw_store(double dt, bool reduced_motion) {
+        using namespace art_style;
+        using namespace store_layout;
+        if (store_previous_focus != focus) {
+            store_pop.value = 0;
+            store_pop.velocity = 0;
+            store_previous_focus = focus;
+        }
+        store_pop.step(reduced_motion ? 0 : 1, dt, 14, .48);
+        brush->SetColor(D2D1::ColorF(store_silver));
+        target->FillRectangle(D2D1::RectF(0, 0, 1280, 720), brush.Get());
+        auto ink = D2D1::ColorF(store_ink), muted = D2D1::ColorF(store_muted);
+        auto utf = [](const std::string &s) {
+            int count = MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), nullptr, 0);
+            std::wstring out(size_t(count), L' ');
+            if (count)
+                MultiByteToWideChar(CP_UTF8, 0, s.data(), int(s.size()), out.data(), count);
+            return out;
+        };
+        auto label = [&](Text t) { return store.label(t); };
+        auto write = [&](std::wstring s, float x, float y, float w, float h, bool bold = false,
+                         bool card = false, bool secondary = false) {
+            target->PushAxisAlignedClip(D2D1::RectF(x, y, x + w, y + h), D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            target->DrawText(s.c_str(), UINT32(s.size()),
+                             secondary ? store_meta_font.Get()
+                             : card    ? store_card_font.Get()
+                             : bold    ? store_title_font.Get()
+                                       : store_body_font.Get(),
+                             D2D1::RectF(x, y, x + w, y + h), brush.Get());
+            target->PopAxisAlignedClip();
+        };
+        auto pill = [&](std::wstring s, float x, float y, float w, bool selected, bool enabled = true,
+                        bool focused = false) {
+            D2D1_MATRIX_3X2_F previous;
+            target->GetTransform(&previous);
+            if (focused && !reduced_motion) {
+                float scale = 1 + float(store_pop.value) * .02f;
+                target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, D2D1::Point2F(x + w / 2, y + 24)) *
+                                     previous);
+            }
+            brush->SetColor(selected ? ink : white(.96f));
+            target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + 48), 24, 24),
+                                         brush.Get());
+            brush->SetColor(selected ? white() : black(enabled ? .92f : .38f));
+            write(s, x + 18, y + 13, w - 32, 32, false, false, true);
+            target->SetTransform(previous);
+        };
+        auto image = [&](const mods::store::Card &c, size_t index, float x, float y, float w, float h) {
+            brush->SetColor(black(.06f));
+            target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), 16, 16),
+                                         brush.Get());
+            if (!c.images.empty()) {
+                auto found = thumbnails.find(c.images[index % c.images.size()]);
+                if (found != thumbnails.end()) {
+                    auto size = found->second->GetSize();
+                    float scale = std::max(w / size.width, h / size.height);
+                    float sw = w / scale, sh = h / scale;
+                    auto src = D2D1::RectF((size.width - sw) / 2, (size.height - sh) / 2,
+                                           (size.width + sw) / 2, (size.height + sh) / 2);
+                    Ptr<ID2D1RoundedRectangleGeometry> clip;
+                    check(factory->CreateRoundedRectangleGeometry(
+                        D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), 15, 15), &clip));
+                    target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), clip.Get()), nullptr);
+                    target->DrawBitmap(found->second.Get(), D2D1::RectF(x, y, x + w, y + h), 1,
+                                       D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, src);
+                    target->PopLayer();
+                    return;
+                }
+            }
+            brush->SetColor(muted);
+            write(label(Text::store_no_image), x + 20, y + h / 2 - 12, w - 40, 30);
+        };
+        brush->SetColor(ink);
+        write(label(Text::mods), 47, 26, 215, 64, true);
+        if (store.detail) {
+            auto &c = *store.detail;
+            image(c, size_t(store.image), hero_x, hero_y, hero_w, hero_h);
+            brush->SetColor(ink);
+            write(utf(c.title), 724, 140, 508, 86, true);
+            write(utf(c.author + " · " + c.source), 724, 232, 508, 30);
+            write(utf(c.version + " · " + c.date), 724, 268, 508, 30);
+            brush->SetColor(muted);
+            write(label(c.locked ? Text::recompile_apply : Text::store_compat), 724, 310, 508, 64);
+            if (!c.installed_id.empty()) {
+                write(label(Text::store_order) + L" · " + std::to_wstring(c.order + 1) + L" / " +
+                          std::to_wstring(c.total),
+                      724, 382, 508, 36);
+            }
+            brush->SetColor(ink);
+            write(utf(c.description), 48, 478, 640, 72);
+            for (size_t i = 0; i < c.images.size(); ++i) {
+                brush->SetColor(i == size_t(store.image) % c.images.size() ? ink : black(.3f));
+                float x = 336 + float(i) * 14;
+                target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(x, 464), 3, 3), brush.Get());
+            }
+            if (!c.presets.empty()) {
+                std::wstring presets = label(Text::store_presets) + L": ";
+                for (auto &p : c.presets)
+                    presets += utf(p) + L" · ";
+                write(presets, 48, 550, 640, 24);
+            }
+            std::array<std::wstring, 6> actions = {
+                label(store.detail_error ? Text::retry
+                      : c.update()       ? Text::store_update
+                                         : Text::store_install),
+                label(c.enabled ? Text::store_disable : Text::store_enable),
+                label(Text::store_remove),
+                label(Text::mods_up),
+                label(Text::mods_down),
+                label(Text::store_files)};
+            for (int i = 0; i < 6; ++i)
+                pill(actions[i], 724 + float(i % 2) * 246, 430 + float(i / 2) * 64, 230,
+                     focus == i && store.action_enabled(i), store.action_enabled(i),
+                     focus == i && store.action_enabled(i));
+            brush->SetColor(muted);
+            write(label(Text::store_files), 48, 576, 640, 24);
+            size_t file_first = focus >= 6 ? size_t((focus - 6) / 3) * 3 : size_t(store.file / 3) * 3;
+            for (size_t i = file_first; i < c.downloads.size() && i < file_first + 3; ++i) {
+                auto &f = c.downloads[i];
+                brush->SetColor(int(i) == store.file ? ink : muted);
+                write((int(i) == store.file ? L"› " : L"  ") + utf(f.name) + L" · " +
+                          std::to_wstring(f.size / 1024) + L" KiB",
+                      48, 604 + float(i - file_first) * 24, 640, 24);
+            }
+            if (store.progress >= 0) {
+                brush->SetColor(black(.12f));
+                target->FillRectangle(D2D1::RectF(724, 638, 1200, 646), brush.Get());
+                brush->SetColor(ink);
+                target->FillRectangle(
+                    D2D1::RectF(724, 638, 724 + 476 * std::clamp(store.progress, 0.f, 1.f), 646),
+                    brush.Get());
+            }
+            brush->SetColor(muted);
+            write(store.status.empty() ? label(Text::store_detail_hints) : store.status, 48, 684, 1184, 28);
+            return;
+        }
+        for (int i = 0; i < 3; ++i) {
+            float x = i == 0 ? 267.f : i == 1 ? 447.f : 647.f;
+            float w = i == 0 ? 157.f : i == 1 ? 177.f : 200.f;
+            bool selected = store.tab == i || focus == -60 - i;
+            if (selected) {
+                brush->SetColor(ink);
+                target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, 35, x + w, 82), 24, 24),
+                                             brush.Get());
+            }
+            brush->SetColor(selected ? white() : ink);
+            write(label(static_cast<Text>(int(Text::store_explore) + i)), x + 18, 44, w - 26, 34, false,
+                  true);
+        }
+        brush->SetColor(white());
+        auto search = D2D1::RoundedRect(D2D1::RectF(47, 104, 1233, 159), 28, 28);
+        target->FillRoundedRectangle(search, brush.Get());
+        if (focus == -50) {
+            brush->SetColor(ink);
+            target->DrawRoundedRectangle(search, brush.Get(), 2);
+        }
+        brush->SetColor(muted);
+        target->DrawEllipse(D2D1::Ellipse(D2D1::Point2F(76, 129), 9, 9), brush.Get(), 2);
+        target->DrawLine(D2D1::Point2F(82, 135), D2D1::Point2F(91, 144), brush.Get(), 2);
+        write(store.query.empty() ? label(Text::store_search_placeholder) : store.query, 109, 117, 1090, 32);
+        const float source_x[] = {47, 234, 396, 560, 643};
+        const float source_w[] = {177, 152, 154, 73, 76};
+        for (int i = 0; i < 5; ++i) {
+            bool selected = store.source == i || focus == -40 - i;
+            brush->SetColor(selected ? ink : white());
+            target->FillRoundedRectangle(
+                D2D1::RoundedRect(D2D1::RectF(source_x[i], 177, source_x[i] + source_w[i], 215), 19, 19),
+                brush.Get());
+            brush->SetColor(selected ? white() : ink);
+            write(store.source_label(i), source_x[i] + 12, 184, source_w[i] - 24, 30);
+        }
+        for (int i = 0; i < 9; ++i) {
+            float y = 237 + float(i) * 41;
+            D2D1_MATRIX_3X2_F before;
+            target->GetTransform(&before);
+            if (focus == -20 - i && !reduced_motion) {
+                float scale = 1 + float(store_pop.value) * .02f;
+                target->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale, D2D1::Point2F(162, y + 18)) *
+                                     before);
+            }
+            if (store.category == i || focus == -20 - i) {
+                brush->SetColor(ink);
+                target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(37, y, 279, y + 36), 18, 18),
+                                             brush.Get());
+            }
+            brush->SetColor(store.category == i || focus == -20 - i ? white() : ink);
+            write(store.category_label(i), 51, y + 4, 220, 32);
+            target->SetTransform(before);
+        }
+        auto first = store.first(focus);
+        for (size_t n = 0; n < 6; ++n) {
+            auto i = first + n;
+            if (i >= store.cards.size() && !store.busy)
+                break;
+            float x = grid_x + float(n % 3) * (card_w + gap), y = grid_y + float(n / 3) * (card_h + gap);
+            bool selected = int(i) == focus;
+            float grow = selected && !reduced_motion ? float(store_pop.value) * 4 : 0;
+            D2D1_MATRIX_3X2_F transform;
+            target->GetTransform(&transform);
+            target->SetTransform(D2D1::Matrix3x2F::Scale(1 + grow / card_w, 1 + grow / card_w,
+                                                         D2D1::Point2F(x + card_w / 2, y + card_h / 2)) *
+                                 transform);
+            brush->SetColor(white());
+            target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y, x + card_w, y + card_h), 18, 18),
+                                         brush.Get());
+            if (selected) {
+                brush->SetColor(ink);
+                target->DrawRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(x - 4, y - 4, x + card_w + 4, y + card_h + 4), 20, 20),
+                    brush.Get(), 3);
+            }
+            if (i >= store.cards.size()) {
+                brush->SetColor(black(float(.06 + .04 * std::sin(elapsed * 3))));
+                target->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(x + 3, y + 3, x + card_w - 3, y + image_h + 3), 16, 16),
+                    brush.Get());
+                target->FillRectangle(D2D1::RectF(x + 16, y + 136, x + 238, y + 154), brush.Get());
+                target->SetTransform(transform);
+                continue;
+            }
+            auto &c = store.cards[i];
+            image(c, 0, x + 3, y + 3, card_w - 6, image_h);
+            brush->SetColor(ink);
+            write(utf(c.title), x + 13, y + 127, card_w - 26, 32, false, true);
+            brush->SetColor(muted);
+            std::wstring meta = c.source == "Graphic packs" ? L"GitHub packs" : utf(c.source);
+            if (c.size)
+                meta += L" · " + std::to_wstring(c.size / 1024) + L" KiB";
+            else if (c.downloads_count)
+                meta += L" · ↓ " + std::to_wstring(c.downloads_count);
+            write(meta, x + 13, y + 160, card_w - 26, 26, false, false, true);
+            if (!c.installed_id.empty()) {
+                float badge_w = c.update() ? 100.f : 34.f;
+                float right = x + card_w - 10;
+                brush->SetColor(white(.96f));
+                target->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(right - badge_w, y + 10, right, y + 40), 15, 15),
+                    brush.Get());
+                brush->SetColor(ink);
+                if (c.update())
+                    write(label(Text::store_update_badge), right - badge_w + 10, y + 12, badge_w - 16, 26);
+                else {
+                    target->DrawLine(D2D1::Point2F(right - 25, y + 25), D2D1::Point2F(right - 19, y + 31),
+                                     brush.Get(), 2);
+                    target->DrawLine(D2D1::Point2F(right - 19, y + 31), D2D1::Point2F(right - 9, y + 19),
+                                     brush.Get(), 2);
+                }
+            }
+            target->SetTransform(transform);
+        }
+        if (store.cards.empty() && !store.busy) {
+            brush->SetColor(ink);
+            write(label(store.error ? Text::store_error : Text::store_empty), 340, 300, 820, 60, true);
+            brush->SetColor(muted);
+            write(label(store.source == 3   ? Text::store_link_hint
+                        : store.source == 4 ? Text::store_usb_hint
+                                            : Text::store_empty_hint),
+                  340, 374, 820, 80);
+            write(store.recent, 340, 468, 820, 120);
+        }
+        if (store.error && focus == -70) {
+            brush->SetColor(ink);
+            target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(300, 642, 1232, 684), 21, 21),
+                                         brush.Get());
+        }
+        brush->SetColor(store.error && focus == -70 ? white() : muted);
+        write(store.offline ? label(Text::store_offline)
+              : store.busy  ? label(Text::store_busy)
+                            : store.status,
+              300, 650, 920, 28);
+        write(label(Text::store_hints), 48, 686, 1184, 28);
+    }
     void draw(double seconds, bool reduced_motion) {
         if (!shown || !target)
             return;
@@ -360,6 +692,11 @@ class ArtView {
         target->Clear(black());
         if (loading && seconds >= 3.2) {
             draw_gold(reduced_motion ? 0 : elapsed, float(ease((seconds - 3.2) / .4)));
+            finish_frame();
+            return;
+        }
+        if (store.active) {
+            draw_store(dt, reduced_motion);
             finish_frame();
             return;
         }
@@ -465,7 +802,8 @@ class ArtView {
             return;
         }
         if (mods_mode) {
-            brush->SetColor(white());
+            target->DrawBitmap(silver_bg.Get(), D2D1::RectF(0, 0, width, height));
+            brush->SetColor(black(.92f));
             text(heading, D2D1::RectF(margin, 48, width - margin, 96), true);
             text(detail, D2D1::RectF(margin, 104, width - margin, 152));
             auto first = first_row();
@@ -474,14 +812,14 @@ class ArtView {
                 auto rect = D2D1::RectF(margin, top, width - margin, top + button_h);
                 bool focused = static_cast<int>(i) == focus && enabled(i);
                 if (focused) {
-                    brush->SetColor(D2D1::ColorF(accent.r, accent.g, accent.b));
+                    brush->SetColor(black(.92f));
                     target->FillRoundedRectangle(D2D1::RoundedRect(rect, button_h / 2, button_h / 2),
                                                  brush.Get());
                 }
-                brush->SetColor(focused ? black() : white(enabled(i) ? 1.f : .4f));
+                brush->SetColor(focused ? white() : black(enabled(i) ? .92f : .4f));
                 text(rows[i], D2D1::RectF(margin + 24, top + 17, width - margin - 24, top + button_h));
             }
-            brush->SetColor(white());
+            brush->SetColor(black(.72f));
             text(loading_text, D2D1::RectF(margin, 632, width - margin, 700));
             finish_frame();
             return;

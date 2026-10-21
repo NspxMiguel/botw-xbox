@@ -3,8 +3,10 @@
 #include "../../host/window.h"
 #include "../../latte/latte.h"
 #include "../../log.h"
+#include "../../mods/archive_install.h"
 #include "../../mods/catalog.h"
 #include "../../mods/gamebanana.h"
+#include "../../mods/store.h"
 #include "../../mods/zip_install.h"
 #include "../../settings.h"
 #include "art_png.h"
@@ -24,6 +26,7 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <future>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -204,6 +207,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     winrt::Windows::UI::Text::Core::CoreTextRange text_selection{};
     event_token pointer_moved{}, character_received{};
     int mods_action = 0;
+    uwp::setup::Repeat store_repeat;
+    uint64_t store_generation = 0;
+    std::atomic<bool> store_fetching{false};
+    bool store_request = false;
+    std::shared_ptr<uwp::StoreRequests> store_requests = std::make_shared<uwp::StoreRequests>();
+    std::filesystem::path store_root;
+    std::vector<mods::store::Card> store_installed;
+    std::vector<mods::store::Card> store_available;
     uint32_t home_buttons = ~uint32_t(0);
     std::chrono::steady_clock::time_point loading_since{};
     event_token key_down{}, pointer_pressed{};
@@ -349,9 +360,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (key == VirtualKey::Escape)
                     mods_action = 1;
                 if (key == VirtualKey::X)
-                    mods_action = -1;
+                    mods_action = home.store.active ? 2 : -1;
                 if (key == VirtualKey::Y)
-                    mods_action = 2;
+                    mods_action = home.store.active ? 3 : 2;
+                if (key == VirtualKey::PageUp)
+                    mods_action = 4;
+                if (key == VirtualKey::PageDown)
+                    mods_action = 5;
+                if (key == VirtualKey::Q)
+                    mods_action = 6;
+                if (key == VirtualKey::E)
+                    mods_action = 7;
             }
             if (key == VirtualKey::Left || key == VirtualKey::Up)
                 home.navigate(key == VirtualKey::Up ? 0 : 3);
@@ -363,7 +382,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 home.selected = home.focus;
         });
         pointer_pressed = window.PointerPressed([this](auto const &, PointerEventArgs const &e) {
-            if (!home.shown || home.loading || home.flip_time >= 0 || setup_busy)
+            if (!home.shown || home.loading || home.flip_time >= 0 || setup_busy || transfer_active)
                 return;
             auto point = e.CurrentPoint().Position();
             auto bounds = host_window.Bounds();
@@ -376,7 +395,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             auto p = e.CurrentPoint().Position();
             auto bounds = host_window.Bounds();
             int hit = home.hit(p.X * pixel_width / bounds.Width, p.Y * pixel_height / bounds.Height);
-            if (hit >= 0)
+            if (hit >= 0 || (home.store.active && hit != -1))
                 home.focus = hit;
         });
         character_received =
@@ -1419,11 +1438,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             text_selection = args.Selection();
             args.Result(CoreTextSelectionUpdatingResult::Succeeded);
         });
-        edit_context.LayoutRequested([](auto const &, CoreTextLayoutRequestedEventArgs const &args) {
+        edit_context.LayoutRequested([this](auto const &, CoreTextLayoutRequestedEventArgs const &args) {
             auto window = host_window.Bounds();
             auto bounds = args.Request().LayoutBounds();
-            Rect field{window.X + 64 * window.Width / 1280, window.Y + 160 * window.Height / 720,
-                       1152 * window.Width / 1280, 56 * window.Height / 720};
+            bool store = home.store.active;
+            Rect field{window.X + (store ? 820 : 64) * window.Width / 1280,
+                       window.Y + (store ? 52 : 160) * window.Height / 720,
+                       (store ? 412 : 1152) * window.Width / 1280, (store ? 48 : 56) * window.Height / 720};
             bounds.ControlBounds(field);
             bounds.TextBounds(field);
         });
@@ -1569,7 +1590,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             error = true;
         }
         transfer_active = false;
-        transfer.pending = nullptr;
+        transfer.set_pending(nullptr);
         *progress_active = false;
         std::error_code ec;
         std::filesystem::remove(path, ec);
@@ -1686,7 +1707,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             error = true;
         }
         transfer_active = false;
-        transfer.pending = nullptr;
+        transfer.set_pending(nullptr);
         if (error && !transfer.cancelled)
             co_await choose(label(uwp::Text::mods), label(uwp::Text::online_error), {label(uwp::Text::back)});
     }
@@ -1702,7 +1723,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                                                : uwp::Text::rebuild))
                              : L"");
     }
-    IAsyncAction manage_mods() {
+#include "store_app.inl"
+    IAsyncAction manage_mods_legacy() {
         auto folder = co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
         mods::ModCatalog catalog;
         auto root = std::filesystem::path(folder.Path().c_str());
@@ -2170,7 +2192,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 home.stick_y = std::abs(reading.RightThumbstickY) > .12 ? float(reading.RightThumbstickY) : 0;
             }
             auto buttons = static_cast<uint32_t>(reading.Buttons);
-            if (setup_active) {
+            if (setup_active || home.store.active) {
                 if (reading.LeftThumbstickX < -.5)
                     buttons |= uwp::left;
                 if (reading.LeftThumbstickX > .5)
@@ -2180,6 +2202,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (reading.LeftThumbstickY > .5)
                     buttons |= uwp::up;
             }
+            if (home.store.active) {
+                if (reading.LeftTrigger > .55)
+                    buttons |= 1u << 20;
+                if (reading.RightTrigger > .55)
+                    buttons |= 1u << 21;
+            }
+            // Track edges through transfers and dialogs, even while store actions are blocked.
+            double store_now =
+                std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+            auto store_pressed =
+                store_repeat.update(buttons, uwp::up | uwp::down | uwp::left | uwp::right, store_now);
             if (home_buttons == ~uint32_t(0)) {
                 if (!buttons) {
                     home_buttons = 0;
@@ -2233,6 +2266,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     home_buttons = buttons;
                     return;
                 }
+                if (home.store.active)
+                    pressed = store_pressed;
                 if (pressed & uwp::up)
                     home.navigate(0);
                 if (pressed & uwp::right)
@@ -2251,10 +2286,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 } else if (mods_open) {
                     if (pressed & uwp::b)
                         mods_action = 1;
-                    if (pressed & (uwp::x | uwp::lb))
-                        mods_action = -1;
-                    if (pressed & (uwp::y | uwp::rb))
-                        mods_action = 2;
+                    if (pressed & uwp::x)
+                        mods_action = home.store.active ? 2 : -1;
+                    if (pressed & uwp::y)
+                        mods_action = home.store.active ? 3 : 2;
+                    if (pressed & uwp::lb)
+                        mods_action = home.store.active ? 4 : -1;
+                    if (pressed & uwp::rb)
+                        mods_action = home.store.active ? 5 : 2;
+                    if (pressed & (1u << 20))
+                        mods_action = 6;
+                    if (pressed & (1u << 21))
+                        mods_action = 7;
                 }
                 if (!mods_open && !browser_open && (pressed & uwp::menu))
                     home.selected = 1;
