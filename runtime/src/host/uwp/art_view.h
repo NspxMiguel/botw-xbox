@@ -363,6 +363,8 @@ class ArtView {
             finish_frame();
             return;
         }
+        if (!setup_mode && !hero) // every menu shares the light silver look; only loading is black
+            target->DrawBitmap(silver_bg.Get(), D2D1::RectF(0, 0, width, height));
         if (setup_mode) {
             if (silver_setup)
                 target->DrawBitmap(silver_bg.Get(), D2D1::RectF(0, 0, width, height));
@@ -608,10 +610,11 @@ class ArtView {
         }
         target->SetTransform(transform);
         target->PopLayer();
-        brush->SetColor(white(float(1 - ease(std::max(0., flip_time) / 2))));
+        float label = float(1 - ease(std::max(0., flip_time) / 2));
+        brush->SetColor(hero ? white(label) : black(.92f * label));
         text(heading, D2D1::RectF(margin, 626, 1100, 672), true);
-        // Only missing-game/failure messages may accompany the title on home.
-        if (!loading)
+        // First run shows only the "?" disc; failure messages may still accompany the title.
+        if (!loading && !missing_game)
             text(detail, D2D1::RectF(margin, 674, 1150, 720));
         if (loading) {
             brush->SetColor(black(fade));
