@@ -252,7 +252,7 @@ class ArtView {
             brush->SetColor(white(alpha));
             target->DrawEllipse(D2D1::Ellipse(center, 155, 155), brush.Get(), 3);
         }
-        // Accessibility names: disc = Play, gear = Settings, stacked boxes = Mods.
+        // Accessibility names: disc = Play, gear = Settings, puzzle piece = Mods.
         for (int i = 1; i <= 2 && !loading; ++i) {
             // Top-left: the hero art's logo fills the top-right corner.
             auto c = D2D1::Point2F(56, 56 + (i - 1) * 64.f);
@@ -260,22 +260,28 @@ class ArtView {
             brush->SetColor(focus == i ? white() : black(.9f));
             target->FillEllipse(D2D1::Ellipse(c, 24, 24), brush.Get());
             brush->SetColor(focus == i ? black() : white());
-            if (i == 1) {
-                target->DrawEllipse(D2D1::Ellipse(c, 9, 9), brush.Get(), 2);
-                target->DrawEllipse(D2D1::Ellipse(c, 3, 3), brush.Get(), 2);
-                for (int tooth = 0; tooth < 8; ++tooth) {
-                    double angle = tooth * 3.141592653589793 / 4;
-                    target->DrawLine(
-                        D2D1::Point2F(c.x + 9 * float(std::cos(angle)), c.y + 9 * float(std::sin(angle))),
-                        D2D1::Point2F(c.x + 14 * float(std::cos(angle)), c.y + 14 * float(std::sin(angle))),
-                        brush.Get(), 3);
-                }
-            } else {
-                target->DrawRectangle(D2D1::RectF(c.x - 11, c.y - 6, c.x + 5, c.y + 10), brush.Get(), 2);
-                target->DrawLine(D2D1::Point2F(c.x - 5, c.y - 11), D2D1::Point2F(c.x + 11, c.y - 11),
-                                 brush.Get(), 2);
-                target->DrawLine(D2D1::Point2F(c.x + 11, c.y - 11), D2D1::Point2F(c.x + 11, c.y + 5),
-                                 brush.Get(), 2);
+            if (i == 1) {  // solid gear with a hole
+                Ptr<ID2D1PathGeometry> gear;
+                Ptr<ID2D1GeometrySink> sink;
+                check(factory->CreatePathGeometry(&gear));
+                check(gear->Open(&sink));
+                auto points = gear_outline();
+                sink->BeginFigure(D2D1::Point2F(c.x + points[0].first, c.y + points[0].second),
+                                  D2D1_FIGURE_BEGIN_FILLED);
+                for (size_t p = 1; p < points.size(); ++p)
+                    sink->AddLine(D2D1::Point2F(c.x + points[p].first, c.y + points[p].second));
+                sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                check(sink->Close());
+                target->FillGeometry(gear.Get(), brush.Get());
+                brush->SetColor(focus == i ? white() : black(.9f));
+                target->FillEllipse(D2D1::Ellipse(c, 4.5f, 4.5f), brush.Get());
+            } else {  // puzzle piece: body plus a knob on top and on the right
+                target->FillRectangle(D2D1::RectF(c.x - 10, c.y - 6, c.x + 6, c.y + 10), brush.Get());
+                target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x - 2, c.y - 9), 4.5f, 4.5f), brush.Get());
+                target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x + 9, c.y + 2), 4.5f, 4.5f), brush.Get());
+                brush->SetColor(focus == i ? white() : black(.9f));  // sockets on the left and bottom
+                target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x - 10, c.y + 2), 3.5f, 3.5f), brush.Get());
+                target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x - 2, c.y + 10), 3.5f, 3.5f), brush.Get());
             }
         }
         brush->SetColor(white());

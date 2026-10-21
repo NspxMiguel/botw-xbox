@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+#include <cmath>
 #include "../art.h"
 #include <cstdlib>
 #include <iostream>
@@ -146,6 +147,14 @@ int main() {
     }
     CHECK(std::abs(disc_angle(1.2 - 1e-8, true, false) - disc_angle(1.2 + 1e-8, true, false)) < .0001);
     CHECK(disc_angle(INFINITY, true, false) == 0);
+    {
+        auto g = gear_outline();
+        CHECK(g.size() == 32);
+        for (auto [x, y] : g) {
+            float r = std::sqrt(x * x + y * y);
+            CHECK(r > 9.9f && r < 14.1f);
+        }
+    }
     CHECK(home_focus(0, 0) == 1 && home_focus(0, 3) == 1 && home_focus(0, 1) == 0);
     CHECK(home_focus(1, 0) == 1 && home_focus(1, 2) == 2);
     CHECK(home_focus(2, 2) == 0 && home_focus(2, 1) == 0);

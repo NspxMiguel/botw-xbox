@@ -110,6 +110,17 @@ struct GameArt {
         return tv ? art_accent(*tv) : icon ? art_accent(*icon) : drc ? art_accent(*drc) : ArtColor{};
     }
 };
+// Filled gear silhouette around the origin: 8 trapezoid teeth, root radius 10, tip radius 14.
+inline std::vector<std::pair<float, float>> gear_outline() {
+    std::vector<std::pair<float, float>> points;
+    const double deg = 3.141592653589793 / 180;
+    for (int tooth = 0; tooth < 8; ++tooth) {
+        double a = tooth * 45 * deg;
+        for (auto [r, da] : {std::pair{10., -16.}, {14., -9.}, {14., 9.}, {10., 16.}})
+            points.emplace_back(float(r * std::cos(a + da * deg)), float(r * std::sin(a + da * deg)));
+    }
+    return points;
+}
 inline int home_focus(int focus, int direction) {
     if (focus == 0 && (direction == 0 || direction == 3))  // icons sit top-left
         return 1;
