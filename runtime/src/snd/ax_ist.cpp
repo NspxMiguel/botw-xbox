@@ -1,3 +1,6 @@
+#if defined(BOTW_PLATFORM_UWP)
+#include "../host/uwp/quick_menu.h"
+#endif
 // snd_core (AX) frame processing ("ist"): the AX frame thread, voice shadow-copy sync, frame/final-mix
 // callbacks and the 32->48 kHz upsampling stage.
 // Vendored/ported from Cemu (src/Cafe/OS/libs/snd_core/ax_ist.cpp), MPL-2.0.
@@ -879,7 +882,10 @@ namespace snd_core
 					break;
 				lock.unlock();
 				lastFrame = clock::now();
-				AXIst_GenerateFrame();
+#if defined(BOTW_PLATFORM_UWP)
+                                uwp::wait_for_guest_resume();
+#endif
+                                AXIst_GenerateFrame();
 				numProcessedFrames++;
 				lock.lock();
 			}

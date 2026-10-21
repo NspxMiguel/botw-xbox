@@ -34,6 +34,9 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SimSeriesS.h"
 #include "../../../../../../src/sim_series_s.h"
 
+#if defined(BOTW_PLATFORM_UWP)
+#include "../../../../../../src/host/uwp/host.h"
+#endif
 #include <dxgi1_4.h>
 #include <chrono>
 #include <thread>
@@ -948,6 +951,10 @@ void D3D12Renderer::PresentSwapChain(bool mainWindow)
 	if (mainWindow && m_simSeriesS)
 		m_simSeriesS->EndFrame();
 	SubmitCommandList(false);
+#if defined(BOTW_PLATFORM_UWP)
+	if (mainWindow)
+		uwp::present_quick_menu(m_device.Get(), m_queue.Get(), swapChain->GetSwapChain());
+#endif
 	if (!swapChain->Present(vsync != 0 ? 1 : 0))
 		HandleDeviceError(m_device->GetDeviceRemovedReason(), "Present");
 	D3D12_Checkpoint(m_device.Get(), "present");

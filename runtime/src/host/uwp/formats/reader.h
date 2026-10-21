@@ -473,7 +473,7 @@ inline std::vector<Entry> wua(Reader image, const std::function<void(uint64_t, u
     validate_entries(result);
     return result;
 }
-inline std::vector<Entry> zip(Reader image) {
+inline std::vector<Entry> zip(Reader image, const std::function<void(const std::string &)> &visit = {}) {
     require(image.size >= 22, "Truncated ZIP");
     size_t tail_size = size_t(std::min<uint64_t>(image.size, 65557));
     auto tail = image.bytes(image.size - tail_size, tail_size);
@@ -502,6 +502,8 @@ inline std::vector<Entry> zip(Reader image) {
         size_t name_length = size_t(integer(header, 28, 2, true));
         auto name_bytes = image.bytes(directory + 46, name_length);
         std::string name(name_bytes.begin(), name_bytes.end());
+        if (visit)
+            visit(name);
         directory += 46 + name_length + integer(header, 30, 2, true) + integer(header, 32, 2, true);
         require(!(flags & 1) && (method == 0 || method == 8) && packed != 0xffffffff && size != 0xffffffff,
                 "Encrypted/unsupported ZIP");
@@ -515,6 +517,7 @@ inline std::vector<Entry> zip(Reader image) {
         require(integer(local, 0, 4, true) == 0x04034b50 && integer(local, 8, 2, true) == method,
                 "Invalid ZIP local header");
         uint64_t data = offset + 30 + integer(local, 26, 2, true) + integer(local, 28, 2, true);
+        require(data <= image.size && packed <= image.size - data, "Truncated ZIP payload");
         result.push_back(
             {name, size, [image, data, packed, size, method, crc](const Sink &sink) {
                  uint64_t remaining = packed, position = data, produced = 0;
