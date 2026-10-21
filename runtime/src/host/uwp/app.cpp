@@ -635,20 +635,28 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     IAsyncOperation<int32_t> choose_home(hstring body, std::vector<hstring> choices) {
         try {
             show_home();
-        } catch (std::exception const &) {
+        } catch (std::exception const &e) {
+            LOG("choose_home: show_home failed: %s", e.what());
             home.close();
         }
-        if (!home.ready())
+        if (!home.ready()) {
+            LOG("choose_home: home renderer unavailable, using dialog");
             co_return co_await choose(label(uwp::Text::title), body, choices);
+        }
+        LOG("choose_home: waiting for input (shown=%d)", int(home.shown));
         home.detail = body.c_str();
         auto dispatcher = host_window.Dispatcher();
         while (home.selected < 0 && home.shown && !quit) {
             co_await resume_after(std::chrono::milliseconds(16));
             co_await resume_foreground(dispatcher);
         }
-        if (!home.ready() && !quit)
+        if (!home.ready() && !quit) {
+            LOG("choose_home: home renderer lost, using dialog");
             co_return co_await choose(label(uwp::Text::title), body, choices);
+        }
         int result = home.selected < 0 ? 0 : home.selected;
+        LOG("choose_home: result=%d (selected=%d shown=%d quit=%d)", result, home.selected,
+            int(home.shown), int(quit));
         home.shown = false;
         co_return result;
     }
@@ -1945,6 +1953,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
     }
     IAsyncAction launch(uwp::Candidate candidate) {
+        LOG("launch: path=%s running=%d boot_attempted=%d", candidate.path.c_str(), int(running),
+            int(boot_attempted));
         if (!running) {
             if (!boot_attempted) {
                 if (!home.ready()) {
@@ -1970,10 +1980,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         valid_hash =
                             uwp::setup::hash_file(selected_game.GetFileAsync(L"code\\U-King.rpx").get(),
                                                   progress) == uwp::setup::expected_rpx;
+                } catch (std::exception const &e) {
+                    LOG("launch: hash check threw: %s", e.what());
+                } catch (hresult_error const &e) {
+                    LOG("launch: hash check threw hresult 0x%08x: %ls", uint32_t(e.code()),
+                        e.message().c_str());
                 } catch (...) {
+                    LOG("launch: hash check threw an unknown exception");
                 }
                 co_await resume_foreground(dispatcher);
+                LOG("launch: game folder available=%d, rpx hash valid=%d", int(available), int(valid_hash));
                 if (!available || !valid_hash) {
+                    LOG("launch: game check failed, starting recovery setup");
                     uwp::stop_drive();
                     home.loading = false;
                     co_await run_setup(false, true);
@@ -1981,6 +1999,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 }
             }
             if (boot_attempted) {
+                LOG("launch: boot already attempted without a running game");
                 failed = true;
                 co_return;
             }
@@ -1989,11 +2008,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             auto user = to_string(local.Path());
             co_await resume_background();
             bool loaded = false;
+            LOG("launch: prepare_runtime game=%s user=%s", candidate.path.c_str(), user.c_str());
             try {
                 loaded = uwp::prepare_runtime(candidate.path, user);
-            } catch (std::exception const &) {
+            } catch (std::exception const &e) {
+                LOG("launch: prepare_runtime threw: %s", e.what());
+            } catch (...) {
+                LOG("launch: prepare_runtime threw an unknown exception");
             }
             co_await resume_foreground(dispatcher);
+            LOG("launch: prepare_runtime result=%d", int(loaded));
             if (!loaded) {
                 uwp::stop_drive();
                 home.close();
@@ -2008,8 +2032,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 co_await resume_foreground(dispatcher);
             }
             home.close(); // Release the CoreWindow swapchain before the game renderer takes ownership.
+            LOG("launch: start_runtime %dx%d", int(pixel_width), int(pixel_height));
             uwp::start_runtime(uwp::core_window(), pixel_width, pixel_height);
             running = true;
+            LOG("launch: runtime started");
         }
         neutral();
         uwp::pause_audio(!visible.load());
@@ -2134,9 +2160,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } guard{menu_open};
         neutral();
         uwp::pause_audio(true);
+        LOG("menu: enter allow_auto=%d running=%d setup_complete=%d auto_launch=%d game=%d", int(allow_auto),
+            int(running), int(preferences.setup_complete), int(preferences.auto_launch),
+            int(selected_game != nullptr));
         if (!running && selected_game && !preferences.setup_complete) {
             co_await run_setup();
-            allow_auto = false;
+            // Setup just finished: honour the auto-launch answer the player gave in it.
+            allow_auto = true;
         }
         if (!preferences.setup_complete)
             allow_auto = false;
@@ -2149,7 +2179,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         decision.select_game = false;
                         break;
                     }
+            LOG("menu: decision launch=%d select_game=%d failed=%d candidates=%d game=%s", int(decision.launch),
+                int(decision.select_game), int(failed), int(candidates.size()),
+                decision.game ? decision.game->path.c_str() : "(none)");
             if (decision.launch && !failed) {
+                LOG("menu: auto-launching");
                 co_await launch(*decision.game);
                 if (running)
                     co_return;
@@ -2167,6 +2201,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             // The live game owns its CoreWindow swapchain; resume uses the system overlay.
             int choice = running ? co_await choose(label(uwp::Text::title), body, choices)
                                  : co_await choose_home(body, choices);
+            LOG("menu: choice=%d select_game=%d failed=%d", choice, int(decision.select_game), int(failed));
             failed = false;
             if (quit)
                 co_return;
@@ -2184,6 +2219,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     home.flip_time = -1;
                     co_await run_setup(false, preferences.setup_complete);
                     co_await scan();
+                    // Setup is over: launch right away when the player chose automatic start.
+                    allow_auto = preferences.setup_complete;
+                    LOG("menu: setup finished setup_complete=%d auto_launch=%d game=%d",
+                        int(preferences.setup_complete), int(preferences.auto_launch),
+                        int(selected_game != nullptr));
                 } else {
                     co_await launch(*decision.game);
                     if (running)
@@ -2238,11 +2278,24 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             co_await menu(startup);
         } catch (hresult_error const &e) {
             failed = true;
+            LOG("open_menu: hresult 0x%08x: %ls", uint32_t(e.code()), e.message().c_str());
             OutputDebugStringW(e.message().c_str());
-        } catch (std::exception const &) {
+        } catch (std::exception const &e) {
             uwp::stop_drive();
             failed = true;
+            LOG("open_menu: host operation failed: %s", e.what());
             OutputDebugStringW(L"BotW: host operation failed.\n");
+        }
+        // An exception used to leave the home frozen (loading flag set, no menu loop): show the menu again.
+        if (failed && !running && !quit) {
+            try {
+                LOG("open_menu: re-entering menu after failure");
+                co_await menu(false);
+            } catch (hresult_error const &e) {
+                LOG("open_menu: retry hresult 0x%08x: %ls", uint32_t(e.code()), e.message().c_str());
+            } catch (std::exception const &e) {
+                LOG("open_menu: retry failed: %s", e.what());
+            }
         }
     }
     int feedback_focus = -1;

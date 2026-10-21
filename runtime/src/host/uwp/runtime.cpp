@@ -127,52 +127,70 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
     // One guest address space per process. Resume uses the existing guest; never load a second RPX.
     g_game_root = game;
     g_user_root = user;
-    mem::init();
-    dispatch::init();
-    std::string error;
-    if (!packs::load_rpx(packs::compiled_plan(), g_game_root + "/code/U-King.rpx", g_user_root,
-                         loader::load_main, loaded_rpx, error))
-        return false;
-    if (!error.empty())
-        LOG("%s", error.c_str());
-    os::init();
-    debug_watch_init();
+    LOG("prepare_runtime: game=%s user=%s", game.c_str(), user.c_str());
+    try {
+        mem::init();
+        dispatch::init();
+        LOG("prepare_runtime: memory and dispatch ready, loading RPX");
+        std::string error;
+        if (!packs::load_rpx(packs::compiled_plan(), g_game_root + "/code/U-King.rpx", g_user_root,
+                             loader::load_main, loaded_rpx, error)) {
+            LOG("prepare_runtime: load_rpx failed: %s", error.c_str());
+            return false;
+        }
+        if (!error.empty())
+            LOG("%s", error.c_str());
+        os::init();
+        debug_watch_init();
+    } catch (const std::exception &e) {
+        LOG("prepare_runtime: exception: %s", e.what());
+        throw;
+    }
+    LOG("prepare_runtime: done");
     return true;
 }
 void start_runtime(void *window, int width, int height) {
-    first_frame_presented.store(false, std::memory_order_release);
-    output_pixels(width, height);
-    fsr3::console.store(console_profile());
-    // The quick menu's video scale wins; otherwise FSR picks the scale for this console and output.
-    const auto preferences = settings::get();
-    const auto quality =
-        preferences.upscaler == fsr::Upscaler::Off ? fsr::Quality::Auto : preferences.fsr_quality;
-    g_render_scale = requested_scale > 0
-                         ? std::clamp(requested_scale, 1.f, hardware_max_render_scale())
-                         : fsr::select_scale(width, height, hardware_max_render_scale() <= 1.5f, quality,
-                                             preferences.scale);
+    LOG("start_runtime: window size %dx%d", width, height);
+    try {
+        first_frame_presented.store(false, std::memory_order_release);
+        output_pixels(width, height);
+        fsr3::console.store(console_profile());
+        // The quick menu's video scale wins; otherwise FSR picks the scale for this console and output.
+        const auto preferences = settings::get();
+        const auto quality =
+            preferences.upscaler == fsr::Upscaler::Off ? fsr::Quality::Auto : preferences.fsr_quality;
+        g_render_scale = requested_scale > 0
+                             ? std::clamp(requested_scale, 1.f, hardware_max_render_scale())
+                             : fsr::select_scale(width, height, hardware_max_render_scale() <= 1.5f, quality,
+                                                 preferences.scale);
 #ifdef BOTW_HAS_FFX
-    const char *override_value = std::getenv("BOTW_UPSCALER");
-    const auto automatic = fsr3::select(fsr3::console.load(), sim_series_s::settings().enabled,
-                                        override_value ? override_value : "", true, true, height);
-    if (height > automatic.output_height) {
-        width = std::max(1, width * automatic.output_height / height);
-        height = automatic.output_height;
-    }
-    const float display_scale = std::min(width / 1280.f, height / 720.f);
-    if (requested_scale <= 0 && !(std::isfinite(preferences.scale) && preferences.scale > 0) &&
-        quality == fsr::Quality::Auto)
-        g_render_scale =
-            std::clamp(display_scale / (automatic.path == fsr3::Path::Off ? 1.f : automatic.ratio), 0.5f,
-                       hardware_max_render_scale());
+        const char *override_value = std::getenv("BOTW_UPSCALER");
+        const auto automatic = fsr3::select(fsr3::console.load(), sim_series_s::settings().enabled,
+                                            override_value ? override_value : "", true, true, height);
+        if (height > automatic.output_height) {
+            width = std::max(1, width * automatic.output_height / height);
+            height = automatic.output_height;
+        }
+        const float display_scale = std::min(width / 1280.f, height / 720.f);
+        if (requested_scale <= 0 && !(std::isfinite(preferences.scale) && preferences.scale > 0) &&
+            quality == fsr::Quality::Auto)
+            g_render_scale =
+                std::clamp(display_scale / (automatic.path == fsr3::Path::Off ? 1.f : automatic.ratio), 0.5f,
+                           hardware_max_render_scale());
 #endif
-    LOG("output %dx%d, render scale %.2f", width, height, g_render_scale);
-    latte::create_renderer(window, width, height); // W2: IUnknown CoreWindow, not NSView.
-    settings::apply();
-    packs::install_loaded(loaded_rpx, d3d12_packs::hooks());
-    auto argv = os::build_argv("U-King.rpx");
-    const auto &module = loader::main_module();
-    threads::start_main(module.entry, 1, argv, module.stack_size);
+        LOG("output %dx%d, render scale %.2f", width, height, g_render_scale);
+        latte::create_renderer(window, width, height); // W2: IUnknown CoreWindow, not NSView.
+        settings::apply();
+        packs::install_loaded(loaded_rpx, d3d12_packs::hooks());
+        auto argv = os::build_argv("U-King.rpx");
+        const auto &module = loader::main_module();
+        LOG("start_runtime: starting guest main thread entry=0x%08x", module.entry);
+        threads::start_main(module.entry, 1, argv, module.stack_size);
+        LOG("start_runtime: guest main thread started");
+    } catch (const std::exception &e) {
+        LOG("start_runtime: exception: %s", e.what());
+        throw;
+    }
 }
 } // namespace uwp
 #endif

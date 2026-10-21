@@ -52,7 +52,7 @@ class ArtView {
     double elapsed = 0;
     Ptr<IDWriteFactory> fonts;
     Ptr<IDWriteTextFormat> title_font, body_font, mono_font, store_title_font, store_card_font,
-        store_body_font, store_meta_font;
+        store_body_font, store_meta_font, credit_font;
     Ptr<ID2D1Bitmap> hero, disc;
     Ptr<ID2D1PathGeometry> disc_mask;
     Ptr<ID2D1Layer> disc_layer;
@@ -230,6 +230,10 @@ class ArtView {
         check(fonts->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
                                       DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                       art_style::body_size, L"", &mono_font));
+        check(fonts->CreateTextFormat(L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.f, L"",
+                                      &credit_font));
+        check(credit_font->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING));
         // Three stops; the upper half stays untouched and the footer closes to near-black.
         D2D1_GRADIENT_STOP stops[] = {
             {.5f, art_style::black(0)}, {.82f, art_style::black(.82f)}, {1, art_style::black(.98f)}};
@@ -949,8 +953,11 @@ class ArtView {
         target->SetTransform(transform);
         target->PopLayer();
         float label = float(1 - ease(std::max(0., flip_time) / 2));
+        // Home shows no title; a faint credit sits in the bottom-right safe area.
+        brush->SetColor(hero ? white(.6f * label) : black(.6f * label));
+        target->DrawText(L"nspxmiguel", 10, credit_font.Get(),
+                         D2D1::RectF(width - margin - 240, 680, width - margin, 700), brush.Get());
         brush->SetColor(hero ? white(label) : black(.92f * label));
-        text(heading, D2D1::RectF(margin, 626, 1100, 672), true);
         // First run shows only the "?" disc; failure messages may still accompany the title.
         if (!loading && !missing_game)
             text(detail, D2D1::RectF(margin, 674, 1150, 720));
