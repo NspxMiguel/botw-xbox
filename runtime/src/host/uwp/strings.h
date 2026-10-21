@@ -55,6 +55,48 @@ enum class Text {
     confirm,
     page,
     cancel_transfer,
+    no_import,
+    usb_space_insufficient,
+    existing_import,
+    settings_more,
+    setup_welcome,
+    setup_intro,
+    setup_guide,
+    guide_aroma,
+    guide_dump,
+    guide_merge,
+    guide_usb,
+    setup_insert,
+    setup_search,
+    drive_removed,
+    setup_verify,
+    setup_wrong,
+    setup_storage,
+    play_usb,
+    import_internal,
+    remove_import,
+    setup_again,
+    storage_settings,
+    space_unknown,
+    space_free,
+    space_of,
+    space_console,
+    space_usb,
+    space_game,
+    space_insufficient,
+    dlc_optional,
+    setup_next,
+    setup_hints,
+    guide_hints,
+    setup_extract,
+    setup_copy,
+    setup_cancel,
+    setup_keys,
+    missing_common,
+    missing_disc,
+    setup_failed,
+    remove_question,
+    version_found,
     count
 };
 inline std::wstring_view text(Text key, bool pt) {
@@ -124,7 +166,86 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Search GameBanana", L"Buscar no GameBanana"},
          {L"OK", L"OK"},
          {L"Page", L"Página"},
-         {L"B / Esc: cancel · LB / RB: page", L"B / Esc: cancelar · LB / RB: página"}}};
+         {L"B / Esc: cancel · LB / RB: page", L"B / Esc: cancelar · LB / RB: página"},
+         {L"There is no imported copy to remove.", L"Não há cópia importada para remover."},
+         {L"Free the extracted game size plus 2 GB on the USB drive, then try again.",
+          L"Libere o tamanho do jogo extraído mais 2 GB no USB e tente novamente."},
+         {L"An internal game folder already exists. Remove the imported copy in Settings first.",
+          L"Já existe uma pasta de jogo interna. Remova a cópia importada nos Ajustes primeiro."},
+         {L"More settings", L"Mais ajustes"},
+         {L"Welcome", L"Boas-vindas"},
+         {L"Play your own Wii U copy of Breath of the Wild on Xbox.\nYou need your own Wii U dump of Breath "
+          L"of the Wild 1.6.0 (v208).",
+          L"Jogue sua cópia de Breath of the Wild do Wii U no Xbox.\nVocê precisa do seu próprio dump do Wii "
+          L"U de Breath of the Wild 1.6.0 (v208)."},
+         {L"How to get your game files", L"Como obter os arquivos do jogo"},
+         {L"On your Wii U, follow wiiu.hacks.guide to set up Aroma.\nThen install Dumpling and open it from "
+          L"the Wii U menu.",
+          L"No seu Wii U, siga wiiu.hacks.guide para configurar o Aroma.\nDepois instale o Dumpling e abra "
+          L"pelo menu do Wii U."},
+         {L"In Dumpling, choose Dump a game → Breath of the Wild.\nSelect Game, Update (1.6.0 / v208) and "
+          L"DLC, if you own it.",
+          L"No Dumpling, escolha Dump a game → Breath of the Wild.\nMarque Game, Update (1.6.0 / v208) e "
+          L"DLC, se você tiver."},
+         {L"Copy the base game, then copy the update over it, replacing files.\nKeep the DLC content/ as "
+          L"aoc/, beside code/, content/ and meta/.",
+          L"Copie o jogo base e depois a atualização por cima, substituindo arquivos.\nGuarde content/ do "
+          L"DLC como aoc/, ao lado de code/, content/ e meta/."},
+         {L"Copy the merged folder to a USB drive as BotW/. Decrypted dumps need no keys.\nFor .wud/.wux on "
+          L"a PC: use otp.bin + game.key from your console.\nXbox can also extract encrypted images using "
+          L"those files on the same USB.",
+          L"Copie a pasta unida para o USB como BotW/. Dumps descriptografados não precisam de chaves.\nPara "
+          L".wud/.wux no PC: use otp.bin + game.key do seu console.\nO Xbox também extrai imagens "
+          L"criptografadas com esses arquivos no mesmo USB."},
+         {L"Insert the USB drive with your game", L"Conecte o USB com seu jogo"},
+         {L"Looking for your game… Keep the USB drive connected.",
+          L"Buscando seu jogo… Mantenha o USB conectado."},
+         {L"The USB drive was removed. Reconnect it to continue.",
+          L"O USB foi removido. Conecte novamente para continuar."},
+         {L"Checking your game", L"Conferindo seu jogo"},
+         {L"This executable is not version 1.6.0 (v208).\nUpdate the game on your Wii U, dump the update "
+          L"again and merge it over the base game.",
+          L"Este executável não é da versão 1.6.0 (v208).\nAtualize o jogo no Wii U, faça o dump da "
+          L"atualização e copie por cima do jogo base."},
+         {L"Where would you like to play?", L"Onde você quer jogar?"},
+         {L"Play from the USB drive", L"Jogar pelo USB"},
+         {L"Import to internal storage", L"Importar para o armazenamento interno"},
+         {L"Remove imported copy", L"Remover cópia importada"},
+         {L"Run setup again", L"Refazer configuração"},
+         {L"Game storage", L"Armazenamento do jogo"},
+         {L"Free space unavailable. Reconnect the drive and try again.",
+          L"Espaço livre indisponível. Reconecte o USB e tente novamente."},
+         {L"Free: ", L"Livre: "},
+         {L" of ", L" de "},
+         {L"Console: ", L"Console: "},
+         {L"USB: ", L"USB: "},
+         {L"Game: ", L"Jogo: "},
+         {L"Import needs the game size plus 2 GB free.",
+          L"Para importar, libere o tamanho do jogo mais 2 GB."},
+         {L"DLC not found. It is optional; you can add aoc/ later.",
+          L"DLC não encontrado. É opcional; você pode adicionar aoc/ depois."},
+         {L"Continue", L"Continuar"},
+         {L"A: select · B: back · D-pad / stick: move",
+          L"A: selecionar · B: voltar · Direcional / analógico: mover"},
+         {L"← / →: page · A: continue · B: back", L"← / →: página · A: continuar · B: voltar"},
+         {L"Preparing your game on the USB drive", L"Preparando seu jogo no USB"},
+         {L"Copying your game", L"Copiando seu jogo"},
+         {L"B: cancel · Keep the USB drive connected", L"B: cancelar · Mantenha o USB conectado"},
+         {L"Encrypted images need otp.bin (or common.key) and a disc key (game.key or keys.txt) on the same "
+          L"USB.\nGet otp.bin with Dumpling → Dump online files / console files; game.key comes with your "
+          L"disc dump.",
+          L"Imagens criptografadas precisam de otp.bin (ou common.key) e uma chave do disco (game.key ou "
+          L"keys.txt) no mesmo USB.\nObtenha otp.bin no Dumpling → Dump online files / console files; "
+          L"game.key vem com o dump do disco."},
+         {L"Missing or invalid otp.bin / common.key.", L"Falta otp.bin / common.key válido."},
+         {L"Missing or incorrect disc key: game.key / keys.txt.",
+          L"Falta a chave correta do disco: game.key / keys.txt."},
+         {L"Unable to prepare the game. Check the USB, files and free space, then try again.",
+          L"Não foi possível preparar o jogo. Confira o USB, os arquivos e o espaço livre e tente "
+          L"novamente."},
+         {L"Remove the imported game to free internal storage? Your saves and mods stay here.",
+          L"Remover o jogo importado para liberar espaço interno? Seus saves e mods continuam aqui."},
+         {L"Found title version: ", L"Versão encontrada: "}}};
     return table.at(static_cast<size_t>(key))[pt ? 1 : 0];
 }
 } // namespace uwp

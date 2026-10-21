@@ -81,9 +81,38 @@ elsewhere, set `BOTW_GAME=/path/to/game`.
 
 ### On Xbox
 
-Copy the merged folder to a USB drive (exFAT or NTFS) as `BotW/` with `code/`, `content/`,
-`meta/` (and `aoc/` if you have the DLC) inside, plug it into the console and open the app. The
-first-run setup finds it, checks the files and walks you through the rest.
+The first launch opens a controller-driven setup, with an on-screen guide and a QR code for
+[wiiu.hacks.guide](https://wiiu.hacks.guide/). Use your own Wii U dump of Breath of the Wild
+**1.6.0 / v208**. The recommended layout on an exFAT or NTFS USB drive is `BotW/code/`,
+`BotW/content/`, `BotW/meta/`, and optionally `BotW/aoc/` for DLC. Decrypted folders need no keys.
+
+Setup scans removable drives automatically (through two folder levels), also checking
+`LocalState/game`; no Xbox folder picker is used. It accepts unpacked and split Loadiine dumps,
+`.wua` (ZArchive), `.wud`/`.wux`, NUS/installable titles, and `.zip`. Extract `.7z` on a PC first.
+Split base/update/DLC folders are matched by title ID; the update overrides the base and DLC
+content maps to `aoc/`. For encrypted images only, keep your own `otp.bin` (or validated
+`common.key`) and disc key (`game.key`, another `.key` file, or Cemu `keys.txt`) on the same USB.
+NUS needs the common key and its own `title.tik`, `title.tmd`, `.app` and `.h3` files.
+Dumpling's **Dump online files / console files** produces `otp.bin`; the disc dump produces its
+own disc key. The app never supplies or downloads keys.
+
+Archives and encrypted images are unpacked once **on the same USB**, into a
+`BotW/` folder (or a unique `BotW-extracted-…` folder if `BotW/` already exists). Interrupted extraction can resume with a LocalState journal; unfinished
+extractions are excluded from discovery. The executable is checked against the v208 SHA-256 before
+setup can finish. A mismatching executable shows the dumped `app.xml` title version and explains
+how to update and dump again. DLC is optional.
+
+Choose **Play from the USB drive** or explicitly **Import to internal storage**. Setup shows the
+game size and current free/capacity figures for both drives. Import needs the game size plus a
+2 GiB safety margin, supports cancellation, removes incomplete copies, and rechecks the copied
+executable. USB remains the default; large files are never silently extracted to the console SSD.
+Keep the USB connected when playing externally. A missing source returns to drive detection.
+
+Setup ends by asking whether future launches should open the game automatically, then returns to
+the disc home screen. Settings → More settings → Game storage lets you change storage, remove an
+imported copy (saves and mods are preserved), or run setup again. The choice is stored in
+`LocalState/usb_mode.txt`; completion is stored in `LocalState/setup_done.txt`. Source paths are
+rediscovered instead of saving USB drive letters.
 
 ## Build for iPhone
 
