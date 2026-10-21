@@ -251,7 +251,12 @@ if(BOTW_PLATFORM STREQUAL "uwp")
     target_link_options(BotWRecomp PRIVATE /DELAYLOAD:D3DCOMPILER_47.dll /DELAYLOAD:XAudio2_9.dll
                         /DELAYLOAD:api-ms-win-gaming-deviceinformation-l1-1-0.dll
                         /DELAYLOAD:api-ms-win-core-memory-l1-1-6.dll /DELAYLOAD:api-ms-win-core-psapi-l1-1-0.dll /DELAYLOAD:libcrypto-3-x64.dll)
-    target_link_libraries(BotWRecomp PRIVATE delayimp)
+    # The Store lib folder (lib/x64/store) lacks delayimp.lib; MSVC keeps it in lib/x64.
+    if(DEFINED ENV{VCToolsInstallDir} AND EXISTS "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
+      target_link_libraries(BotWRecomp PRIVATE "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
+    else()
+      target_link_libraries(BotWRecomp PRIVATE delayimp)
+    endif()
   endif()
 endif()
 # END W3 UWP host target configuration
