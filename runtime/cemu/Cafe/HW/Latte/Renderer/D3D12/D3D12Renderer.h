@@ -25,6 +25,7 @@ class D3D12PipelineCache;
 struct D3D12PipelineInfo;
 class D3D12ImGuiRenderer;
 class D3D12FrameInterpolator;
+class D3D12Fsr;
 class D3D12SimSeriesS;
 class LatteQueryObjectD3D12;
 struct LatteDecompilerShader;
@@ -401,6 +402,10 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	// swap chains
 	std::unique_ptr<D3D12SwapChain> m_swapChainMain;
 	std::unique_ptr<D3D12SwapChain> m_swapChainPad;
+	std::unique_ptr<D3D12Fsr> m_fsr;
+	bool m_fsrFailed = false;
+	bool m_fsrResizePending = false;
+	uint32 m_fsrInputWidth = 0, m_fsrInputHeight = 0, m_fsrOutputWidth = 0, m_fsrOutputHeight = 0;
 	std::unique_ptr<D3D12FrameInterpolator> m_frameInterpolator; // created when frame interpolation is first used
 	// interpolation presents twice per game frame, which halves the game's speed on a display under 100 Hz: measured every
 	// 2 s from the main swap chain (UpdatePresentDiagnostics), interpolation is paused while the display is that slow

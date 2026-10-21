@@ -3,6 +3,7 @@
 #pragma once
 #include <TargetConditionals.h>
 
+#include "fsr.h"
 #include <string>
 
 struct Settings {
@@ -12,6 +13,9 @@ struct Settings {
 #else
     float scale = 0;       // render scale; 0 = fit the display (takes effect at the next launch)
 #endif
+    fsr::Upscaler upscaler = fsr::Upscaler::Auto;
+    fsr::Quality fsr_quality = fsr::Quality::Auto;
+    fsr::FrameGeneration frame_generation = fsr::FrameGeneration::Auto;
     int display = 0;       // 0 fit (letterbox), 1 stretch, 2 fill (crop)
     int filter = 1;        // output scaling: 0 bilinear, 1 bicubic, 2 hermite, 3 nearest
     bool gyro = true;      // controller gyro -> GamePad motion

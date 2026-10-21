@@ -115,9 +115,14 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
 void start_runtime(void *window, int width, int height) {
     first_frame_presented.store(false, std::memory_order_release);
     output_pixels(width, height);
-    g_render_scale =
-        std::clamp(requested_scale > 0 ? requested_scale : std::min(width / 1280.f, height / 720.f), 1.f,
-                   hardware_max_render_scale());
+    // The quick menu's video scale wins; otherwise FSR picks the scale for this console and output.
+    const auto preferences = settings::get();
+    const auto quality =
+        preferences.upscaler == fsr::Upscaler::Off ? fsr::Quality::Auto : preferences.fsr_quality;
+    g_render_scale = requested_scale > 0
+                         ? std::clamp(requested_scale, 1.f, hardware_max_render_scale())
+                         : fsr::select_scale(width, height, hardware_max_render_scale() <= 1.5f, quality,
+                                             preferences.scale);
     LOG("output %dx%d, render scale %.2f", width, height, g_render_scale);
     latte::create_renderer(window, width, height); // W2: IUnknown CoreWindow, not NSView.
     settings::apply();

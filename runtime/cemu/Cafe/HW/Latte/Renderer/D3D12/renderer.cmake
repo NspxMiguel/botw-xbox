@@ -30,3 +30,21 @@ set(BOTW_D3D12_LIBRARIES
   spirv-cross-core spirv-cross-glsl spirv-cross-hlsl)
 target_link_libraries(cemu_gpu PRIVATE ${BOTW_D3D12_LIBRARIES})
 # dxcompiler.dll + dxil.dll (x64) are staged next to BotWRecomp.exe above for the default DXC path.
+
+# Offline, pinned AMD FSR1 headers; embed shader text so deployed apps need no source files.
+set(BOTW_FSR1_DIR "${CMAKE_SOURCE_DIR}/runtime/third_party/fidelityfx/fsr1")
+file(SHA256 "${BOTW_FSR1_DIR}/ffx_a.h" BOTW_FSR1_MATH_HASH)
+file(SHA256 "${BOTW_FSR1_DIR}/ffx_fsr1.h" BOTW_FSR1_ALGORITHM_HASH)
+if(NOT BOTW_FSR1_MATH_HASH STREQUAL "f60e2722fcd13989523b9164d776ab382b3692791767f3bf8bb19967f763f3fb"
+   OR NOT BOTW_FSR1_ALGORITHM_HASH STREQUAL "93c3922362ea7fc99cbcc698ca30c98de4f8c246d1fbb0b09e015ddef38ce3a5")
+  message(FATAL_ERROR "Vendored AMD FSR1 shader content does not match its pin")
+endif()
+include("${CMAKE_SOURCE_DIR}/cmake/fsr1_source.cmake")
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/fsr")
+set(BOTW_FSR1_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/fsr/fsr1_source.h")
+file(WRITE "${BOTW_FSR1_SOURCE}" "#pragma once\n")
+botw_embed_fsr1_chunks("${BOTW_FSR1_DIR}/ffx_a.h" kFsrMath "${BOTW_FSR1_SOURCE}")
+botw_embed_fsr1_chunks("${BOTW_FSR1_DIR}/ffx_fsr1.h" kFsrAlgorithm "${BOTW_FSR1_SOURCE}")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+  "${BOTW_FSR1_DIR}/ffx_a.h" "${BOTW_FSR1_DIR}/ffx_fsr1.h")
+target_include_directories(cemu_gpu PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/fsr")

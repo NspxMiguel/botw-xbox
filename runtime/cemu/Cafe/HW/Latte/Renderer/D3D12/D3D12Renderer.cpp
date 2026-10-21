@@ -9,6 +9,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12FrameInterpolator.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Fsr.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Runtime.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12RootSignature.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12PipelineCache.h"
@@ -99,15 +100,17 @@ D3D12Renderer::D3D12Renderer()
 	RendererShaderD3D12::Init();
 
 	if (sim_series_s::settings().enabled)
+	{
 		try
 		{
 			m_simSeriesS = std::make_unique<D3D12SimSeriesS>(*this, m_queue.Get());
 		}
-		catch (const std::exception& e)
+		catch (const std::exception &e)
 		{
 			// Diagnostic mode only: never keep the game from starting.
 			cemuLog_log(LogType::Force, "Series S simulation unavailable: {}", e.what());
 		}
+	}
 
 	// first command list
 	ResetCommandList();
@@ -120,6 +123,7 @@ D3D12Renderer::~D3D12Renderer()
 	if (m_device)
 		WaitForIdle();
 	m_simSeriesS.reset();
+	m_fsr.reset();
 	occlusionQuery_destroyAll();
 	m_imgui.reset();
 	m_pipelineCache.reset();
@@ -1300,6 +1304,23 @@ void D3D12Renderer::SwapBuffers(bool swapTV, bool swapDRC)
 		PresentSwapChain(false);
 	if (!swapTV && !swapDRC)
 		SubmitCommandList(false);
+	// All TV/DRC backbuffers have been submitted and presented. Apply the size
+	// requested by the output pass for the next frame, never during acquisition.
+	if (swapTV && m_fsrResizePending && !m_fsrFailed)
+	{
+		m_fsrResizePending = false;
+		try
+		{
+			if (!m_fsr)
+				m_fsr = std::make_unique<D3D12Fsr>(*this);
+			m_fsr->ResizeTargets(m_fsrInputWidth, m_fsrInputHeight, m_fsrOutputWidth, m_fsrOutputHeight);
+		}
+		catch (const std::exception &e)
+		{
+			cemuLog_log(LogType::Force, "D3D12: FSR1 unavailable; using output filter: {}", e.what());
+			m_fsrFailed = true;
+		}
+	}
 	if (swapTV && m_pipelineCache)
 		m_pipelineCache->TickBackgroundPreload();
 	m_statDrawsPerFrame = 0;
