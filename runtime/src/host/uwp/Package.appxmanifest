@@ -160,24 +160,24 @@
               <uap:FileType>.stsc</uap:FileType>
               <uap:FileType>.sword</uap:FileType>
               <uap:FileType>.text</uap:FileType>
-              <uap:FileType>.bfma
-.bfsar
-.btsnd
-.h264
-.jpg
-.mp4
-.sbfarc
-.sbitemico
-.sbmapopen
-.sbmaptex
-.sbreviewtex
-.sbstftex
-.sesetlist
-.sfmc
-.shktmrb
-.srsizetable
-.sstats
-.tscb</uap:FileType>
+              <uap:FileType>.bfma</uap:FileType>
+              <uap:FileType>.bfsar</uap:FileType>
+              <uap:FileType>.btsnd</uap:FileType>
+              <uap:FileType>.h264</uap:FileType>
+              <uap:FileType>.jpg</uap:FileType>
+              <uap:FileType>.mp4</uap:FileType>
+              <uap:FileType>.sbfarc</uap:FileType>
+              <uap:FileType>.sbitemico</uap:FileType>
+              <uap:FileType>.sbmapopen</uap:FileType>
+              <uap:FileType>.sbmaptex</uap:FileType>
+              <uap:FileType>.sbreviewtex</uap:FileType>
+              <uap:FileType>.sbstftex</uap:FileType>
+              <uap:FileType>.sesetlist</uap:FileType>
+              <uap:FileType>.sfmc</uap:FileType>
+              <uap:FileType>.shktmrb</uap:FileType>
+              <uap:FileType>.srsizetable</uap:FileType>
+              <uap:FileType>.sstats</uap:FileType>
+              <uap:FileType>.tscb</uap:FileType>
             </uap:SupportedFileTypes>
           </uap:FileTypeAssociation>
         </uap:Extension>
