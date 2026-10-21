@@ -7,6 +7,35 @@ namespace d3d12_packs
 inline const packs::BuildPlan *active_plan = nullptr;
 inline bool overrides_textures = false;
 
+// Preserve the base constructor's FSR-scaled axes unless explicitly overridden.
+// Color and depth textures matched by the same rule use this identical path.
+template <typename OverwriteInfo>
+bool apply_texture_overrides(const packs::BuildPlan &plan,
+							 const packs::TextureDescription &original,
+							 OverwriteInfo &info)
+{
+	const auto overrides = packs::texture_overrides(plan, original);
+	if (overrides.empty())
+		return false;
+	if (!info.hasResolutionOverwrite)
+	{
+		info.width = original.width;
+		info.height = original.height;
+		info.depth = original.depth > 0 ? original.depth : 1;
+	}
+	for (const auto &field : overrides)
+	{
+		if (field.name == "overwriteWidth")
+			info.width = int(field.values[0]);
+		if (field.name == "overwriteHeight")
+			info.height = int(field.values[0]);
+		if (field.name == "overwriteDepth")
+			info.depth = int(field.values[0]);
+	}
+	info.hasResolutionOverwrite = true;
+	return true;
+}
+
 class PackHooks final : public packs::RendererHooks
 {
   public:

@@ -35,6 +35,44 @@ def load_manifest(path):
     return config
 
 
+def drop_identity_dimensions(packs):
+    """Prune statically known identities without losing ordered size resets.
+
+    Wildcards and potentially overlapping earlier writes are resolved against
+    the original texture by the runtime instead.
+    """
+    previous = []
+    for pack in packs:
+        retained = []
+        for rule in pack["textures"]:
+            for dimension in ("width", "height", "depth"):
+                name = "overwrite" + dimension.capitalize()
+                original = rule.get(dimension, [-1])
+                if (
+                    name not in rule
+                    or len(original) != 1
+                    or original[0] < 1
+                    or int(rule[name][0]) != original[0]
+                ):
+                    continue
+                overlaps = any(
+                    name in earlier
+                    and all(
+                        earlier.get(axis, [-1])[0] == -1
+                        or rule.get(axis, [-1])[0] == -1
+                        or earlier[axis] == rule[axis]
+                        for axis in ("width", "height", "depth")
+                    )
+                    for earlier in previous
+                )
+                if not overlaps:
+                    del rule[name]
+            if any(name.startswith("overwrite") for name in rule):
+                retained.append(rule)
+                previous.append(rule)
+        pack["textures"] = retained
+
+
 def prepare(image, rpx_bytes, config, assembler=None):
     checksum = module_checksum(rpx_bytes)
     sha256 = hashlib.sha256(rpx_bytes).hexdigest()
@@ -131,6 +169,7 @@ def prepare(image, rpx_bytes, config, assembler=None):
                 "variables": variables,
             }
         )
+    drop_identity_dimensions(packs)
     if cave_end >= 0x0DF00000:
         raise PackError("codecaves overlap runtime-owned memory")
     for base, buffer in image.secs.items():

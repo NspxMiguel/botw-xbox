@@ -18,8 +18,17 @@ D3D12 validates all fields before compiling replacement shaders on the CPU.
 Commit publishes the static plan. Shader lookup uses original hashes/stage;
 texture lookup matches original guest descriptions. Width/height/depth overrides
 update allocation, effective sizes and mip bounds. The shared texture machinery
-uses effective sizes for views, viewport and scissor scaling. Accepted texture
-plans disable built-in scaling before any guest textures are created. Format,
+uses effective sizes for views, viewport and scissor scaling. The build drops
+identity dimensions when exact filters prove there is no earlier overlapping
+size override to reset. Texture lookup merges remaining matching rules before
+dropping dimension overrides that truncate to the
+original size (depth is at least one). This preserves later-rule precedence,
+including an identity that cancels an earlier size override. Remaster explicitly
+selects the native 1280x720 Resolution preset so its resolution rules are identity.
+Built-in scaling remains enabled for the session: identity-only and unmatched
+textures retain it, while nonidentity pack dimensions replace scaling only for
+that matching texture. Shadow-map overrides therefore coexist with FSR and other
+render targets keep the selected scale. Format,
 LOD and anisotropy overrides are currently rejected explicitly. Shader and PSO
 persistent caches are bypassed for pack sessions to prevent reuse across pack
 fingerprints; sessions without packs retain their existing cache behavior.
@@ -31,7 +40,7 @@ outside its owned subtree. No files under `Renderer/Metal/` are changed.
 UWP selects raw HDMI output dimensions where available, falling back to current
 CoreWindow bounds times RawPixelsPerViewPixel. The same dimensions determine
 render scale and renderer/swap-chain creation. The renderer clamps scale to
-[1, 3], unless an accepted texture pack supplies resolution itself.
+[1, 3]; an accepted pack can replace effective dimensions per texture.
 
 The recomp D3D12 present path always synchronizes: interval 1 for the 60 fps
 setting, 2 for 30 fps on the game's 60 Hz clock; frame interpolation is disabled.
@@ -52,7 +61,9 @@ sh runtime/src/host/uwp/tests/check-syntax.sh
 The new C++ test uses ASan/UBSan, four SHA-256 vectors, a fake guest address
 space, actual portable D3D12/Metal hook validation, and authored ELF section
 metadata. It verifies snapshot/hash identity even if the source changes, snapshot
-cleanup, range rejection and empty-plan/failure fallbacks. No game assets are
+cleanup, range rejection and empty-plan/failure fallbacks. Texture tests cover
+identity removal after truncation and ordered merging, shadow overrides alongside
+scale 1.5, and explicit render-target precedence without changing other surfaces. No game assets are
 needed. See the D3D12 `validation/syntax_check.py` for the Windows-target check;
 that controlled header check does not run a Windows GPU or validate the WinRT
 HDMI branch. Full app linking needs private `generated/` sources. No Xbox/device

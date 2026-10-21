@@ -65,6 +65,7 @@ point. Choices match the inspected official pack revision exactly:
 | Setting | Series S | Series X |
 | --- | --- | --- |
 | FPS++ Mode / FPS Limit | Normal Settings / 60FPS Limit (Default) | Same |
+| Graphics Resolution | 1280x720 (Default) | Same |
 | Graphics Shadows | Ultra (300%) | Extreme (400%, Unstable) |
 | Graphics Shadow Draw Distance | High (Default) | Very High (Recommended) |
 | Graphics Anti-Aliasing | Normal FXAA (Default) | Same |
@@ -78,8 +79,8 @@ FPS++ explicitly owns timing (`timing: true`). Neutral+ keeps the color treatmen
 close to natural; Series S uses lower shadow and scene detail to reduce cost.
 Series X takes the highest shadow tier not labelled "Not Recommended" in this
 revision; upstream labels that tier **Unstable**, so this is not a stability or
-60 fps performance claim. Neither console selects Resolution: FSR owns render
-resolution. Texture Distance Detail (LOD) and Anisotropic Filtering are omitted
+60 fps performance claim. Both consoles explicitly select native 1280x720
+Resolution so its size expressions resolve to identity; FSR owns render resolution. Texture Distance Detail (LOD) and Anisotropic Filtering are omitted
 because D3D12 rejects LOD/anisotropy/format overrides. "High" tree billboards
 extend geometric detail without selecting texture LOD bias.
 
@@ -100,18 +101,19 @@ are required with `--preset` and cannot accompany `--packs`. Temporary manifests
 are removed after loading; resolved pack paths continue to reference the player's
 original directory.
 
-**Current runtime limitation:** this validates selection names, not the full
-pack build or rendering. Omitting a category does not suppress a pack's default
-presets or unconditional `[TextureRedefine]` sections. The inspected Graphics
-pack still emits resolution and format overrides, Enhancements emits anisotropy,
-and DrawDistance emits relative LOD bias. The current D3D12 validator rejects
-those unsupported fields; accepting Graphics texture rules would also disable
-built-in scaling even without an explicit Resolution selection (see
-[`runtime/src/packs/README.md`](../../runtime/src/packs/README.md)). Thus a
-versioned texture-filtering/build and renderer adaptation is still needed before
-this selection can provide an operational zero-configuration FSR remaster.
-The preset generator does not silently rewrite the player's rules or claim
-that selecting fewer categories removes those rules.
+Native resolution rules no longer disable FSR: effective identity dimensions are
+removed at build time when exact dimension filters prove they are no-ops.
+Wildcard matches and later rules that can reset earlier overrides are resolved
+after merging against each original guest texture (including integer truncation). A remaining shadow-map size override coexists with built-in
+scaling. An explicit render-target size override replaces built-in scaling only
+for that matching texture; other surfaces retain the selected scale.
+
+Selection validation does not prove a complete pack build or rendering. Omitting
+a category does not suppress default presets or unconditional `[TextureRedefine]`
+sections. Format, LOD and anisotropy overrides remain unsupported by D3D12 and
+are rejected rather than silently filtered. Player-supplied pack revisions that
+emit these fields still need adaptation before the full Remaster selection can
+run. The preset generator does not rewrite the player's rules.
 
 This entry point installs an invocation-local `Image` hook into `tools/recompile.py`:
 load/decompress/relocate RPX -> resolve packs -> assemble and validate every write ->
@@ -213,8 +215,9 @@ snapshot. The plan must outlive renderer pointers (the generated plan is static)
 - Before texture allocation, call `texture_overrides(plan, original_guest_description)`.
   Match dimensions, format, tile mode and MEM1 location against the original description.
   Apply returned fields in order; later rules/packs win per field. Resize render targets,
-  viewport/scissor scaling and texture views together. Do not also apply the built-in
-  `g_render_scale` pack. LOD values are in float LOD units, anisotropy is 1/2/4/8/16.
+  viewport/scissor scaling and texture views together. Nonidentity pack dimensions
+  take precedence over built-in `g_render_scale` for that texture only; identity-only
+  and unmatched textures retain built-in scaling. LOD values are in float LOD units, anisotropy is 1/2/4/8/16.
 - Before compiling a guest shader, call `find_shader` with original Cemu hashes and stage.
   Use the returned GLSL through the W2 compiler path. Include `plan.fingerprint` in caches;
   reject incompatible shader dialects in `prepare`.
