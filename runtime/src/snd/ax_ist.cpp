@@ -5,7 +5,11 @@
 // Here it is a host thread adopted as a guest thread that paces itself (3 ms per frame, Cemu's
 // AXOut_update timing) and calls guest callbacks with guest_call. Device remix matrices
 // (AXSetDeviceRemixMatrix) are not imported by BotW and are left out.
+#ifdef _WIN32
+#include <thread>
+#else
 #include <pthread.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -14,7 +18,9 @@
 #include "ax.h"
 #include "ax_internal.h"
 
+#ifdef __APPLE__
 #include <TargetConditionals.h>
+#endif
 #if TARGET_OS_IOS  // iOS port: stack size vs. the VA limit without extended VA (ios/src/vm_ios.cpp)
 size_t botw_ios_stack_size(size_t want);
 #endif
@@ -837,8 +843,12 @@ namespace snd_core
 		std::condition_variable s_istCond;
 		bool s_istStopRequested = false;
 		bool s_istRunning = false;
-		pthread_t s_istHostThread;
-		constexpr size_t kIstHostStackSize = 64u << 20; // guest call depth maps onto the host stack
+#ifdef _WIN32
+                std::thread s_istHostThread;
+#else
+                pthread_t s_istHostThread;
+#endif
+                constexpr size_t kIstHostStackSize = 64u << 20; // guest call depth maps onto the host stack
 		constexpr uint32 kIstGuestStackSize = 0x10000;  // Cemu: 0x4000
 
 		void AXIst_ThreadEntry()
@@ -883,9 +893,17 @@ namespace snd_core
 		if (s_istRunning)
 			return;
 		s_istStopRequested = false;
-		pthread_attr_t attr;
+#ifdef _WIN32
+                try {
+                    s_istHostThread = std::thread(AXIst_ThreadEntry);
+                } catch (const std::system_error &error) {
+                    LOG("snd_core: failed to create the AX thread (%s)", error.what());
+                    return;
+                }
+#else
+                pthread_attr_t attr;
 		pthread_attr_init(&attr);
-#if TARGET_OS_IOS  // iOS port: see ios/src/vm_ios.cpp
+#if TARGET_OS_IOS // iOS port: see ios/src/vm_ios.cpp
 		pthread_attr_setstacksize(&attr, botw_ios_stack_size(kIstHostStackSize));
 #else
 		pthread_attr_setstacksize(&attr, kIstHostStackSize);
@@ -901,7 +919,8 @@ namespace snd_core
 			LOG("snd_core: failed to create the AX thread (%d)", r);
 			return;
 		}
-		s_istRunning = true;
+#endif
+                s_istRunning = true;
 	}
 
 	void AXIst_StopThread()
@@ -914,11 +933,18 @@ namespace snd_core
 			s_istRunning = false;
 		}
 		s_istCond.notify_all();
-		if (pthread_equal(pthread_self(), s_istHostThread))
+#ifdef _WIN32
+                if (std::this_thread::get_id() == s_istHostThread.get_id())
+                    s_istHostThread.detach();
+                else
+                    s_istHostThread.join();
+#else
+                if (pthread_equal(pthread_self(), s_istHostThread))
 			pthread_detach(s_istHostThread); // AXQuit from inside an AX callback: the loop exits after this frame
 		else
 			pthread_join(s_istHostThread, nullptr);
-	}
+#endif
+        }
 
 	// ---- exports BotW imports that Cemu does not implement ----
 

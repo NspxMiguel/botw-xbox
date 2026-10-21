@@ -1,5 +1,6 @@
 // Minimal type prelude for the vendored Latte hardware definitions (from Cemu, MPL-2.0).
 #pragma once
+#include "../../../include/byte_swap.h"
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
@@ -18,7 +19,7 @@ typedef int64_t sint64;
 #include <stddef.h>
 #include <type_traits>
 #include <span>
-inline uint32 _swapEndianU32(uint32 v) { return __builtin_bswap32(v); }
+inline uint32 _swapEndianU32(uint32 v) { return botw_bswap32(v); }
 #define DEFINE_ENUM_FLAG_OPERATORS(T)                                                                                 \
     inline T operator|(T a, T b) { return (T)((std::underlying_type_t<T>)a | (std::underlying_type_t<T>)b); }         \
     inline T operator&(T a, T b) { return (T)((std::underlying_type_t<T>)a & (std::underlying_type_t<T>)b); }         \

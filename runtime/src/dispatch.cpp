@@ -1,10 +1,16 @@
 // Guest address -> host function, HLE thunks, traps.
+#ifndef _WIN32
 #include <execinfo.h>
 #include <mach-o/dyld.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <map>
 #include <mutex>
@@ -151,7 +157,8 @@ uint32_t guest_call(PPCContext* c, uint32_t fn, std::initializer_list<uint32_t> 
 // ---- runtime entry points used by generated code -----------------------------------------------
 extern "C" void rt_call(PPCContext* c, uint32_t target) {
     GuestFn fn = dispatch::lookup(target);
-    if (__builtin_expect(!fn, 0)) rt_trap(c, target, "indirect call to an address with no recompiled function");
+    if (!fn) [[unlikely]]
+        rt_trap(c, target, "indirect call to an address with no recompiled function");
     fn(c);
 }
 
@@ -175,12 +182,14 @@ static void dump_context(PPCContext* c) {
 // Host backtrace: raw addresses plus the image base; tools/symbolize.sh turns them into guest
 // addresses with atos (generated code carries `#line <guest address>` for every instruction).
 static void host_backtrace() {
+#ifndef _WIN32
     void* frames[48];
     int n = backtrace(frames, 48);
     char line[2048];
     int k = snprintf(line, sizeof line, "  host frames (base 0x%lx):", (unsigned long)_dyld_get_image_header(0));
     for (int i = 0; i < n && k < (int)sizeof line - 24; i++) k += snprintf(line + k, sizeof line - k, " %p", frames[i]);
     LOG("%s", line);
+#endif
 }
 
 extern "C" PPC_NORETURN void rt_fatal_exit(void);

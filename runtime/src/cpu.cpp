@@ -3,16 +3,23 @@
 #include <time.h>
 
 #include "ppc.h"
+#ifdef _WIN32
+#include "platform/platform.h"
+#endif
 
 // Espresso time base runs at bus clock / 4 = 248.625 MHz / 4.
 static constexpr uint64_t kTimerHz = 62156250;
 
 extern "C" uint64_t rt_timebase(void) {
+#ifdef _WIN32
+    return platform::guest_timebase();
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
     static const uint64_t t0 = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
     uint64_t ns = (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec - t0;
     return (uint64_t)((__uint128_t)ns * kTimerHz / 1000000000ull);
+#endif
 }
 
 // fres / frsqrte lookup tables from the Espresso hardware (via Cemu PPCInterpreterFPU.cpp).

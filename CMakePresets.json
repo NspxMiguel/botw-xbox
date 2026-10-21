@@ -59,6 +59,18 @@
         "CMAKE_SYSTEM_VERSION": "10.0",
         "VCPKG_TARGET_TRIPLET": "x64-uwp"
       }
+    },
+    {
+      "name": "local-uwp-clang",
+      "inherits": "ci-base",
+      "displayName": "Local UWP x64 clang-cl + xwin (no game)",
+      "generator": "Ninja",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/uwp-clang-cl.cmake",
+      "cacheVariables": {
+        "BOTW_PLATFORM": "uwp",
+        "BOTW_RENDERER": "d3d12",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true
+      }
     }
   ],
   "buildPresets": [
@@ -75,6 +87,14 @@
       "name": "ci-uwp",
       "configurePreset": "ci-uwp",
       "configuration": "Release",
+      "targets": [
+        "BotWRecomp"
+      ],
+      "jobs": 2
+    },
+    {
+      "name": "local-uwp-clang",
+      "configurePreset": "local-uwp-clang",
       "targets": [
         "BotWRecomp"
       ],

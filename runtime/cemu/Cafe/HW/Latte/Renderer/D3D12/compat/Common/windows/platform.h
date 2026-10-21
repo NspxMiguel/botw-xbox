@@ -12,3 +12,16 @@ inline uint32_t GetExceptionError()
 {
 	return static_cast<uint32_t>(GetLastError());
 }
+
+#include <shared_mutex>
+
+class SlimRWLock {
+  public:
+    void LockRead() { mutex_.lock_shared(); }
+    void UnlockRead() { mutex_.unlock_shared(); }
+    void LockWrite() { mutex_.lock(); }
+    void UnlockWrite() { mutex_.unlock(); }
+
+  private:
+    std::shared_mutex mutex_;
+};

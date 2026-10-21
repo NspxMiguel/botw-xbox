@@ -10,8 +10,16 @@
 #include <stdint.h>
 #include <string.h>
 
+#ifdef _MSC_VER
+#include <atomic>
+#include <intrin.h>
+#define PPC_INLINE static __forceinline
+#define PPC_NORETURN __declspec(noreturn)
+#else
 #define PPC_INLINE static inline __attribute__((always_inline))
 #define PPC_NORETURN __attribute__((noreturn))
+#endif
+#include "byte_swap.h"
 
 struct alignas(64) PPCContext {
     uint32_t r[32];
@@ -44,13 +52,34 @@ void rt_probe(PPCContext* c, uint32_t addr);
 
 // ---- guest memory (big-endian) ---------------------------------------------------------
 PPC_INLINE uint8_t ld8_(uint8_t* M, uint32_t a) { return M[a]; }
-PPC_INLINE uint16_t ld16_(uint8_t* M, uint32_t a) { uint16_t v; memcpy(&v, M + a, 2); return __builtin_bswap16(v); }
-PPC_INLINE uint32_t ld32_(uint8_t* M, uint32_t a) { uint32_t v; memcpy(&v, M + a, 4); return __builtin_bswap32(v); }
-PPC_INLINE uint64_t ld64_(uint8_t* M, uint32_t a) { uint64_t v; memcpy(&v, M + a, 8); return __builtin_bswap64(v); }
+PPC_INLINE uint16_t ld16_(uint8_t *M, uint32_t a) {
+    uint16_t v;
+    memcpy(&v, M + a, 2);
+    return botw_bswap16(v);
+}
+PPC_INLINE uint32_t ld32_(uint8_t *M, uint32_t a) {
+    uint32_t v;
+    memcpy(&v, M + a, 4);
+    return botw_bswap32(v);
+}
+PPC_INLINE uint64_t ld64_(uint8_t *M, uint32_t a) {
+    uint64_t v;
+    memcpy(&v, M + a, 8);
+    return botw_bswap64(v);
+}
 PPC_INLINE void st8_(uint8_t* M, uint32_t a, uint8_t v) { M[a] = v; }
-PPC_INLINE void st16_(uint8_t* M, uint32_t a, uint16_t v) { v = __builtin_bswap16(v); memcpy(M + a, &v, 2); }
-PPC_INLINE void st32_(uint8_t* M, uint32_t a, uint32_t v) { v = __builtin_bswap32(v); memcpy(M + a, &v, 4); }
-PPC_INLINE void st64_(uint8_t* M, uint32_t a, uint64_t v) { v = __builtin_bswap64(v); memcpy(M + a, &v, 8); }
+PPC_INLINE void st16_(uint8_t *M, uint32_t a, uint16_t v) {
+    v = botw_bswap16(v);
+    memcpy(M + a, &v, 2);
+}
+PPC_INLINE void st32_(uint8_t *M, uint32_t a, uint32_t v) {
+    v = botw_bswap32(v);
+    memcpy(M + a, &v, 4);
+}
+PPC_INLINE void st64_(uint8_t *M, uint32_t a, uint64_t v) {
+    v = botw_bswap64(v);
+    memcpy(M + a, &v, 8);
+}
 // byte-reversed (i.e. little-endian) forms: lhbrx/lwbrx/sthbrx/stwbrx
 PPC_INLINE uint16_t ld16r_(uint8_t* M, uint32_t a) { uint16_t v; memcpy(&v, M + a, 2); return v; }
 PPC_INLINE uint32_t ld32r_(uint8_t* M, uint32_t a) { uint32_t v; memcpy(&v, M + a, 4); return v; }
@@ -93,13 +122,25 @@ PPC_INLINE uint32_t ppc_divwu(uint32_t a, uint32_t b) { return b ? a / b : 0; }
 // overflow-recording add/sub (the 'o' forms)
 PPC_INLINE uint32_t add_ov(PPCContext* c, uint32_t a, uint32_t b) {
     int32_t r;
+#ifdef _MSC_VER
+    const int64_t wide = (int64_t)(int32_t)a + (int32_t)b;
+    r = (int32_t)(uint32_t)wide;
+    c->ov = wide > INT32_MAX || wide < INT32_MIN;
+#else
     c->ov = __builtin_add_overflow((int32_t)a, (int32_t)b, &r);
+#endif
     c->so |= c->ov;
     return (uint32_t)r;
 }
 PPC_INLINE uint32_t sub_ov(PPCContext* c, uint32_t a, uint32_t b) {  // a - b
     int32_t r;
+#ifdef _MSC_VER
+    const int64_t wide = (int64_t)(int32_t)a - (int32_t)b;
+    r = (int32_t)(uint32_t)wide;
+    c->ov = wide > INT32_MAX || wide < INT32_MIN;
+#else
     c->ov = __builtin_sub_overflow((int32_t)a, (int32_t)b, &r);
+#endif
     c->so |= c->ov;
     return (uint32_t)r;
 }
@@ -248,17 +289,26 @@ PPC_INLINE void psq_store(PPCContext* c, uint8_t* M, uint32_t ea, int w, uint32_
 
 // ---- atomics (lwarx/stwcx.) ------------------------------------------------------------------
 PPC_INLINE uint32_t ppc_lwarx(PPCContext* c, uint8_t* M, uint32_t ea) {
+#ifdef _MSC_VER
+    uint32_t raw = std::atomic_ref<uint32_t>(*(uint32_t *)(M + ea)).load(std::memory_order_acquire);
+#else
     uint32_t raw = __atomic_load_n((uint32_t*)(M + ea), __ATOMIC_ACQUIRE);
+#endif
     c->res_addr = ea;
     c->res_val = raw;
-    return __builtin_bswap32(raw);
+    return botw_bswap32(raw);
 }
 PPC_INLINE void ppc_stwcx(PPCContext* c, uint8_t* M, uint32_t ea, uint32_t v) {
     uint8_t ok = 0;
     if (c->res_addr == ea) {
         uint32_t expect = c->res_val;
-        ok = __atomic_compare_exchange_n((uint32_t*)(M + ea), &expect, __builtin_bswap32(v), false,
-                                         __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#ifdef _MSC_VER
+        ok = std::atomic_ref<uint32_t>(*(uint32_t *)(M + ea))
+                 .compare_exchange_strong(expect, botw_bswap32(v), std::memory_order_seq_cst);
+#else
+        ok = __atomic_compare_exchange_n((uint32_t *)(M + ea), &expect, botw_bswap32(v), false, __ATOMIC_SEQ_CST,
+                                         __ATOMIC_SEQ_CST);
+#endif
     }
     c->res_addr = 0xFFFFFFFFu;
     c->cr[0] = 0;

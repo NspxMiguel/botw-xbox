@@ -115,8 +115,8 @@ void LatteThread_HandleOSScreen()
 int Latte_ThreadEntry()
 {
 	SetThreadName("LatteThread");
-#ifdef BOTWRECOMP
-	pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);  // with the game's main thread on the performance cores
+#if defined(BOTWRECOMP) && defined(__APPLE__)
+        pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);  // with the game's main thread on the performance cores
 #endif
 	sint32 w,h;
 	WindowSystem::GetWindowPhysSize(w,h);

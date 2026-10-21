@@ -12,6 +12,12 @@
 
 
 #if BOOST_OS_WINDOWS
+#define BOTW_DESKTOP_WINDOWS WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+#else
+#define BOTW_DESKTOP_WINDOWS 0
+#endif
+
+#if BOTW_DESKTOP_WINDOWS
 #include <TlHelp32.h>
 #endif
 
@@ -115,18 +121,19 @@ typedef struct tagTHREADNAME_INFO
 void SetThreadName(const char* name)
 {
 #if BOOST_OS_WINDOWS
-	using SetThreadDescription_t = HRESULT (*)(HANDLE hThread, PCWSTR lpThreadDescription);
-	static SetThreadDescription_t pSetThreadDescription = nullptr;
-	if (!pSetThreadDescription)
-		pSetThreadDescription = (SetThreadDescription_t)GetProcAddress(LoadLibraryW(L"Kernel32.dll"), "SetThreadDescription");
-	if (pSetThreadDescription)
-	{
-		size_t len = strlen(name) * 2 + 1;
-		auto threadDescription = new wchar_t[len];
-		if (boost::nowide::widen(threadDescription, len, name))
-			pSetThreadDescription(GetCurrentThread(), threadDescription);
-		delete[] threadDescription;
-	}
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+    using SetThreadDescription_t = HRESULT (*)(HANDLE hThread, PCWSTR lpThreadDescription);
+    static SetThreadDescription_t pSetThreadDescription = nullptr;
+    if (!pSetThreadDescription)
+        pSetThreadDescription =
+            (SetThreadDescription_t)GetProcAddress(LoadLibraryW(L"Kernel32.dll"), "SetThreadDescription");
+    if (pSetThreadDescription) {
+        size_t len = strlen(name) * 2 + 1;
+        auto threadDescription = new wchar_t[len];
+        if (boost::nowide::widen(threadDescription, len, name))
+            pSetThreadDescription(GetCurrentThread(), threadDescription);
+        delete[] threadDescription;
+    }
 #ifdef _MSC_VER
 	THREADNAME_INFO info;
 	info.dwType = 0x1000;
@@ -142,6 +149,10 @@ void SetThreadName(const char* name)
 	}
 #pragma warning(pop)
 #endif
+#else
+    const auto description = boost::nowide::widen(name);
+    SetThreadDescription(GetCurrentThread(), description.c_str());
+#endif
 #elif BOOST_OS_MACOS
 	pthread_setname_np(name);
 #else
@@ -154,15 +165,19 @@ void SetThreadName(const char* name)
 #if BOOST_OS_WINDOWS
 std::pair<DWORD, DWORD> GetWindowsVersion()
 {
-	using RtlGetVersion_t = LONG(*)(POSVERSIONINFOEXW);
-	static RtlGetVersion_t pRtlGetVersion = nullptr;
-	if(!pRtlGetVersion) 
-		pRtlGetVersion = (RtlGetVersion_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlGetVersion");
-	cemu_assert(pRtlGetVersion);
+#if !WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+    return {10, 0}; // UWP requires Windows 10 or newer.
+#else
+    using RtlGetVersion_t = LONG (*)(POSVERSIONINFOEXW);
+    static RtlGetVersion_t pRtlGetVersion = nullptr;
+    if (!pRtlGetVersion)
+        pRtlGetVersion = (RtlGetVersion_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlGetVersion");
+    cemu_assert(pRtlGetVersion);
 
-	OSVERSIONINFOEXW version_info{};
-	pRtlGetVersion(&version_info);
-	return { version_info.dwMajorVersion, version_info.dwMinorVersion };
+    OSVERSIONINFOEXW version_info{};
+    pRtlGetVersion(&version_info);
+    return {version_info.dwMajorVersion, version_info.dwMinorVersion};
+#endif
 }
 
 bool IsWindows81OrGreater()
@@ -180,10 +195,11 @@ bool IsWindows10OrGreater()
 
 fs::path GetParentProcess()
 {
+	// UWP cannot inspect other processes; an empty path means unavailable.
 	fs::path result;
-	
-#if BOOST_OS_WINDOWS
-	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+#if BOTW_DESKTOP_WINDOWS
+        HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
 	if(hSnapshot != INVALID_HANDLE_VALUE)
 	{
 		DWORD pid = GetCurrentProcessId();
@@ -210,8 +226,8 @@ fs::path GetParentProcess()
 		
 		CloseHandle(hSnapshot);
 	}
-#else
-	assert_dbg();
+#elif !BOOST_OS_WINDOWS
+        assert_dbg();
 #endif
 
 	return result;
@@ -236,9 +252,9 @@ uint32_t GetPhysicalCoreCount()
 	static uint32_t s_core_count = 0;
 	if (s_core_count != 0)
 		return s_core_count;
-	
-#if BOOST_OS_WINDOWS
-	auto core_count = std::thread::hardware_concurrency();
+
+#if BOTW_DESKTOP_WINDOWS
+        auto core_count = std::thread::hardware_concurrency();
 
 	// Get physical cores
 	PSYSTEM_LOGICAL_PROCESSOR_INFORMATION buffer = nullptr;

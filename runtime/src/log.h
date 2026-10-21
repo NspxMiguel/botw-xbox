@@ -4,6 +4,10 @@
 
 extern int g_log_level;  // 0 normal, 1+ trace
 void log_set_file(const char* path);
+#ifdef _MSC_VER
+void log_write(const char *fmt, ...);
+#else
 void log_write(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+#endif
 #define LOG(...) log_write(__VA_ARGS__)
 #define TRACE(...) do { if (g_log_level > 0) log_write(__VA_ARGS__); } while (0)

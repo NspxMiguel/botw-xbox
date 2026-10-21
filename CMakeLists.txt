@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
 project(BotWRecomp LANGUAGES C CXX)
 
+set(BOTW_GENERATED_DIR "${CMAKE_SOURCE_DIR}/generated" CACHE PATH "Player-generated guest source directory")
+
 option(BOTW_BUILD_GAME "Link player-generated guest code into the runtime" ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
   set(BOTW_DEFAULT_PLATFORM uwp)
@@ -18,6 +20,17 @@ set_property(CACHE BOTW_PLATFORM PROPERTY STRINGS apple win32 uwp)
 if(NOT BOTW_PLATFORM MATCHES "^(apple|win32|uwp)$")
   message(FATAL_ERROR "Invalid BOTW_PLATFORM: ${BOTW_PLATFORM}")
 endif()
+# BEGIN W11 msvc
+if(MSVC)
+  add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
+  if(BOTW_PLATFORM STREQUAL "uwp")
+    # MSVC 14.44 STL unconditionally imports getenv/system from the UCRT headers.
+    # This exposes CRT declarations only; WINAPI_FAMILY still restricts Windows APIs.
+    add_compile_definitions(_CRT_USE_WINAPI_FAMILY_DESKTOP_APP)
+  endif()
+endif()
+# END W11 msvc
+
 if(BOTW_PLATFORM STREQUAL "apple")
   set(BOTW_DEFAULT_RENDERER metal)
   enable_language(OBJC OBJCXX)
@@ -53,19 +66,19 @@ if(BOTW_BUILD_GAME)
     GLOB
     GUEST_SOURCES
     CONFIGURE_DEPENDS
-    ${CMAKE_SOURCE_DIR}/generated/fn_*.cpp
-    ${CMAKE_SOURCE_DIR}/generated/big_*.cpp
-    ${CMAKE_SOURCE_DIR}/generated/huge_*.cpp
-    ${CMAKE_SOURCE_DIR}/generated/table.cpp
-    ${CMAKE_SOURCE_DIR}/generated/hle_stubs.cpp)
+    "${BOTW_GENERATED_DIR}/fn_*.cpp"
+    "${BOTW_GENERATED_DIR}/big_*.cpp"
+    "${BOTW_GENERATED_DIR}/huge_*.cpp"
+    "${BOTW_GENERATED_DIR}/table.cpp"
+    "${BOTW_GENERATED_DIR}/hle_stubs.cpp")
   if(NOT GUEST_SOURCES)
     message(
       FATAL_ERROR
-        "BOTW_BUILD_GAME=ON requires player-generated sources in generated/. Use OFF for CI."
+        "BOTW_BUILD_GAME=ON requires player-generated sources in BOTW_GENERATED_DIR. Use OFF for CI."
     )
   endif()
   add_library(guest OBJECT ${GUEST_SOURCES})
-  target_include_directories(guest PRIVATE runtime/include generated)
+  target_include_directories(guest PRIVATE runtime/include "${BOTW_GENERATED_DIR}")
   if(MSVC)
     target_compile_options(guest PRIVATE /O2 /w /fp:strict)
   else()
@@ -75,8 +88,8 @@ if(BOTW_BUILD_GAME)
   if(BOTW_PLATFORM STREQUAL "apple")
     target_compile_options(guest PRIVATE -gline-tables-only -mcpu=apple-m1)
   endif()
-  file(GLOB BIG_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/big_*.cpp)
-  file(GLOB HUGE_SOURCES CONFIGURE_DEPENDS ${CMAKE_SOURCE_DIR}/generated/huge_*.cpp)
+  file(GLOB BIG_SOURCES CONFIGURE_DEPENDS "${BOTW_GENERATED_DIR}/big_*.cpp")
+  file(GLOB HUGE_SOURCES CONFIGURE_DEPENDS "${BOTW_GENERATED_DIR}/huge_*.cpp")
   if(NOT MSVC)
     set_source_files_properties(${BIG_SOURCES} PROPERTIES COMPILE_OPTIONS "-O1")
     set_source_files_properties(${HUGE_SOURCES} PROPERTIES COMPILE_OPTIONS "-O0")
@@ -114,6 +127,13 @@ else()
   message(FATAL_ERROR "Unknown BOTW_RENDERER: ${BOTW_RENDERER}")
 endif()
 # END W2 renderer source selection.
+# BEGIN W11 msvc
+if(BOTW_PLATFORM MATCHES "^(uwp|win32)$")
+  list(FILTER CEMU_SOURCES EXCLUDE REGEX "\\.mm$|/cemu_shims/overlay_(menu|touch)\\.cpp$|SystemInfoUnix\\.cpp$|LatteDecompilerEmitMSL\\.cpp$")
+else()
+  list(FILTER CEMU_SOURCES EXCLUDE REGEX "/cemu_shims/windows/")
+endif()
+# END W11 msvc
 list(
   APPEND
   CEMU_SOURCES
@@ -186,11 +206,17 @@ if(NOT BOTW_PLATFORM STREQUAL "apple")
 endif()
 add_executable(BotWRecomp ${RUNTIME_SOURCES} $<TARGET_OBJECTS:cemu_gpu>)
 target_include_directories(BotWRecomp PRIVATE runtime/include runtime/src)
+# BEGIN W11 msvc
+if(MSVC AND BOTW_PLATFORM MATCHES "^(uwp|win32)$")
+  # std::thread uses the executable's default stack reserve for guest call depth.
+  target_link_options(BotWRecomp PRIVATE /STACK:67108864)
+endif()
+# END W11 msvc
 target_compile_definitions(BotWRecomp
                            PRIVATE BOTW_BUILD_GAME=$<BOOL:${BOTW_BUILD_GAME}>)
 if(BOTW_BUILD_GAME)
   target_sources(BotWRecomp PRIVATE $<TARGET_OBJECTS:guest>)
-  target_include_directories(BotWRecomp PRIVATE generated)
+  target_include_directories(BotWRecomp PRIVATE "${BOTW_GENERATED_DIR}")
 endif()
 # BEGIN W2 renderer link dependencies (cemu_gpu is consumed as object files).
 if(BOTW_RENDERER STREQUAL "d3d12")

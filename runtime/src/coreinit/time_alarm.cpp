@@ -89,9 +89,15 @@ namespace os {
 void init_time() {
     time_t now = time(nullptr);
     struct tm lt;
+#ifdef _WIN32
+    localtime_s(&lt, &now);
+    // Interpret local calendar fields as UTC to obtain the current DST-aware offset.
+    int64_t local = _mkgmtime64(&lt) - 946684800;
+#else
     localtime_r(&now, &lt);
     // seconds since 2000-01-01 in local time (Cafe clocks are local)
     int64_t local = (int64_t)now + lt.tm_gmtoff - 946684800;
+#endif
     g_epoch_offset_ticks = local * (int64_t)kHz - (int64_t)rt_timebase();
     g_alarm_context = mem::sys_alloc(0x320, 8);
     std::thread(alarm_thread).detach();
@@ -108,7 +114,11 @@ HLE_EXPORT(coreinit, OSTicksToCalendarTime) {
     int64_t secs = ticks / (int64_t)kHz, sub = ticks % (int64_t)kHz;
     time_t t = (time_t)(secs + 946684800);
     struct tm g;
+#ifdef _WIN32
+    gmtime_s(&g, &t);
+#else
     gmtime_r(&t, &g);
+#endif
     mem::w32(out + 0x00, g.tm_sec);
     mem::w32(out + 0x04, g.tm_min);
     mem::w32(out + 0x08, g.tm_hour);
