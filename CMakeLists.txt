@@ -300,6 +300,14 @@ if(BOTW_PLATFORM STREQUAL "uwp")
     FILES $<TARGET_RUNTIME_DLLS:BotWRecomp>
     DESTINATION .
     COMPONENT Runtime)
+  # zlib and OpenSSL come in as plain import libraries, so TARGET_RUNTIME_DLLS misses their DLLs.
+  foreach(dll z.dll libcrypto-3-x64.dll)
+    string(MAKE_C_IDENTIFIER "BOTW_DLL_${dll}" var)
+    find_file(${var} ${dll} PATH_SUFFIXES bin NO_CACHE)
+    if(${var})
+      install(FILES ${${var}} DESTINATION . COMPONENT Runtime)
+    endif()
+  endforeach()
 endif()
 
 # Native Metal GPU path (docs/native-renderer.md): option BOTW_NATIVE_GPU,
