@@ -48,3 +48,28 @@ botw_embed_fsr1_chunks("${BOTW_FSR1_DIR}/ffx_fsr1.h" kFsrAlgorithm "${BOTW_FSR1_
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   "${BOTW_FSR1_DIR}/ffx_a.h" "${BOTW_FSR1_DIR}/ffx_fsr1.h")
 target_include_directories(cemu_gpu PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/fsr")
+
+# Optional SDK remains outside the source tree. Never link its import libraries.
+set(BOTW_FFX_SDK "" CACHE PATH "External FidelityFX 2.3.0 Kits/FidelityFX directory")
+if(BOTW_FFX_SDK)
+  foreach(_file api/include/ffx_api.h upscalers/include/ffx_upscale.h
+      framegeneration/include/ffx_framegeneration.h
+      signedbin/amd_fidelityfx_loader_dx12.dll
+      signedbin/amd_fidelityfx_upscaler_dx12.dll
+      signedbin/amd_fidelityfx_framegeneration_dx12.dll docs/license.md)
+    if(NOT EXISTS "${BOTW_FFX_SDK}/${_file}")
+      message(FATAL_ERROR "Incomplete FidelityFX SDK: ${BOTW_FFX_SDK}/${_file}")
+    endif()
+  endforeach()
+  target_include_directories(cemu_gpu PRIVATE "${BOTW_FFX_SDK}/api/include"
+    "${BOTW_FFX_SDK}/upscalers/include" "${BOTW_FFX_SDK}/framegeneration/include")
+  target_compile_definitions(cemu_gpu PRIVATE BOTW_HAS_FFX=1)
+  # Also expose availability to the host's automatic resolution policy.
+  add_compile_definitions(BOTW_HAS_FFX=1)
+  install(FILES "${BOTW_FFX_SDK}/signedbin/amd_fidelityfx_loader_dx12.dll"
+    "${BOTW_FFX_SDK}/signedbin/amd_fidelityfx_upscaler_dx12.dll"
+    "${BOTW_FFX_SDK}/signedbin/amd_fidelityfx_framegeneration_dx12.dll"
+    DESTINATION . COMPONENT Runtime)
+  install(FILES "${BOTW_FFX_SDK}/docs/license.md" DESTINATION Notices
+    RENAME FidelityFX-LICENSE.md COMPONENT Runtime)
+endif()

@@ -3,6 +3,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Fsr.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Ffx.h"
 #include "fsr1_source.h"
 #include <d3dcompiler.h>
 
@@ -148,6 +149,9 @@ void D3D12Fsr::ResizeTargets(uint32 iw, uint32 ih, uint32 ow, uint32 oh)
 			d.DepthOrArraySize = d.MipLevels = d.SampleDesc.Count = 1;
 			d.Format = D3D12SwapChain::kFormat;
 			d.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+#ifdef BOTW_HAS_FFX
+			d.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+#endif
 			auto heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
 			renderer.ReleaseResourceDeferred(std::move(texture));
 			D3D12_ThrowIfFailed(renderer.GetDevice()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &d,
@@ -166,6 +170,8 @@ void D3D12Fsr::ResizeTargets(uint32 iw, uint32 ih, uint32 ow, uint32 oh)
 		inputState = scaledState = D3D12_RESOURCE_STATE_COMMON;
 		cemuLog_log(LogType::Force, "D3D12: AMD FSR1 EASU + RCAS: {}x{} -> {}x{}", iw, ih, ow, oh);
 	}
+	if (renderer.GetFfx())
+		renderer.GetFfx()->Resize(iw, ih, ow, oh, renderer.GetMainSwapChain());
 }
 void D3D12Fsr::BeginInput()
 {
@@ -202,7 +208,18 @@ void D3D12Fsr::Draw(D3D12SwapChain &swapChain, sint32 x, sint32 y, uint32 w, uin
 		cmd->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		cmd->DrawInstanced(3, 1, 0, 0);
 	};
-	draw(inputSRV, scaledRTV, easu.Get(), 0, 0);
+	const bool temporal = renderer.GetFfx() && renderer.GetFfx()->Upscale(input.Get(), inputState, scaled.Get(), scaledState, renderer.GetSceneDepth());
+	if (!temporal)
+	{
+		// Dispatch failures may leave the SDK descriptor heaps bound. Rebind our state.
+		renderer.TransitionResource(input.Get(), inputState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		renderer.TransitionResource(scaled.Get(), scaledState, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		renderer.FlushBarriers();
+	}
+	renderer.BindRootSignatureAndHeaps();
+	cmd->SetGraphicsRootSignature(root.Get());
+	if (!temporal)
+		draw(inputSRV, scaledRTV, easu.Get(), 0, 0);
 	renderer.TransitionResource(scaled.Get(), scaledState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 	renderer.TransitionResource(swapChain.GetCurrentBackbuffer(), swapChain.GetCurrentBackbufferState(),
 								D3D12_RESOURCE_STATE_RENDER_TARGET);

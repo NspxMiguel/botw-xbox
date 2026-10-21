@@ -10,6 +10,11 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12FrameInterpolator.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Fsr.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Ffx.h"
+#include "../../../../../../src/log.h"
+#if defined(BOTW_PLATFORM_UWP)
+#include "../../../../../../src/host/uwp/quick_menu.h"
+#endif
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Runtime.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12RootSignature.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12PipelineCache.h"
@@ -114,6 +119,9 @@ D3D12Renderer::D3D12Renderer()
 
 	// first command list
 	ResetCommandList();
+#ifdef BOTW_HAS_FFX
+	m_ffx = std::make_unique<D3D12Ffx>(*this);
+#endif
 	D3D12_Checkpoint(m_device.Get(), "renderer constructed");
 }
 
@@ -123,13 +131,17 @@ D3D12Renderer::~D3D12Renderer()
 	if (m_device)
 		WaitForIdle();
 	m_simSeriesS.reset();
+	if (m_ffx)
+		m_ffx->Reset();
+	// Disabled SDK chains still use provider code; release them before unloading FFX.
+	m_swapChainMain.reset();
+	m_swapChainPad.reset();
+	m_ffx.reset();
 	m_fsr.reset();
 	occlusionQuery_destroyAll();
 	m_imgui.reset();
 	m_pipelineCache.reset();
 	m_internal.reset();
-	m_swapChainMain.reset();
-	m_swapChainPad.reset();
 	m_deferredReleaser.ReleaseAll();
 	RendererShaderD3D12::Shutdown();
 	RendererShaderD3D12::ShaderCacheLoading_Close();
@@ -763,6 +775,9 @@ void D3D12Renderer::FlushBarriers()
 
 void D3D12Renderer::NotifyTextureRelease(LatteTextureD3D12 *texture)
 {
+	if (m_sceneDepth == texture)
+		m_sceneDepth = nullptr;
+	m_sceneDepthUses.erase(texture);
 	// drop pending barriers that reference the texture, the resource will be released once the GPU is done with it
 	// (barriers that were already recorded keep the resource alive through the deferred releaser)
 	m_pendingBarriers.erase(std::remove_if(m_pendingBarriers.begin(), m_pendingBarriers.end(), [texture](const D3D12_RESOURCE_BARRIER &b) {
@@ -847,7 +862,14 @@ void D3D12Renderer::InitializeSurface(const Vector2i &size, bool mainWindow, Sur
 		throw std::runtime_error("D3D12: Failed to create swap chain");
 	D3D12_Checkpoint(m_device.Get(), mainWindow ? "TV swap chain created" : "GamePad swap chain created");
 	if (mainWindow)
+	{
+		if (m_ffx)
+			m_ffx->Reset();
+		if (m_swapChainMain)
+			WaitForIdle();
 		m_swapChainMain = std::move(swapChain);
+		m_fsrResizePending = m_fsr != nullptr;
+	}
 	else
 		m_swapChainPad = std::move(swapChain);
 }
@@ -856,6 +878,8 @@ void D3D12Renderer::ShutdownSurface(bool mainWindow)
 {
 	if (mainWindow)
 	{
+		if (m_ffx)
+			m_ffx->Reset();
 		WaitForIdle();
 		m_swapChainMain.reset();
 		return;
@@ -914,8 +938,12 @@ bool D3D12Renderer::AcquireBackbuffer(bool mainWindow)
 	uint32 w, h;
 	if (swapChain->ConsumeResizeRequest(w, h))
 	{
+		if (mainWindow && m_ffx)
+			m_ffx->Reset();
 		WaitForIdle();
 		swapChain->Resize(w, h);
+		if (mainWindow)
+			m_fsrResizePending = true;
 		D3D12_Checkpoint(m_device.Get(), "swap chain resized");
 	}
 	TransitionResource(swapChain->GetCurrentBackbuffer(), swapChain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -951,13 +979,29 @@ void D3D12Renderer::PresentSwapChain(bool mainWindow)
 		const float clearColor[4] = {0, 0, 0, 1};
 		m_cmdList->ClearRenderTargetView(swapChain->GetCurrentRTV(), clearColor, 0, nullptr);
 	}
+	if (mainWindow && m_ffx)
+	{
+		m_ffx->PreparePresent();
+		swapChain->SetFrameGeneration(m_ffx->Generating());
+	}
 	TransitionResource(swapChain->GetCurrentBackbuffer(), swapChain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_PRESENT);
 	if (mainWindow && m_simSeriesS)
 		m_simSeriesS->EndFrame();
 	SubmitCommandList(false);
 #if defined(BOTW_PLATFORM_UWP)
-	if (mainWindow)
+	if (mainWindow && uwp::quick_menu.requested.load())
+	{
+		// The quick menu presents synchronously while guest execution is paused.
+		if (m_ffx)
+			m_ffx->PreparePresent(true);
+		swapChain->SetFrameGeneration(false);
 		uwp::present_quick_menu(m_device.Get(), m_queue.Get(), swapChain->GetSwapChain());
+		// The menu rotated the wrapped backbuffers; refresh the renderer's index.
+		swapChain->RefreshCurrentIndex();
+		const HRESULT removed = m_device->GetDeviceRemovedReason();
+		if (FAILED(removed))
+			HandleDeviceError(removed, "Present");
+	}
 #endif
 	if (!swapChain->Present(vsync != 0 ? 1 : 0))
 		HandleDeviceError(m_device->GetDeviceRemovedReason(), "Present");
@@ -1302,11 +1346,13 @@ void D3D12Renderer::SwapBuffers(bool swapTV, bool swapDRC)
 		PresentSwapChain(true);
 	if (swapDRC && m_swapChainPad)
 		PresentSwapChain(false);
+	if (swapTV && m_ffx)
+		m_ffx->EndFrame();
 	if (!swapTV && !swapDRC)
 		SubmitCommandList(false);
 	// All TV/DRC backbuffers have been submitted and presented. Apply the size
 	// requested by the output pass for the next frame, never during acquisition.
-	if (swapTV && m_fsrResizePending && !m_fsrFailed)
+	if (swapTV && m_fsrResizePending && !m_fsrFailed && m_fsrInputWidth && m_fsrInputHeight)
 	{
 		m_fsrResizePending = false;
 		try
@@ -1317,9 +1363,14 @@ void D3D12Renderer::SwapBuffers(bool swapTV, bool swapDRC)
 		}
 		catch (const std::exception &e)
 		{
-			cemuLog_log(LogType::Force, "D3D12: FSR1 unavailable; using output filter: {}", e.what());
+			LOG("D3D12: FSR 1 unavailable; using output scaling: %s", e.what());
 			m_fsrFailed = true;
 		}
+	}
+	if (swapTV)
+	{
+		m_sceneDepth = nullptr;
+		m_sceneDepthUses.clear();
 	}
 	if (swapTV && m_pipelineCache)
 		m_pipelineCache->TickBackgroundPreload();

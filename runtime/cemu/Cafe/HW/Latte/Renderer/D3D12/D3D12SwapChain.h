@@ -31,6 +31,19 @@ class D3D12SwapChain
 
 	// all buffers must be idle (call after WaitForIdle)
 	void Resize(uint32 width, uint32 height);
+	// Caller drains GPU and SDK presents before replacing or restoring the native chain.
+	bool ReplaceNative(IDXGISwapChain1 *chain) noexcept;
+	void ReleaseNative();
+	bool Recreate() noexcept;
+	void RefreshCurrentIndex()
+	{
+		m_currentIndex = m_swapChain ? m_swapChain->GetCurrentBackBufferIndex() : 0;
+		m_hasDefinedContent = false;
+	}
+	void SetFrameGeneration(bool enabled)
+	{
+		m_frameGeneration = enabled;
+	}
 
 	bool IsValid() const
 	{
@@ -102,6 +115,7 @@ class D3D12SwapChain
 	uint32 m_width;
 	uint32 m_height;
 	bool m_allowTearing = false;
+	bool m_frameGeneration = false;
 	uint32 m_currentIndex = 0;
 	bool m_hasDefinedContent = false;
 
@@ -112,6 +126,10 @@ class D3D12SwapChain
 		D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_PRESENT;
 	};
 	Buffer m_buffers[D3D12Const::kSwapChainBufferCount];
+	ComPtr<IDXGIFactory4> m_factory;
+	ComPtr<ID3D12CommandQueue> m_queue;
+	ComPtr<IUnknown> m_nativeWindow;
+	void *m_nativeHandle;
 
 	PresentStats m_presentStats;
 	UINT m_lastSyncRefreshCount = 0;

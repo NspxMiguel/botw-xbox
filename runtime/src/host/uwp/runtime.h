@@ -2,6 +2,7 @@
 #pragma once
 #include <string>
 namespace uwp {
+void refresh_output_mode(int &width, int &height);
 float runtime_max_render_scale();
 float runtime_render_scale();
 void set_runtime_render_scale(float value);

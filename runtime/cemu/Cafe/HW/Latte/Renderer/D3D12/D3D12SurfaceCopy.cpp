@@ -13,6 +13,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12InternalPipelines.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Fsr.h"
 #include "../../../../../../src/fsr.h"
+#include "../../../../../../src/fsr3_policy.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12PipelineCache.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/RendererShaderD3D12.h"
@@ -113,8 +114,18 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	// DRC and downscales keep their existing output path.
 	sint32 inputWidth, inputHeight;
 	view->baseTexture->GetEffectiveSize(inputWidth, inputHeight, view->firstMip);
+	const char *overrideValue = std::getenv("BOTW_UPSCALER");
+	auto requested = fsr::upscaler.load();
+#ifdef BOTW_HAS_FFX
+	const auto selection = fsr3::select(fsr3::console.load(), false, overrideValue ? overrideValue : "", true, true);
+	requested = selection.path == fsr3::Path::Off ? fsr::Upscaler::Off : fsr::Upscaler::Auto;
+#endif
+	if (overrideValue && std::string_view(overrideValue) == "off")
+		requested = fsr::Upscaler::Off;
+	else if (overrideValue && (std::string_view(overrideValue) == "fsr1" || std::string_view(overrideValue) == "fsr3"))
+		requested = fsr::Upscaler::Spatial;
 	bool fsr = !padView && !m_fsrFailed &&
-			   fsr::should_upscale(fsr::upscaler.load(), inputWidth, inputHeight, imageWidth, imageHeight);
+			   fsr::should_upscale(requested, inputWidth, inputHeight, imageWidth, imageHeight);
 	if (fsr && (!m_fsr || !m_fsr->Matches(inputWidth, inputHeight, imageWidth, imageHeight)))
 	{
 		// Keep the user's output filter for this frame; resize between presents.
