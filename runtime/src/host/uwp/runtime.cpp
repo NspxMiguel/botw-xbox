@@ -9,6 +9,7 @@
 #include "../../packs/host_install.h"
 #include "../../settings.h"
 #include "first_frame.h"
+#include "../../sim_series_s.h"
 #if defined(_WIN32)
 #include <winrt/Windows.Graphics.Display.Core.h>
 #include <winrt/Windows.Graphics.Display.h>
@@ -67,6 +68,8 @@ void output_pixels([[maybe_unused]] int &width, [[maybe_unused]] int &height) {
 // Series S (~4 TFLOPS) holds 60 fps at 1080p internal, not 4K: cap the render scale there.
 // The swap chain stays at the output size; the output shader upscales.
 float max_render_scale() {
+    if (sim_series_s::settings().enabled)
+        return 1.5f;
 #if defined(BOTW_HAS_GAMING_DEVICE_INFO)
     GAMING_DEVICE_MODEL_INFORMATION info{};
     if (SUCCEEDED(GetGamingDeviceModelInformation(&info)) && info.vendorId == GAMING_DEVICE_VENDOR_ID_MICROSOFT &&

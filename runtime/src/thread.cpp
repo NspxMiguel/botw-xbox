@@ -64,6 +64,8 @@ std::vector<std::pair<const char*, uint64_t>> g_wait_stats;  // kind -> ns
 auto g_wait_stats_t0 = std::chrono::steady_clock::now();
 }  // namespace
 void note_main_wait(const char* kind, uint64_t ns) {
+    if (auto *t = current(); t && t->is_main)
+        t->sim_waited_ns += ns;
     std::lock_guard<std::mutex> l(g_wait_stats_lock);
     for (auto& [k, v] : g_wait_stats)
         if (k == kind) {
