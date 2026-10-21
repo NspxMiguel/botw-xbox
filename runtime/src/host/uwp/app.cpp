@@ -13,7 +13,9 @@
 #include "host.h"
 #include "launcher.h"
 #include "mod_network.h"
+#include "qr.h"
 #include "runtime.h"
+#include "setup_storage.h"
 #include "strings.h"
 #include <algorithm>
 #include <atomic>
@@ -34,6 +36,7 @@
 #include <winrt/Windows.Storage.Pickers.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Storage.h>
+#include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
@@ -117,6 +120,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     uwp::GameArt art;
     uwp::ArtView home;
     bool mods_open = false, browser_open = false, text_entry = false, transfer_active = false;
+    bool setup_active = false, setup_busy = false, setup_guide = false;
+    int setup_action = 0;
+    uwp::setup::Progress setup_progress;
+    uwp::setup::Repeat setup_repeat;
+    std::string setup_error, saved_usb_mode, saved_game_source;
     int browser_action = 0;
     std::wstring input_text;
     uwp::Transfer transfer;
@@ -127,7 +135,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     uint32_t home_buttons = ~uint32_t(0);
     std::chrono::steady_clock::time_point loading_since{};
     event_token key_down{}, pointer_pressed{};
-    StorageFolder local{nullptr};
+    StorageFolder local{nullptr}, selected_game{nullptr};
     std::vector<uwp::Candidate> candidates;
     Gamepad pad{nullptr};
     std::chrono::steady_clock::time_point next_rumble{};
@@ -180,6 +188,53 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 return;
             using winrt::Windows::System::VirtualKey;
             auto key = e.VirtualKey();
+            if (setup_active) {
+                e.Handled(true);
+                // Real pads use the repeat/edge sampler below; virtual keys also support remote input.
+                if (pad && (key == VirtualKey::GamepadA || key == VirtualKey::GamepadB ||
+                            key == VirtualKey::GamepadDPadUp || key == VirtualKey::GamepadDPadDown ||
+                            key == VirtualKey::GamepadDPadLeft || key == VirtualKey::GamepadDPadRight))
+                    return;
+                if (key == VirtualKey::GamepadA)
+                    key = VirtualKey::Enter;
+                if (key == VirtualKey::GamepadDPadUp)
+                    key = VirtualKey::Up;
+                if (key == VirtualKey::GamepadDPadDown)
+                    key = VirtualKey::Down;
+                if (key == VirtualKey::GamepadDPadLeft)
+                    key = VirtualKey::Left;
+                if (key == VirtualKey::GamepadDPadRight)
+                    key = VirtualKey::Right;
+                if (key == VirtualKey::Escape || key == VirtualKey::GamepadB) {
+                    if (setup_busy)
+                        setup_progress.cancel = true;
+                    else
+                        setup_action = -2;
+                }
+                if (setup_busy)
+                    return;
+                if (key == VirtualKey::Left) {
+                    if (setup_guide)
+                        setup_action = -3;
+                    else
+                        home.navigate(3);
+                }
+                if (key == VirtualKey::Right) {
+                    if (setup_guide)
+                        setup_action = -4;
+                    else
+                        home.navigate(1);
+                }
+                if (key == VirtualKey::Up)
+                    home.navigate(0);
+                if (key == VirtualKey::Down || key == VirtualKey::Tab)
+                    home.navigate(2);
+                if ((key == VirtualKey::Enter || key == VirtualKey::Space) &&
+                    home.enabled(size_t(home.focus)))
+                    home.selected = home.focus;
+                return;
+            }
+
             if (transfer_active) {
                 if (key == VirtualKey::Escape)
                     transfer.cancel();
@@ -228,7 +283,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 home.selected = home.focus;
         });
         pointer_pressed = window.PointerPressed([this](auto const &, PointerEventArgs const &e) {
-            if (!home.shown || home.loading)
+            if (!home.shown || home.loading || setup_busy)
                 return;
             auto point = e.CurrentPoint().Position();
             auto bounds = host_window.Bounds();
@@ -335,12 +390,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto lifetime = get_strong();
         auto dispatcher = host_window.Dispatcher();
         auto saved_preferences = preferences;
+        auto previous = selected_game ? to_string(selected_game.Path()) : std::string{};
         co_await resume_background();
         std::vector<uwp::Candidate> found;
         std::vector<StorageFolder> folders;
-        auto add = [&](StorageFolder const &folder, uwp::Source source) {
+        std::vector<std::string> source_ids;
+        auto add = [&](StorageFolder const &folder, uwp::Source source,
+                       std::string identity = std::string{}) {
             found.push_back(inspect(folder, source));
             folders.push_back(folder);
+            source_ids.push_back(std::move(identity));
         };
         try {
             for (auto path : {L"game", L""}) {
@@ -348,30 +407,40 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (folder)
                     add(folder, uwp::Source::local);
             }
-            auto access = AccessCache::StorageApplicationPermissions::FutureAccessList();
-            if (access.ContainsItem(L"game")) {
-                try {
-                    add(access.GetFolderAsync(L"game").get(), uwp::Source::remembered);
-                } catch (
-                    hresult_error const &) { /* Removed drive or expired grant: continue auto detection. */
-                }
-            }
-            auto drives = KnownFolders::RemovableDevices().GetFoldersAsync().get();
-            for (auto const &drive : drives) {
-                for (auto path : {L"game", L"BotW", L"BotWRecomp\\game", L""}) {
-                    auto folder = *path ? child(drive, path) : drive;
-                    if (folder)
-                        add(folder, uwp::Source::removable);
-                }
+            for (auto &item : uwp::setup::scan(local)) {
+                if (item.format == uwp::setup::Format::folder && item.drive.Path() != local.Path())
+                    add(item.folder, uwp::Source::removable,
+                        to_string(std::filesystem::path(item.folder.Path().c_str())
+                                      .lexically_relative(std::filesystem::path(item.drive.Path().c_str()))
+                                      .generic_wstring()));
             }
         } catch (hresult_error const &) { /* LocalState remains usable if removable access is denied. */
         }
         uwp::GameArt loaded_art;
         auto decision = uwp::decide(found, saved_preferences);
+        if (!previous.empty())
+            for (auto &candidate : found)
+                if (candidate.path == previous && candidate.valid()) {
+                    decision.game = candidate;
+                    break;
+                }
+        if (uwp::setup::parse_mode(saved_usb_mode) == uwp::setup::Mode::external) {
+            decision.game.reset();
+            for (size_t i = 0; i < found.size(); ++i) {
+                if (found[i].source != uwp::Source::removable || !found[i].valid())
+                    continue;
+                if (!saved_game_source.empty() && source_ids[i] != saved_game_source)
+                    continue;
+                decision.game = found[i];
+                break;
+            }
+        }
+        StorageFolder active_folder{nullptr};
         if (decision.game) {
             for (size_t i = 0; i < found.size(); ++i) {
                 if (found[i].path != decision.game->path)
                     continue;
+                active_folder = folders[i];
                 auto meta = child(folders[i], L"meta");
                 loaded_art.tv = read_art(meta, L"bootTvTex.tga");
                 loaded_art.icon = read_art(meta, L"iconTex.tga");
@@ -390,6 +459,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         co_await resume_foreground(dispatcher);
         art = std::move(loaded_art);
         candidates = std::move(found);
+        selected_game = active_folder;
     }
     IAsyncOperation<int32_t> choose(hstring title, hstring body, std::vector<hstring> choices) {
         auto cancellation = co_await get_cancellation_token();
@@ -409,6 +479,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto rows = home.rows;
         auto row_enabled = home.row_enabled;
         bool mods_mode = home.mods_mode;
+        bool setup_mode = home.setup_mode;
+        auto modules = home.qr_modules;
+        float progress = home.progress;
         bool shown = home.shown, loading = home.loading;
         int focus = home.focus;
         try {
@@ -419,6 +492,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             home.rows = std::move(rows);
             home.row_enabled = std::move(row_enabled);
             home.mods_mode = mods_mode;
+            home.setup_mode = setup_mode;
+            home.qr_modules = std::move(modules);
+            home.progress = progress;
             home.shown = shown;
             home.loading = loading;
             home.focus = focus;
@@ -452,38 +528,412 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         home.shown = false;
         co_return result;
     }
-    IAsyncAction select_folder() {
-        Pickers::FolderPicker picker;
-        picker.SuggestedStartLocation(Pickers::PickerLocationId::ComputerFolder);
-        picker.FileTypeFilter().Append(L"*");
-        StorageFolder folder{nullptr};
-        try {
-            folder = co_await picker.PickSingleFolderAsync();
-        } catch (hresult_error const &) {
-            failed = true;
-            co_return;
-        }
-        if (!folder)
-            co_return;
+    IAsyncAction select_folder() { co_await run_setup(true); }
+    std::wstring setup_label(uwp::Text key) const { return std::wstring(uwp::text(key, pt)); }
+    void setup_page(uwp::Text title, std::wstring body, std::vector<std::wstring> rows = {}, int focus = 0) {
+        if (!home.ready())
+            show_home();
+        home.shown = true;
+        home.setup_mode = true;
+        home.mods_mode = false;
+        home.loading = false;
+        home.heading = setup_label(title);
+        home.detail = std::move(body);
+        home.rows = std::move(rows);
+        home.row_enabled.clear();
+        home.qr_modules.clear();
+        home.progress = -1;
+        home.focus = focus;
+        home.selected = -1;
+        home.loading_text = setup_label(uwp::Text::setup_hints);
+        setup_guide = false;
+        setup_action = 0;
+        home_buttons = ~uint32_t(0);
+    }
+    IAsyncOperation<int32_t> setup_choice() {
         auto dispatcher = host_window.Dispatcher();
+        while (!quit && home.selected < 0 && !setup_action) {
+            co_await resume_after(std::chrono::milliseconds(16));
+            co_await resume_foreground(dispatcher);
+        }
+        if (setup_action)
+            co_return setup_action;
+        co_return quit ? -2 : home.selected;
+    }
+    IAsyncAction setup_work(std::function<void()> work) {
+        auto lifetime = get_strong();
+        auto dispatcher = host_window.Dispatcher();
+        setup_busy = true;
+        setup_progress.cancel = false;
+        setup_progress.done = 0;
+        setup_progress.total = 0;
+        setup_error.clear();
+        home.selected = -1;
+        home.rows.clear();
+        home.loading_text = setup_label(uwp::Text::setup_cancel);
+        std::string error;
         co_await resume_background();
-        uwp::Candidate candidate;
         try {
-            candidate = inspect(folder, uwp::Source::remembered);
-        } catch (hresult_error const &) {
+            work();
+        } catch (uwp::setup::Cancelled const &) {
+            error = "cancelled";
+        } catch (winrt::hresult_error const &) {
+            error = "storage";
+        } catch (std::exception const &e) {
+            error = e.what();
         }
         co_await resume_foreground(dispatcher);
-        if (candidate.valid()) {
-            AccessCache::StorageApplicationPermissions::FutureAccessList().AddOrReplace(L"game", folder);
-            candidates.insert(candidates.begin(), std::move(candidate));
-        } else
-            failed = true;
+        setup_error = std::move(error);
+        setup_busy = false;
+        home.progress = -1;
     }
+    std::wstring free_space(uwp::setup::Space value) const {
+        if (!value.known)
+            return setup_label(uwp::Text::space_unknown);
+        return setup_label(uwp::Text::space_free) + uwp::setup::gigabytes(value.free, pt) +
+               setup_label(uwp::Text::space_of) + uwp::setup::gigabytes(value.capacity, pt);
+    }
+    IAsyncAction run_setup(bool storage_only = false, bool recover = false) {
+        auto lifetime = get_strong();
+        auto dispatcher = host_window.Dispatcher();
+        using uwp::Text;
+        using uwp::setup::Step;
+        uwp::setup::State state;
+        state.mode = uwp::setup::parse_mode(saved_usb_mode);
+        if (storage_only || recover)
+            state.step = Step::detect;
+        state.drive_removed = recover;
+        setup_active = true;
+        struct SetupGuard {
+            App &app;
+            ~SetupGuard() {
+                app.setup_active = false;
+                app.setup_busy = false;
+                app.home.setup_mode = false;
+                app.home.shown = false;
+                app.home.qr_modules.clear();
+            }
+        } guard{*this};
+        uwp::setup::Item selected;
+        StorageFolder game{nullptr};
+        uint64_t game_size = 0;
+        bool dlc = false;
+        std::string hash, xml;
+        for (;;) {
+            if (quit)
+                co_return;
+            if (state.step == Step::welcome) {
+                setup_page(Text::setup_welcome, setup_label(Text::setup_intro),
+                           {setup_label(Text::setup_next)});
+                int choice = co_await setup_choice();
+                if (choice >= 0)
+                    state.next();
+            } else if (state.step == Step::guide) {
+                const Text pages[] = {Text::guide_aroma, Text::guide_dump, Text::guide_merge,
+                                      Text::guide_usb};
+                setup_page(Text::setup_guide,
+                           setup_label(pages[state.page]) +
+                               L"\n\nhttps://wiiu.hacks.guide/\nhttps://github.com/emiyl/dumpling\n\n" +
+                               std::to_wstring(state.page + 1) + L" / 4",
+                           {setup_label(Text::setup_next)});
+                home.loading_text = setup_label(Text::guide_hints);
+                setup_guide = true;
+                const std::string url = "https://wiiu.hacks.guide/";
+                auto qr = qrcodegen::QrCode::encodeSegments(
+                    {qrcodegen::QrSegment::makeBytes(std::vector<uint8_t>(url.begin(), url.end()))},
+                    qrcodegen::QrCode::Ecc::MEDIUM, 1, 5, -1, false);
+                home.qr_modules.resize(qr.getSize(), std::vector<bool>(qr.getSize()));
+                for (int y = 0; y < qr.getSize(); ++y)
+                    for (int x = 0; x < qr.getSize(); ++x)
+                        home.qr_modules[y][x] = qr.getModule(x, y);
+                int choice = co_await setup_choice();
+                if (choice == -2 || choice == -3)
+                    state.back();
+                else if (choice == -4 || choice >= 0)
+                    state.next();
+            } else if (state.step == Step::detect) {
+                setup_page(Text::setup_insert,
+                           setup_label(state.drive_removed ? Text::drive_removed : Text::setup_search));
+                std::vector<uwp::setup::Item> items;
+                while (state.step == Step::detect && !quit) {
+                    // Enumeration is fresh every second. No persisted drive letters or stale picker tokens.
+                    co_await setup_work([&] { items = uwp::setup::scan(local); });
+                    home.loading_text = setup_label(Text::setup_hints);
+                    home.rows.clear();
+                    home.selected = -1;
+                    for (auto &item : items)
+                        home.rows.push_back(item.name);
+                    home.focus = std::clamp(home.focus, 0, std::max(0, int(items.size()) - 1));
+                    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                    while (!quit && home.selected < 0 && setup_action != -2 &&
+                           std::chrono::steady_clock::now() < until) {
+                        co_await resume_after(std::chrono::milliseconds(16));
+                        co_await resume_foreground(dispatcher);
+                    }
+                    if (setup_action == -2) {
+                        if (storage_only)
+                            co_return;
+                        state.back();
+                        break;
+                    }
+                    if (home.selected >= 0 && size_t(home.selected) < items.size()) {
+                        selected = items[size_t(home.selected)];
+                        if (selected.format == uwp::setup::Format::seven_zip) {
+                            setup_page(Text::setup_insert, setup_label(Text::unsupported),
+                                       {setup_label(Text::back)});
+                            co_await setup_choice();
+                            setup_action = 0;
+                            home.selected = -1;
+                            continue;
+                        }
+                        state.found();
+                    }
+                }
+            } else if (state.step == Step::verify) {
+                game = selected.folder;
+                if (selected.format != uwp::setup::Format::folder || !selected.layers.empty()) {
+                    setup_page(Text::setup_extract, L"");
+                    co_await setup_work([&] {
+                        auto entries = uwp::setup::source_entries(selected, setup_progress);
+                        uint64_t size = 0;
+                        for (auto &entry : entries)
+                            size += entry.size;
+
+                        auto suffix = uwp::setup::source_identity(selected, setup_progress);
+                        game = uwp::setup::extraction_folder(selected, local, suffix);
+                        auto existing = uwp::setup::tree_size(game, setup_progress);
+                        auto available = uwp::setup::space(selected.drive);
+                        if (!available.fits(size > existing ? size - existing : 0))
+                            throw std::runtime_error("USB space");
+                        uwp::setup::extract(entries, game, local,
+                                            std::wstring(L"extract-") + std::wstring(to_hstring(suffix)) +
+                                                L".txt",
+                                            setup_progress, true);
+                    });
+                    if (!setup_error.empty()) {
+                        Text message = setup_error.find("otp.bin") != std::string::npos ? Text::missing_common
+                                       : setup_error.find("disc key") != std::string::npos
+                                           ? Text::missing_disc
+                                       : setup_error == "USB space" ? Text::usb_space_insufficient
+                                                                    : Text::setup_failed;
+                        if (setup_error != "cancelled") {
+                            setup_page(Text::setup_extract,
+                                       setup_label(message) +
+                                           ((message == Text::missing_common || message == Text::missing_disc)
+                                                ? L"\n\n" + setup_label(Text::setup_keys)
+                                                : L""),
+                                       {setup_label(Text::retry)});
+                            co_await setup_choice();
+                        }
+                        state.step = Step::detect;
+                        state.verified = false;
+                        state.drive_removed = setup_error == "storage";
+                        continue;
+                    }
+                }
+                setup_page(Text::setup_verify, L"");
+                co_await setup_work([&] {
+                    hash =
+                        uwp::setup::hash_file(game.GetFileAsync(L"code\\U-King.rpx").get(), setup_progress);
+                    xml = uwp::setup::read_text(game, L"code\\app.xml");
+                    dlc = game.TryGetItemAsync(L"aoc").get() != nullptr;
+                    game_size = uwp::setup::tree_size(game, setup_progress);
+                    if (hash == uwp::setup::expected_rpx && game.TryGetItemAsync(L"setup-source.txt").get())
+                        uwp::setup::write_text(game, L"setup-complete.txt", "v208\n");
+                });
+                if (!setup_error.empty()) {
+                    state.removed();
+                    continue;
+                }
+                state.hash(hash);
+            } else if (state.step == Step::wrong_version) {
+                auto body = setup_label(Text::setup_wrong);
+                if (auto version = uwp::setup::title_version(xml))
+                    body += L"\n\n" + setup_label(Text::version_found) + L"v" + std::to_wstring(*version);
+                setup_page(Text::setup_verify, body, {setup_label(Text::back)});
+                co_await setup_choice();
+                state.back();
+            } else if (state.step == Step::storage) {
+                uwp::setup::Space internal, external;
+                bool existing = false, available = false;
+                bool refreshing =
+                    home.setup_mode && home.heading == setup_label(Text::setup_storage) && !home.rows.empty();
+                if (!refreshing)
+                    setup_page(Text::setup_storage, L"");
+                co_await resume_background();
+                try {
+                    internal = uwp::setup::space(local);
+                    if (selected.drive.Path() != local.Path())
+                        external = uwp::setup::space(selected.drive);
+                    else {
+                        auto drives = KnownFolders::RemovableDevices().GetFoldersAsync().get();
+                        if (drives.Size())
+                            external = uwp::setup::space(drives.GetAt(0));
+                    }
+                    existing = local.TryGetItemAsync(L"game").get() != nullptr;
+                    available = uwp::setup::game_folder(game);
+                } catch (hresult_error const &) {
+                }
+                co_await resume_foreground(dispatcher);
+                int pending_selection = home.selected, pending_action = setup_action,
+                    pending_focus = home.focus;
+                uint32_t pending_buttons = home_buttons;
+                if (!available) {
+                    state.removed();
+                    continue;
+                }
+                bool is_internal =
+                    std::wstring_view(game.Path()).starts_with(std::wstring_view(local.Path()));
+                auto body = setup_label(Text::space_game) + uwp::setup::gigabytes(game_size, pt) + L"\n" +
+                            setup_label(Text::space_usb) + free_space(external) + L"\n" +
+                            setup_label(Text::space_console) + free_space(internal);
+                if (!dlc)
+                    body += L"\n" + setup_label(Text::dlc_optional);
+                if (!internal.fits(game_size))
+                    body += L"\n" + setup_label(Text::space_insufficient);
+                if (existing && !is_internal)
+                    body += L"\n" + setup_label(Text::existing_import);
+                setup_page(Text::setup_storage, body,
+                           {setup_label(Text::play_usb), setup_label(Text::import_internal),
+                            setup_label(Text::back)},
+                           state.storage_focus(internal, game_size));
+                home.row_enabled = {!is_internal, (internal.fits(game_size) && !existing) || is_internal,
+                                    true};
+                if (refreshing) {
+                    home.selected = pending_selection;
+                    setup_action = pending_action;
+                    home.focus = pending_focus;
+                    home_buttons = pending_buttons;
+                }
+
+                if (!home.enabled(size_t(home.focus)))
+                    home.focus = 0;
+                if (is_internal) {
+                    home.focus = 1;
+                    home.rows[1] = setup_label(Text::setup_next);
+                }
+                // Refresh capacities while the player is deciding, including external free space.
+                auto next = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+                while (!quit && home.selected < 0 && !setup_action) {
+                    co_await resume_after(std::chrono::milliseconds(32));
+                    co_await resume_foreground(dispatcher);
+                    if (std::chrono::steady_clock::now() >= next)
+                        break;
+                }
+                if (home.selected < 0 && !setup_action) {
+                    state.mode = home.focus == 1 ? uwp::setup::Mode::copy : uwp::setup::Mode::external;
+                    continue;
+                }
+                int choice = setup_action ? setup_action : home.selected;
+                if (choice == -2 || choice == 2) {
+                    if (storage_only)
+                        co_return;
+                    state.back();
+                    continue;
+                }
+                if (choice == 1 && !is_internal) {
+                    if (!internal.fits(game_size) || existing)
+                        continue;
+                    setup_page(Text::setup_copy, L"");
+                    StorageFolder imported{nullptr};
+                    co_await setup_work([&] {
+                        StorageFolder staging{nullptr};
+                        try {
+                            require_no_existing_import();
+                            // A suspend or kill mid-copy leaves a staging folder behind; reclaim it.
+                            for (auto const &folder : local.GetFoldersAsync().get())
+                                if (std::wstring_view(folder.Name()).starts_with(L"game-import"))
+                                    folder.DeleteAsync(StorageDeleteOption::PermanentDelete).get();
+                            staging = local
+                                          .CreateFolderAsync(L"game-import",
+                                                             CreationCollisionOption::GenerateUniqueName)
+                                          .get();
+                            std::vector<uwp::formats::Entry> entries;
+                            uwp::setup::folder_entries(game, "", entries, setup_progress);
+                            if (!uwp::setup::space(local).fits(game_size))
+                                throw std::runtime_error("Internal space changed");
+                            uwp::setup::extract(entries, staging, local, L"", setup_progress, false);
+                            auto copied = uwp::setup::hash_file(
+                                staging.GetFileAsync(L"code\\U-King.rpx").get(), setup_progress);
+                            uwp::formats::require(copied == uwp::setup::expected_rpx,
+                                                  "Imported RPX hash mismatch");
+                            setup_progress.check();
+                            staging.RenameAsync(L"game", NameCollisionOption::FailIfExists).get();
+                            imported = staging;
+                            uwp::setup::write_text(local, L"game-imported.txt", "1\n");
+                        } catch (...) {
+                            if (staging) {
+                                try {
+                                    staging.DeleteAsync(StorageDeleteOption::PermanentDelete).get();
+                                } catch (...) {
+                                }
+                            }
+                            throw;
+                        }
+                    });
+                    if (!setup_error.empty()) {
+                        if (setup_error != "cancelled") {
+                            setup_page(Text::setup_copy, setup_label(Text::setup_failed),
+                                       {setup_label(Text::retry)});
+                            co_await setup_choice();
+                        }
+                        continue;
+                    }
+                    game = imported;
+                }
+                state.mode = choice == 0 ? uwp::setup::Mode::external : uwp::setup::Mode::copy;
+                saved_usb_mode = uwp::setup::mode_name(state.mode);
+                saved_game_source =
+                    to_string(std::filesystem::path(game.Path().c_str())
+                                  .lexically_relative(std::filesystem::path(selected.drive.Path().c_str()))
+                                  .generic_wstring());
+                co_await setup_work([&] {
+                    uwp::setup::write_text(local, L"usb_mode.txt", saved_usb_mode + "\n");
+                    uwp::setup::write_text(local, L"game_source.txt", saved_game_source);
+                });
+                if (!setup_error.empty())
+                    continue;
+                // Preserve the selected source in memory only. Each startup re-enumerates removable drives.
+                selected_game = game;
+                candidates = {{to_string(game.Path()),
+                               std::wstring_view(game.Path()).starts_with(std::wstring_view(local.Path()))
+                                   ? uwp::Source::local
+                                   : uwp::Source::removable,
+                               true, true, true}};
+                if (storage_only)
+                    co_return;
+                state.next();
+            } else if (state.step == Step::automatic) {
+                setup_page(Text::title, setup_label(Text::auto_question),
+                           {setup_label(Text::yes), setup_label(Text::no)});
+                int choice = co_await setup_choice();
+                if (choice == -2) {
+                    state.back();
+                    continue;
+                }
+                preferences.auto_launch = choice == 0;
+                co_await setup_work([&] { uwp::setup::write_text(local, L"setup_done.txt", "1\n"); });
+                if (!setup_error.empty())
+                    continue;
+                preferences.setup_complete = true;
+                save_preferences();
+                state.next();
+            } else {
+                co_await scan();
+                co_return;
+            }
+        }
+    }
+    void require_no_existing_import() {
+        uwp::formats::require(!local.TryGetItemAsync(L"game").get(),
+                              "Remove existing imported copy before importing");
+    }
+
     IAsyncAction configure() {
         for (;;) {
-            auto choice =
-                co_await choose(label(uwp::Text::settings), label(uwp::Text::controls),
-                                {label(uwp::Text::automatic), label(uwp::Text::fps), label(uwp::Text::back)});
+            auto choice = co_await choose(
+                label(uwp::Text::settings), label(uwp::Text::controls),
+                {label(uwp::Text::automatic), label(uwp::Text::settings_more), label(uwp::Text::back)});
             if (choice == 2)
                 break;
             if (choice == 0) {
@@ -491,6 +941,84 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     (co_await choose(label(uwp::Text::automatic), L"",
                                      {label(uwp::Text::yes), label(uwp::Text::no)})) == 0;
             } else {
+                auto section = co_await choose(
+                    label(uwp::Text::settings), L"",
+                    {label(uwp::Text::storage_settings), label(uwp::Text::fps), label(uwp::Text::back)});
+                if (section == 2)
+                    continue;
+                if (section == 0) {
+                    if (running) {
+                        co_await choose(label(uwp::Text::storage_settings), label(uwp::Text::restart),
+                                        {label(uwp::Text::back)});
+                        continue;
+                    }
+                    auto action = co_await choose(label(uwp::Text::storage_settings), L"",
+                                                  {label(uwp::Text::setup_storage),
+                                                   label(uwp::Text::settings_more), label(uwp::Text::back)});
+                    if (action == 2)
+                        continue;
+                    if (action == 0) {
+                        co_await run_setup(true);
+                        continue;
+                    }
+                    auto maintenance =
+                        co_await choose(label(uwp::Text::storage_settings), L"",
+                                        {label(uwp::Text::remove_import), label(uwp::Text::setup_again),
+                                         label(uwp::Text::back)});
+                    if (maintenance == 2)
+                        continue;
+                    if (maintenance == 1) {
+                        co_await run_setup();
+                    } else {
+                        uwp::setup::Space internal, external;
+                        bool has_import = false;
+                        auto dispatcher = host_window.Dispatcher();
+                        co_await resume_background();
+                        try {
+                            internal = uwp::setup::space(local);
+                            has_import = local.TryGetItemAsync(L"game-imported.txt").get() != nullptr;
+                            auto drives = KnownFolders::RemovableDevices().GetFoldersAsync().get();
+                            if (drives.Size())
+                                external = uwp::setup::space(drives.GetAt(0));
+                        } catch (hresult_error const &) {
+                        }
+                        co_await resume_foreground(dispatcher);
+                        setup_active = true;
+                        setup_page(
+                            uwp::Text::remove_import,
+                            setup_label(has_import ? uwp::Text::remove_question : uwp::Text::no_import) +
+                                L"\n\n" + setup_label(uwp::Text::space_console) + free_space(internal) +
+                                L"\n" + setup_label(uwp::Text::space_usb) + free_space(external),
+                            {setup_label(uwp::Text::no), setup_label(uwp::Text::yes)});
+                        home.row_enabled = {true, has_import};
+                        auto confirmation = co_await setup_choice();
+                        setup_active = false;
+                        home.setup_mode = false;
+                        home.shown = false;
+                        if (confirmation == 1) {
+                            auto dispatcher = host_window.Dispatcher();
+                            bool removed = false;
+                            co_await resume_background();
+                            try {
+                                if (local.TryGetItemAsync(L"game-imported.txt").get()) {
+                                    auto folder = child(local, L"game");
+                                    if (folder)
+                                        folder.DeleteAsync(StorageDeleteOption::PermanentDelete).get();
+                                    local.GetFileAsync(L"game-imported.txt")
+                                        .get()
+                                        .DeleteAsync(StorageDeleteOption::PermanentDelete)
+                                        .get();
+                                    removed = true;
+                                }
+                            } catch (hresult_error const &) {
+                            }
+                            co_await resume_foreground(dispatcher);
+                            if (removed)
+                                co_await scan();
+                        }
+                    }
+                    continue;
+                }
                 auto selected =
                     co_await choose(label(uwp::Text::fps), L"", {L"30", L"60", label(uwp::Text::settings)});
                 if (selected < 2)
@@ -583,6 +1111,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (import_failure && copied)
             std::rethrow_exception(import_failure);
         if (!copied) {
+            if (winrt::Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily() ==
+                L"Windows.Xbox")
+                co_return;
             Pickers::FolderPicker picker;
             picker.SuggestedStartLocation(Pickers::PickerLocationId::ComputerFolder);
             picker.FileTypeFilter().Append(L"*");
@@ -921,8 +1452,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     continue;
                 }
                 if (selected == search_index) {
-                    // ponytail: empty = cancelled, keeps the current search; a "clear search" row if players ask.
-                    if (auto typed = to_string(co_await enter_text(uwp::Text::enter_search)); !typed.empty()) {
+                    // ponytail: empty = cancelled, keeps the current search; a "clear search" row if players
+                    // ask.
+                    if (auto typed = to_string(co_await enter_text(uwp::Text::enter_search));
+                        !typed.empty()) {
                         query = typed;
                         page = 1;
                     }
@@ -1107,6 +1640,25 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     IAsyncAction launch(uwp::Candidate candidate) {
         if (!running) {
+            if (!boot_attempted) {
+                auto dispatcher = host_window.Dispatcher();
+                bool available = false, valid_hash = false;
+                co_await resume_background();
+                try {
+                    available = selected_game && uwp::setup::game_folder(selected_game);
+                    uwp::setup::Progress progress;
+                    if (available)
+                        valid_hash =
+                            uwp::setup::hash_file(selected_game.GetFileAsync(L"code\\U-King.rpx").get(),
+                                                  progress) == uwp::setup::expected_rpx;
+                } catch (...) {
+                }
+                co_await resume_foreground(dispatcher);
+                if (!available || !valid_hash) {
+                    co_await run_setup(false, true);
+                    co_return;
+                }
+            }
             if (boot_attempted) {
                 failed = true;
                 co_return;
@@ -1158,15 +1710,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } guard{menu_open};
         neutral();
         uwp::pause_audio(true);
+        if (!running && (!preferences.setup_complete || !selected_game)) {
+            co_await run_setup(false, preferences.setup_complete);
+            allow_auto = false;
+        }
         for (;;) {
             auto decision = uwp::decide(candidates, preferences, !allow_auto);
-            if (decision.ask_auto_launch) {
-                preferences.auto_launch =
-                    (co_await choose(label(uwp::Text::title), label(uwp::Text::auto_question),
-                                     {label(uwp::Text::yes), label(uwp::Text::no)})) == 0;
-                preferences.setup_complete = true;
-                save_preferences();
-            }
+            if (selected_game)
+                for (auto &candidate : candidates)
+                    if (candidate.path == to_string(selected_game.Path()) && candidate.valid()) {
+                        decision.game = candidate;
+                        decision.select_game = false;
+                        break;
+                    }
             if (decision.launch && !failed) {
                 co_await launch(*decision.game);
                 if (running)
@@ -1218,6 +1774,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 pt = languages.Size() && std::wstring_view(languages.GetAt(0)).starts_with(L"pt");
                 local = ApplicationData::Current().LocalFolder();
                 read_preferences();
+                auto dispatcher = host_window.Dispatcher();
+                co_await resume_background();
+                bool setup_done = local.TryGetItemAsync(L"setup_done.txt").get() != nullptr;
+                auto mode = uwp::setup::read_text(local, L"usb_mode.txt");
+                auto source = uwp::setup::read_text(local, L"game_source.txt");
+                co_await resume_foreground(dispatcher);
+                preferences.setup_complete = setup_done;
+                saved_usb_mode = mode;
+                saved_game_source = source;
                 save_preferences();
                 co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
                 co_await local.CreateFolderAsync(L"art", CreationCollisionOption::OpenIfExists);
@@ -1241,12 +1806,59 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         if ((home.shown || transfer_active || text_entry || browser_open) && !home.loading && pad &&
             visible) {
-            auto buttons = static_cast<uint32_t>(pad.GetCurrentReading().Buttons);
+            auto reading = pad.GetCurrentReading();
+            auto buttons = static_cast<uint32_t>(reading.Buttons);
+            if (setup_active) {
+                if (reading.LeftThumbstickX < -.5)
+                    buttons |= uwp::left;
+                if (reading.LeftThumbstickX > .5)
+                    buttons |= uwp::right;
+                if (reading.LeftThumbstickY < -.5)
+                    buttons |= uwp::down;
+                if (reading.LeftThumbstickY > .5)
+                    buttons |= uwp::up;
+            }
             if (home_buttons == ~uint32_t(0)) {
-                if (!buttons)
+                if (!buttons) {
                     home_buttons = 0;
+                    setup_repeat = {};
+                }
             } else {
                 auto pressed = buttons & ~home_buttons;
+                if (setup_active) {
+                    double now =
+                        std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+                    pressed = setup_repeat.update(buttons, uwp::up | uwp::down | uwp::left | uwp::right, now);
+                    if (pressed & uwp::b) {
+                        if (setup_busy)
+                            setup_progress.cancel = true;
+                        else
+                            setup_action = -2;
+                    }
+                    if (!setup_busy) {
+                        if (pressed & uwp::left) {
+                            if (setup_guide)
+                                setup_action = -3;
+                            else
+                                home.navigate(3);
+                        }
+                        if (pressed & uwp::right) {
+                            if (setup_guide)
+                                setup_action = -4;
+                            else
+                                home.navigate(1);
+                        }
+                        if (pressed & uwp::up)
+                            home.navigate(0);
+                        if (pressed & uwp::down)
+                            home.navigate(2);
+                        if ((pressed & uwp::a) && home.enabled(size_t(home.focus)))
+                            home.selected = home.focus;
+                    }
+                    home_buttons = buttons;
+                    return;
+                }
                 if (transfer_active) {
                     if (pressed & uwp::b)
                         transfer.cancel();
@@ -1315,6 +1927,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             try {
                 poll();
                 if (home.shown && visible && !suspended) {
+                    if (setup_busy) {
+                        auto total = setup_progress.total.load();
+                        home.progress =
+                            total ? float(double(setup_progress.done.load()) / double(total)) : 0.f;
+                    }
                     bool reduced = !ui_settings.AnimationsEnabled();
                     home.draw(std::chrono::duration<double>(std::chrono::steady_clock::now() - loading_since)
                                   .count(),

@@ -19,3 +19,5 @@ LaunchDecision decide(const std::vector<Candidate> &candidates, const Preference
     return result;
 }
 } // namespace uwp
+
+#include "qr.inc"

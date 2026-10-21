@@ -68,22 +68,28 @@ class ArtView {
     ArtColor accent;
     std::wstring heading, detail, loading_text;
     // Mods share the home surface before boot; seven visible 56px pill targets.
+    bool setup_mode = false;
+    float progress = -1;
+    std::vector<std::vector<bool>> qr_modules;
     bool mods_mode = false;
     std::vector<std::wstring> rows;
     std::vector<bool> row_enabled;
     bool enabled(size_t row) const { return row >= row_enabled.size() || row_enabled[row]; }
-    size_t first_row() const { return focus < 6 ? 0 : static_cast<size_t>(focus - 5); }
-    int action_count() const { return mods_mode ? static_cast<int>(rows.size()) : 3; }
+    size_t first_row() const {
+        return setup_mode ? (focus < 3 ? 0 : static_cast<size_t>(focus - 2))
+                          : (focus < 6 ? 0 : static_cast<size_t>(focus - 5));
+    }
+    int action_count() const { return (mods_mode || setup_mode) ? static_cast<int>(rows.size()) : 3; }
     void step(int delta) {
         for (int attempts = 0; attempts < action_count(); ++attempts) {
             focus = (focus + delta + action_count()) % action_count();
-            if (!mods_mode || enabled(static_cast<size_t>(focus)))
+            if (!(mods_mode || setup_mode) || enabled(static_cast<size_t>(focus)))
                 break;
         }
     }
     void navigate(int direction) {
         // 0 up, 1 right, 2 down, 3 left. Disc=Play, gear=Settings, boxes=Mods.
-        if (mods_mode) {
+        if (mods_mode || setup_mode) {
             step(direction == 0 || direction == 3 ? -1 : 1);
             return;
         }
@@ -166,10 +172,10 @@ class ArtView {
     int hit(float x, float y) const {
         x *= art_style::width / pixel_w;
         y *= art_style::height / pixel_h;
-        if (mods_mode) {
+        if (mods_mode || setup_mode) {
             auto first = first_row();
-            for (size_t i = first; i < rows.size() && i < first + 7; ++i) {
-                float top = 160 + (i - first) * 64;
+            for (size_t i = first; i < rows.size() && i < first + (setup_mode ? 3 : 7); ++i) {
+                float top = (setup_mode ? 440.f : 160.f) + (i - first) * 64;
                 if (x >= art_style::margin && x <= art_style::width - art_style::margin && y >= top &&
                     y <= top + art_style::button_h && enabled(i))
                     return static_cast<int>(i);
@@ -193,6 +199,55 @@ class ArtView {
         target->BeginDraw();
         target->SetTransform(transform);
         target->Clear(black());
+        if (setup_mode) {
+            brush->SetColor(white());
+            text(heading, D2D1::RectF(margin, 48, width - margin, 100), true);
+            text(detail, D2D1::RectF(margin, 124, qr_modules.empty() ? width - margin : 920, 420));
+            if (!qr_modules.empty()) {
+                float module = 5, left = 976, top = 136;
+                brush->SetColor(white());
+                float side = float(qr_modules.size() + 8) * module;
+                target->FillRectangle(D2D1::RectF(left, top, left + side, top + side), brush.Get());
+                brush->SetColor(black());
+                for (size_t y = 0; y < qr_modules.size(); ++y)
+                    for (size_t x = 0; x < qr_modules[y].size(); ++x)
+                        if (qr_modules[y][x]) {
+                            float px = left + float(x + 4) * module, py = top + float(y + 4) * module;
+                            target->FillRectangle(D2D1::RectF(px, py, px + module, py + module), brush.Get());
+                        }
+            }
+            if (progress >= 0) {
+                brush->SetColor(white(.12f));
+                target->FillRoundedRectangle(
+                    D2D1::RoundedRect(D2D1::RectF(margin, 396, width - margin, 404), 4, 4), brush.Get());
+                brush->SetColor(D2D1::ColorF(accent.r, accent.g, accent.b));
+                target->FillRoundedRectangle(
+                    D2D1::RoundedRect(
+                        D2D1::RectF(margin, 396,
+                                    margin + (width - 2 * margin) * std::clamp(progress, 0.f, 1.f), 404),
+                        4, 4),
+                    brush.Get());
+            }
+            auto first = first_row();
+            for (size_t i = first; i < rows.size() && i < first + 3; ++i) {
+                float top = 440 + float(i - first) * 64;
+                bool focused = int(i) == focus && enabled(i);
+                if (focused) {
+                    brush->SetColor(D2D1::ColorF(accent.r, accent.g, accent.b));
+                    target->FillRoundedRectangle(
+                        D2D1::RoundedRect(D2D1::RectF(margin, top, width - margin, top + button_h),
+                                          button_h / 2, button_h / 2),
+                        brush.Get());
+                }
+                brush->SetColor(focused ? black() : white(enabled(i) ? 1.f : .4f));
+                text(rows[i], D2D1::RectF(margin + 24, top + 17, width - margin - 24, top + button_h));
+            }
+            brush->SetColor(white(.72f));
+            text(loading_text, D2D1::RectF(margin, 648, width - margin, 704));
+            check(target->EndDraw());
+            check(swapchain->Present(1, 0));
+            return;
+        }
         if (mods_mode) {
             brush->SetColor(white());
             text(heading, D2D1::RectF(margin, 48, width - margin, 96), true);
@@ -260,7 +315,7 @@ class ArtView {
             brush->SetColor(focus == i ? white() : black(.9f));
             target->FillEllipse(D2D1::Ellipse(c, 24, 24), brush.Get());
             brush->SetColor(focus == i ? black() : white());
-            if (i == 1) {  // solid gear with a hole
+            if (i == 1) { // solid gear with a hole
                 Ptr<ID2D1PathGeometry> gear;
                 Ptr<ID2D1GeometrySink> sink;
                 check(factory->CreatePathGeometry(&gear));
@@ -275,11 +330,11 @@ class ArtView {
                 target->FillGeometry(gear.Get(), brush.Get());
                 brush->SetColor(focus == i ? white() : black(.9f));
                 target->FillEllipse(D2D1::Ellipse(c, 4.5f, 4.5f), brush.Get());
-            } else {  // puzzle piece: body plus a knob on top and on the right
+            } else { // puzzle piece: body plus a knob on top and on the right
                 target->FillRectangle(D2D1::RectF(c.x - 10, c.y - 6, c.x + 6, c.y + 10), brush.Get());
                 target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x - 2, c.y - 9), 4.5f, 4.5f), brush.Get());
                 target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x + 9, c.y + 2), 4.5f, 4.5f), brush.Get());
-                brush->SetColor(focus == i ? white() : black(.9f));  // sockets on the left and bottom
+                brush->SetColor(focus == i ? white() : black(.9f)); // sockets on the left and bottom
                 target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x - 10, c.y + 2), 3.5f, 3.5f), brush.Get());
                 target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(c.x - 2, c.y + 10), 3.5f, 3.5f), brush.Get());
             }

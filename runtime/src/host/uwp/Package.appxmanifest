@@ -23,12 +23,141 @@
         <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="black" />
       </uap:VisualElements>
       <Extensions>
-        <!-- RPX association allows removableStorage discovery. It does NOT grant access to every
-             content extension. A picker grant or W1 broker/import is needed for the whole dump. -->
+        <!-- removableStorage filters enumeration by these explicit associations. -->
         <uap:Extension Category="windows.fileTypeAssociation">
-          <uap:FileTypeAssociation Name="wiiu-rpx">
-            <uap:DisplayName>Wii U executable</uap:DisplayName>
-            <uap:SupportedFileTypes><uap:FileType>.rpx</uap:FileType></uap:SupportedFileTypes>
+          <uap:FileTypeAssociation Name="wiiu-game">
+            <uap:DisplayName>Wii U game files</uap:DisplayName>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.7z</uap:FileType>
+              <uap:FileType>.app</uap:FileType>
+              <uap:FileType>.bars</uap:FileType>
+              <uap:FileType>.bfanm</uap:FileType>
+              <uap:FileType>.bffnt</uap:FileType>
+              <uap:FileType>.bflan</uap:FileType>
+              <uap:FileType>.bflim</uap:FileType>
+              <uap:FileType>.bflyt</uap:FileType>
+              <uap:FileType>.bfmat</uap:FileType>
+              <uap:FileType>.bfmdl</uap:FileType>
+              <uap:FileType>.bfres</uap:FileType>
+              <uap:FileType>.bfsha</uap:FileType>
+              <uap:FileType>.bfskl</uap:FileType>
+              <uap:FileType>.bfstm</uap:FileType>
+              <uap:FileType>.bgyml</uap:FileType>
+              <uap:FileType>.bin</uap:FileType>
+              <uap:FileType>.blarc</uap:FileType>
+              <uap:FileType>.bnsh</uap:FileType>
+              <uap:FileType>.bntx</uap:FileType>
+              <uap:FileType>.byml</uap:FileType>
+              <uap:FileType>.cert</uap:FileType>
+              <uap:FileType>.h3</uap:FileType>
+              <uap:FileType>.key</uap:FileType>
+              <uap:FileType>.msbt</uap:FileType>
+              <uap:FileType>.mstats</uap:FileType>
+              <uap:FileType>.pack</uap:FileType>
+              <uap:FileType>.rpl</uap:FileType>
+              <uap:FileType>.rpx</uap:FileType>
+              <uap:FileType>.sarc</uap:FileType>
+              <uap:FileType>.sbactorpack</uap:FileType>
+              <uap:FileType>.sbassetpack</uap:FileType>
+              <uap:FileType>.sbeventpack</uap:FileType>
+              <uap:FileType>.sbfres</uap:FileType>
+              <uap:FileType>.sbmodel</uap:FileType>
+              <uap:FileType>.sbphysics</uap:FileType>
+              <uap:FileType>.sbplacement</uap:FileType>
+              <uap:FileType>.sbquestpack</uap:FileType>
+              <uap:FileType>.sbresourcepack</uap:FileType>
+              <uap:FileType>.sharc</uap:FileType>
+              <uap:FileType>.shksc</uap:FileType>
+              <uap:FileType>.ssarc</uap:FileType>
+              <uap:FileType>.szs</uap:FileType>
+              <uap:FileType>.tga</uap:FileType>
+              <uap:FileType>.tik</uap:FileType>
+              <uap:FileType>.tmd</uap:FileType>
+              <uap:FileType>.txt</uap:FileType>
+              <uap:FileType>.wua</uap:FileType>
+              <uap:FileType>.wud</uap:FileType>
+              <uap:FileType>.wux</uap:FileType>
+              <uap:FileType>.xml</uap:FileType>
+              <uap:FileType>.zip</uap:FileType>
+              <uap:FileType>.aamp</uap:FileType>
+              <uap:FileType>.bactorpack</uap:FileType>
+              <uap:FileType>.baiprog</uap:FileType>
+              <uap:FileType>.bas</uap:FileType>
+              <uap:FileType>.bassetpack</uap:FileType>
+              <uap:FileType>.bassetting</uap:FileType>
+              <uap:FileType>.batpl</uap:FileType>
+              <uap:FileType>.bbonectrl</uap:FileType>
+              <uap:FileType>.bchemical</uap:FileType>
+              <uap:FileType>.bdamageparam</uap:FileType>
+              <uap:FileType>.bdrop</uap:FileType>
+              <uap:FileType>.bdummy</uap:FileType>
+              <uap:FileType>.bfaarc</uap:FileType>
+              <uap:FileType>.bfevfl</uap:FileType>
+              <uap:FileType>.bfevtm</uap:FileType>
+              <uap:FileType>.bfrg</uap:FileType>
+              <uap:FileType>.bfseq</uap:FileType>
+              <uap:FileType>.bfwav</uap:FileType>
+              <uap:FileType>.bfwsd</uap:FileType>
+              <uap:FileType>.bgparamlist</uap:FileType>
+              <uap:FileType>.bitemico</uap:FileType>
+              <uap:FileType>.bitemico2</uap:FileType>
+              <uap:FileType>.blres</uap:FileType>
+              <uap:FileType>.blwp</uap:FileType>
+              <uap:FileType>.bmapunit</uap:FileType>
+              <uap:FileType>.bmodellist</uap:FileType>
+              <uap:FileType>.bmsc</uap:FileType>
+              <uap:FileType>.bparam</uap:FileType>
+              <uap:FileType>.bphysics</uap:FileType>
+              <uap:FileType>.brecipe</uap:FileType>
+              <uap:FileType>.brgconfig</uap:FileType>
+              <uap:FileType>.brstm</uap:FileType>
+              <uap:FileType>.bshop</uap:FileType>
+              <uap:FileType>.bxml</uap:FileType>
+              <uap:FileType>.byaml</uap:FileType>
+              <uap:FileType>.cfg</uap:FileType>
+              <uap:FileType>.dat</uap:FileType>
+              <uap:FileType>.havok</uap:FileType>
+              <uap:FileType>.hkcl</uap:FileType>
+              <uap:FileType>.hknm2</uap:FileType>
+              <uap:FileType>.hkrg</uap:FileType>
+              <uap:FileType>.hksc</uap:FileType>
+              <uap:FileType>.mubin</uap:FileType>
+              <uap:FileType>.sbaiprog</uap:FileType>
+              <uap:FileType>.sbaischedule</uap:FileType>
+              <uap:FileType>.sbas</uap:FileType>
+              <uap:FileType>.sbaslist</uap:FileType>
+              <uap:FileType>.sbassetting</uap:FileType>
+              <uap:FileType>.sbatcl</uap:FileType>
+              <uap:FileType>.sbawareness</uap:FileType>
+              <uap:FileType>.sbbonectrl</uap:FileType>
+              <uap:FileType>.sbchemical</uap:FileType>
+              <uap:FileType>.sbdamageparam</uap:FileType>
+              <uap:FileType>.sbdrop</uap:FileType>
+              <uap:FileType>.sbeventinfo</uap:FileType>
+              <uap:FileType>.sbgparamlist</uap:FileType>
+              <uap:FileType>.sbinfo</uap:FileType>
+              <uap:FileType>.sblarc</uap:FileType>
+              <uap:FileType>.sblwp</uap:FileType>
+              <uap:FileType>.sbmodellist</uap:FileType>
+              <uap:FileType>.sbmusicinfo</uap:FileType>
+              <uap:FileType>.sbquest</uap:FileType>
+              <uap:FileType>.sbquestproduct</uap:FileType>
+              <uap:FileType>.sbrecipe</uap:FileType>
+              <uap:FileType>.sbs</uap:FileType>
+              <uap:FileType>.sbshop</uap:FileType>
+              <uap:FileType>.sbstats</uap:FileType>
+              <uap:FileType>.sbxml</uap:FileType>
+              <uap:FileType>.sbyml</uap:FileType>
+              <uap:FileType>.shknm2</uap:FileType>
+              <uap:FileType>.smubin</uap:FileType>
+              <uap:FileType>.sslist</uap:FileType>
+              <uap:FileType>.sstera</uap:FileType>
+              <uap:FileType>.stats</uap:FileType>
+              <uap:FileType>.stream</uap:FileType>
+              <uap:FileType>.stsc</uap:FileType>
+              <uap:FileType>.sword</uap:FileType>
+              <uap:FileType>.text</uap:FileType>
+            </uap:SupportedFileTypes>
           </uap:FileTypeAssociation>
         </uap:Extension>
       </Extensions>
