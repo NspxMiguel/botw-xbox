@@ -240,6 +240,9 @@ struct Fst {
                 require(size > i && size <= parents.back().end, "Invalid FST directory");
                 parents.push_back({size, path + "/"});
             } else {
+                // Update links inherit the base file; their offsets are not patch data.
+                if (type & 0x80000000)
+                    continue;
                 uint16_t cluster = uint16_t(integer(bytes, p + 14, 2));
                 require(cluster < clusters.size(), "Invalid FST cluster");
                 files.push_back({path, offset * factor, size, cluster});

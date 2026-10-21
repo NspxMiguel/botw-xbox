@@ -206,6 +206,38 @@ void wud_test() {
     rejects([&] { wud(memory_reader(image), Key{}, common); });
     std::cout << "PASS: synthetic encrypted WUD partition table, SI ticket, GM raw and hashed clusters\n";
 }
+void fst_links_test() {
+    // Update links refer to base files, even when their offsets fit a patch cluster.
+    Bytes table(0x40 + 6 * 16);
+    put(table, 0, 0x46535400);
+    put(table, 4, 1);
+    put(table, 8, 1);
+    auto entry = [&](size_t index, uint8_t type, const std::string &name, uint32_t offset, uint32_t size) {
+        size_t p = 0x40 + index * 16;
+        put(table, p, (uint32_t(type) << 24) | uint32_t(table.size() - 0x40 - 6 * 16));
+        put(table, p + 4, offset);
+        put(table, p + 8, size);
+        table.insert(table.end(), name.begin(), name.end());
+        table.push_back(0);
+    };
+    entry(0, 1, "", 0, 6);
+    entry(1, 0x80, "base.bin", 0, 4);
+    entry(2, 0x81, "inherited", 0, 5);
+    entry(3, 0x80, "child.bin", 0xffffffff, 4);
+    entry(4, 0, "patched.bin", 0, 4);
+    entry(5, 0, "root.bin", 0, 4);
+    Bytes patch{'n', 'e', 'w', '!'};
+    unsigned readers = 0;
+    auto entries = Fst(table).entries([&](uint16_t cluster) {
+        assert(cluster == 0);
+        ++readers;
+        return memory_reader(patch);
+    });
+    assert(readers == 2 && entries.size() == 2);
+    assert(entries[0].path == "inherited/patched.bin" && output(entries[0]) == patch);
+    assert(entries[1].path == "root.bin" && output(entries[1]) == patch);
+    std::cout << "PASS: FST update links preserve base files and directory traversal\n";
+}
 void nus_test() {
     Key common{}, title{};
     common[2] = 1;
@@ -538,6 +570,7 @@ int main() {
     hashes();
     wux_test();
     wud_test();
+    fst_links_test();
     nus_test();
     wua_test();
     zip_test();
