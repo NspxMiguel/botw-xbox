@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write # dependency bundle goes to a release asset; Actions artifact storage is quota-limited
 
 concurrency:
   group: uwp-${{ github.workflow }}-${{ github.ref }}
@@ -40,11 +40,15 @@ jobs:
         # it links against these vcpkg trees. No game data is involved.
         run: |
           Compress-Archive -Path "$env:VCPKG_INSTALLATION_ROOT/installed/x64-uwp", "$env:VCPKG_INSTALLATION_ROOT/installed/x64-windows" -DestinationPath vcpkg-uwp-deps.zip
-      - uses: actions/upload-artifact@v4
-        with:
-          name: vcpkg-uwp-deps
-          retention-days: 30
-          path: vcpkg-uwp-deps.zip
+      - name: Publish dependency bundle as a release asset
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view deps-uwp 2>$null
+          if ($LASTEXITCODE -ne 0) { gh release create deps-uwp --prerelease --title 'UWP third-party dependencies' --notes 'vcpkg x64-uwp and x64-windows trees for local game builds. No game data.' }
+          gh release upload deps-uwp vcpkg-uwp-deps.zip --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency bundle upload failed' }
       - name: Configure MSVC UWP x64 D3D12 runtime and launcher
         run: |
           cmake --preset ci-uwp
