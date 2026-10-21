@@ -59,7 +59,7 @@ enum class Text {
 };
 inline std::wstring_view text(Text key, bool pt) {
     static constexpr std::array<std::array<std::wstring_view, 2>, static_cast<size_t>(Text::count)> table{
-        {{L"BotW Recompiled", L"BotW Recompiled"},
+        {{L"BotW Xbox Edition", L"BotW Xbox Edition"},
          {L"Play", L"Jogar"},
          {L"Resume", L"Continuar"},
          {L"Select game folder", L"Selecionar pasta do jogo"},

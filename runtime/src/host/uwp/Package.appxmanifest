@@ -4,7 +4,7 @@
          IgnorableNamespaces="uap">
   <Identity Name="BotWRecompiled" Publisher="CN=BotWRecompiled" Version="1.0.0.0" ProcessorArchitecture="x64" />
   <Properties>
-    <DisplayName>BotW Recompiled</DisplayName>
+    <DisplayName>BotW Xbox Edition</DisplayName>
     <PublisherDisplayName>BotW Recompiled contributors</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
@@ -17,7 +17,7 @@
   </Resources>
   <Applications>
     <Application Id="App" Executable="BotWRecomp.exe" EntryPoint="BotWRecomp.App">
-      <uap:VisualElements DisplayName="BotW Recompiled" Description="Unofficial Wii U recompilation host"
+      <uap:VisualElements DisplayName="BotW Xbox Edition" Description="Unofficial Wii U recompilation host"
                           BackgroundColor="black" Square150x150Logo="Assets\Square150x150Logo.png"
                           Square44x44Logo="Assets\Square44x44Logo.png">
         <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="black" />
