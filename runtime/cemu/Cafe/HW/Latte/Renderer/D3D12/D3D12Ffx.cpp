@@ -38,6 +38,12 @@ struct D3D12Ffx::Impl
 	ffxCreateContextDescFrameGeneration generationDesc{};
 	ffxCreateContextDescFrameGenerationSwapChainWrapDX12 wrapDesc{};
 	ComPtr<IDXGISwapChain4> wrapped;
+	ComPtr<ID3D12Resource> realPresent, generatedPresent;
+	D3D12_RESOURCE_STATES realPresentState = D3D12_RESOURCE_STATE_COMMON, generatedPresentState = D3D12_RESOURCE_STATE_COMMON;
+	unsigned manualInterval = 0;
+	bool manual = false, manualHistory = false;
+	unsigned presentTimeouts = 0;
+	std::chrono::steady_clock::time_point retryAfter{};
 	D3D12SwapChain *chain = nullptr;
 	ComPtr<ID3D12Resource> motion, mask, normalizedDepth, linearColor, linearOutput;
 	ComPtr<ID3D12PipelineState> linearPipeline, displayPipeline;
@@ -82,6 +88,23 @@ struct D3D12Ffx::Impl
 			LOG("FidelityFX: %s; using FSR 1 (then output scaling if unavailable)", reason);
 		warned = failed = true;
 	}
+	void PresentFailed(const char *reason)
+	{
+		if (chain->PresentTimedOut())
+		{
+			if (++presentTimeouts >= 3)
+			{
+				retryAfter = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+				presentTimeouts = 0;
+				LOG("FidelityFX: repeated frame-latency timeouts; retrying manual FG in two seconds");
+			}
+		}
+		else
+			Fail(reason, true);
+		generating = manualHistory = false;
+		chain->SetFrameGeneration(false);
+	}
+
 	bool ResetGeneration() noexcept
 	try
 	{
@@ -90,6 +113,8 @@ struct D3D12Ffx::Impl
 			ffxConfigureDescFrameGeneration config{};
 			config.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
 			config.swapChain = wrapped.Get();
+			if (manual)
+				config.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
 			if (configure(&generation, &config.header) != FFX_API_RETURN_OK)
 				Fail("FG disable failed", true);
 		}
@@ -125,6 +150,10 @@ struct D3D12Ffx::Impl
 				}
 			}
 		}
+		realPresent.Reset();
+		generatedPresent.Reset();
+		manual = manualHistory = false;
+		manualInterval = 0;
 		wrapped.Reset();
 		chain = nullptr;
 		prepared = generating = false;
@@ -587,6 +616,31 @@ void D3D12Ffx::Resize(uint32 iw, uint32 ih, uint32 ow, uint32 oh, D3D12SwapChain
 			s.ResetGeneration();
 			return;
 		}
+		if (chain->GetTargetType() == D3D12SwapChain::TargetType::CoreWindow)
+		{
+			s.chain = chain;
+			s.manual = true;
+			try
+			{
+				if (!chain->IsValid() || !chain->SupportsManualGeneration())
+					throw std::runtime_error("CoreWindow frame latency unavailable");
+				auto desc = chain->GetCurrentBackbuffer()->GetDesc();
+				desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+				auto heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+				for (auto *resource : {std::addressof(s.realPresent), std::addressof(s.generatedPresent)})
+					D3D12_ThrowIfFailed(s.renderer.GetDevice()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE,
+																						&desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(resource->GetAddressOf())),
+										"FFX manual present texture");
+				s.realPresentState = s.generatedPresentState = D3D12_RESOURCE_STATE_COMMON;
+				LOG("FidelityFX: CoreWindow manual FG; final composed image includes HUD (ghosting possible)");
+			}
+			catch (const std::exception &)
+			{
+				s.Fail("CoreWindow FG resources or pacing unavailable", true);
+				s.ResetGeneration();
+			}
+			return;
+		}
 		// SDK 2.3.0's wrap implementation requires GetHwnd/GetFullscreenDesc.
 		// CoreWindow/composition chains are unsupported: leave them presentable.
 		HWND window = nullptr;
@@ -734,7 +788,7 @@ bool D3D12Ffx::Upscale(ID3D12Resource *color, D3D12_RESOURCE_STATES &colorState,
 				   s.linearOutputRTV, s.displayPipeline.Get(), s.ow, s.oh);
 	++s.frame;
 	s.frameResets[s.frame % s.frameResets.size()].store(s.resetHistory);
-	if (s.generation && s.swap && !s.fgFailed)
+	if (s.generation && (s.swap || s.manual) && !s.fgFailed)
 	{
 		ffxDispatchDescFrameGenerationPrepareV2 prepare{};
 		prepare.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION_PREPARE_V2;
@@ -775,14 +829,19 @@ void D3D12Ffx::PreparePresent(bool paused)
 	s.generating = false;
 	if (s.callbackFailed.exchange(false))
 		s.Fail("FG callback dispatch failed", true);
-	if (!s.generation || !s.swap)
+	if (!s.generation || (!s.swap && !s.manual))
 		return;
 	ffxConfigureDescFrameGeneration config{};
 	config.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
 	config.swapChain = s.wrapped.Get();
-	const bool eligible = (paused || s.prepared) && s.fgPolicy.update(s.realMs, s.ModeHz(), paused, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count());
+	const double modeHz = s.ModeHz();
+	s.manualInterval = s.manual ? fsr3::core_window_fg_interval(fsr3::console.load(), fsr3::guest_clock_fps.load(), modeHz) : 0;
+	const bool suppressed = paused || (s.manual && (!s.manualInterval || std::chrono::steady_clock::now() < s.retryAfter));
+	const bool eligible = (paused || s.prepared) && s.fgPolicy.update(s.realMs, modeHz, suppressed, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count());
 	config.frameGenerationEnabled = !s.failed && !s.fgFailed && s.prepared && eligible;
-	config.frameGenerationCallback = Impl::Generate;
+	if (s.manual)
+		config.flags = FFX_FRAMEGENERATION_FLAG_NO_SWAPCHAIN_CONTEXT_NOTIFY;
+	config.frameGenerationCallback = s.manual ? nullptr : Impl::Generate;
 	config.frameGenerationCallbackUserContext = &s;
 	config.frameID = s.frame;
 	config.generationRect = {0, 0, static_cast<int32_t>(s.chain->GetWidth()), static_cast<int32_t>(s.chain->GetHeight())};
@@ -790,7 +849,9 @@ void D3D12Ffx::PreparePresent(bool paused)
 		s.Fail("FG configuration failed", true);
 	else
 		s.generating = config.frameGenerationEnabled;
-	if (paused)
+	if (s.manual && !s.generating)
+		s.manualHistory = false;
+	if (paused && s.swap)
 	{
 		ffxDispatchDescFrameGenerationSwapChainWaitForPresentsDX12 wait{};
 		wait.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_WAIT_FOR_PRESENTS_DX12;
@@ -801,6 +862,84 @@ void D3D12Ffx::PreparePresent(bool paused)
 	s.prepared = false;
 #else
 	(void)paused;
+#endif
+}
+bool D3D12Ffx::PresentGenerated()
+{
+#ifdef BOTW_HAS_FFX
+	auto &s = *impl;
+	if (!s.manual || !s.generating)
+		return false;
+	auto &r = s.renderer;
+	auto *chain = s.chain;
+	const uint32 presentWaitMs = (1000 + fsr3::guest_clock_fps.load() - 1) / fsr3::guest_clock_fps.load();
+	auto *backbuffer = chain->GetCurrentBackbuffer();
+	// Use the final image, including RCAS and UI. No HUD-less guest image exists.
+	r.TransitionResource(backbuffer, chain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+	r.TransitionResource(s.realPresent.Get(), s.realPresentState, D3D12_RESOURCE_STATE_COPY_DEST);
+	r.FlushBarriers();
+	r.GetCommandList()->CopyResource(s.realPresent.Get(), backbuffer);
+	r.TransitionResource(s.realPresent.Get(), s.realPresentState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+	r.TransitionResource(s.generatedPresent.Get(), s.generatedPresentState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	r.FlushBarriers();
+	ffxDispatchDescFrameGeneration desc{};
+	desc.header.type = FFX_API_DISPATCH_DESC_TYPE_FRAMEGENERATION;
+	desc.commandList = r.GetCommandList();
+	desc.presentColor = ffxApiGetResourceDX12(s.realPresent.Get());
+	desc.outputs[0] = ffxApiGetResourceDX12(s.generatedPresent.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+	desc.numGeneratedFrames = 1;
+	desc.reset = s.resetHistory || !s.manualHistory;
+	desc.backbufferTransferFunction = FFX_API_BACKBUFFER_TRANSFER_FUNCTION_SRGB;
+	desc.generationRect = {0, 0, static_cast<int32_t>(chain->GetWidth()), static_cast<int32_t>(chain->GetHeight())};
+	desc.frameID = s.frame;
+	const auto result = s.dispatch(&s.generation, &desc.header);
+	r.InvalidateDrawState();
+	if (result != FFX_API_RETURN_OK)
+	{
+		s.Fail("manual FG dispatch failed", true);
+		s.generating = s.manualHistory = false;
+		chain->SetFrameGeneration(false);
+		return false;
+	}
+	const bool historyReady = s.manualHistory && !s.resetHistory;
+	s.manualHistory = true;
+	// Prime history after enable/pause/cuts with one normal-interval present.
+	if (!historyReady)
+	{
+		r.TransitionResource(backbuffer, chain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_PRESENT);
+		r.SubmitCommandList(false);
+		if (!chain->Present(s.manualInterval, presentWaitMs))
+		{
+			s.PresentFailed("manual FG history present failed");
+			return false;
+		}
+		return true;
+	}
+	auto copyToBackbuffer = [&](ID3D12Resource *source, D3D12_RESOURCE_STATES &state) {
+		r.TransitionResource(source, state, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		r.TransitionResource(chain->GetCurrentBackbuffer(), chain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_COPY_DEST);
+		r.FlushBarriers();
+		r.GetCommandList()->CopyResource(chain->GetCurrentBackbuffer(), source);
+		r.TransitionResource(chain->GetCurrentBackbuffer(), chain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_PRESENT);
+		r.SubmitCommandList(false);
+	};
+	copyToBackbuffer(s.generatedPresent.Get(), s.generatedPresentState);
+	if (!chain->Present(s.manualInterval, presentWaitMs))
+	{
+		s.PresentFailed("manual FG generated present failed");
+		copyToBackbuffer(s.realPresent.Get(), s.realPresentState);
+		return false;
+	}
+	copyToBackbuffer(s.realPresent.Get(), s.realPresentState);
+	if (!chain->Present(s.manualInterval, presentWaitMs))
+	{
+		s.PresentFailed("manual FG real present failed");
+		return false;
+	}
+	s.presentTimeouts = 0;
+	return true;
+#else
+	return false;
 #endif
 }
 void D3D12Ffx::EndFrame()

@@ -45,6 +45,15 @@ class D3D12SwapChain
 		m_frameGeneration = enabled;
 	}
 
+	TargetType GetTargetType() const
+	{
+		return m_type;
+	}
+	bool SupportsManualGeneration() const
+	{
+		return m_frameLatencyWaitable != nullptr;
+	}
+
 	bool IsValid() const
 	{
 		return m_swapChain != nullptr;
@@ -85,8 +94,14 @@ class D3D12SwapChain
 		m_hasDefinedContent = true;
 	}
 
-	// returns false if presentation failed because the device was removed
-	bool Present(uint32 syncInterval);
+	// A timeout skips manual FG without retiring the SDK context.
+	bool PresentTimedOut() const
+	{
+		return m_presentTimedOut;
+	}
+
+	// Returns false on device removal, or manual FG pacing/presentation failure.
+	bool Present(uint32 syncInterval, uint32 maxWaitMs = 34);
 
 	// presents since the last call and the time the CPU spent blocked in them
 	struct PresentStats
@@ -116,6 +131,8 @@ class D3D12SwapChain
 	uint32 m_height;
 	bool m_allowTearing = false;
 	bool m_frameGeneration = false;
+	bool m_presentTimedOut = false;
+	HANDLE m_frameLatencyWaitable = nullptr;
 	uint32 m_currentIndex = 0;
 	bool m_hasDefinedContent = false;
 

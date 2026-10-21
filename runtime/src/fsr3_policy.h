@@ -29,6 +29,17 @@ constexpr Selection select(Console console, bool simulate_s, std::string_view ov
     return {path, limited_console, std::min(display_height, limited_console ? 1440 : 2160),
             limited_console ? 1.7f : 1.5f};
 }
+// CoreWindow owns presentation and supports exact two-present cadence only.
+// Keep Series S/desktop on their existing path; unknown HDMI modes fail closed.
+constexpr unsigned core_window_fg_interval(Console console, int guest_fps, double mode_hz) {
+    if (console != Console::SeriesX || (guest_fps != 30 && guest_fps != 60))
+        return 0;
+    const int refresh = mode_hz >= 59 && mode_hz <= 61     ? 60
+                        : mode_hz >= 119 && mode_hz <= 121 ? 120
+                                                           : 0;
+    // Avoid paying for 30 -> 60 FG at 120 Hz; use a 60 Hz panel mode instead.
+    return refresh == guest_fps * 2 ? 1 : 0;
+}
 // Hysteresis uses real-frame timing, independently of the requested guest cap.
 class FrameGenerationPolicy {
   public:

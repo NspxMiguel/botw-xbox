@@ -28,6 +28,9 @@ D3D12SwapChain::D3D12SwapChain(ID3D12Device *device, IDXGIFactory4 *factory, ID3
 void D3D12SwapChain::ReleaseNative()
 {
 	ReleaseBufferViews();
+	if (m_frameLatencyWaitable)
+		CloseHandle(m_frameLatencyWaitable);
+	m_frameLatencyWaitable = nullptr;
 	m_swapChain.Reset();
 	m_frameGeneration = m_hasDefinedContent = false;
 }
@@ -62,6 +65,8 @@ try
 	desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
 	desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
 	desc.Flags = m_allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+	if (type == TargetType::CoreWindow)
+		desc.Flags |= DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
 
 	ComPtr<IDXGISwapChain1> swapChain1;
 	HRESULT hr = E_FAIL;
@@ -78,6 +83,12 @@ try
 		break;
 	case TargetType::CoreWindow:
 		hr = factory->CreateSwapChainForCoreWindow(queue, (IUnknown *)nativeHandle, &desc, nullptr, &swapChain1);
+		if (FAILED(hr))
+		{
+			// Pacing support is optional: keep native presentation/upscaling usable.
+			desc.Flags &= ~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+			hr = factory->CreateSwapChainForCoreWindow(queue, (IUnknown *)nativeHandle, &desc, nullptr, &swapChain1);
+		}
 		break;
 	case TargetType::Composition:
 		hr = factory->CreateSwapChainForComposition(queue, &desc, nullptr, &swapChain1);
@@ -99,6 +110,9 @@ catch (...)
 D3D12SwapChain::~D3D12SwapChain()
 {
 	ReleaseBufferViews();
+	if (m_frameLatencyWaitable)
+		CloseHandle(m_frameLatencyWaitable);
+	m_frameLatencyWaitable = nullptr;
 	m_swapChain.Reset();
 }
 
@@ -160,7 +174,21 @@ bool D3D12SwapChain::ReplaceNative(IDXGISwapChain1 *chain) noexcept
 		return false;
 	}
 	ReleaseBufferViews();
+	if (m_frameLatencyWaitable)
+		CloseHandle(m_frameLatencyWaitable);
+	m_frameLatencyWaitable = nullptr;
 	m_swapChain = std::move(replacement);
+	// Recreate and SDK replacement share this guard. Never configure latency
+	// on HWND/composition chains, or on the non-waitable CoreWindow fallback.
+	DXGI_SWAP_CHAIN_DESC1 desc{};
+	if (m_type == TargetType::CoreWindow && SUCCEEDED(m_swapChain->GetDesc1(&desc)) &&
+		(desc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+	{
+		if (SUCCEEDED(m_swapChain->SetMaximumFrameLatency(1)))
+			m_frameLatencyWaitable = m_swapChain->GetFrameLatencyWaitableObject();
+	}
+	if (m_type == TargetType::CoreWindow && !m_frameLatencyWaitable)
+		cemuLog_log(LogType::Force, "D3D12: CoreWindow chain has no frame-latency pacing after replacement/recreation; manual FG unavailable");
 	for (uint32 i = 0; i < D3D12Const::kSwapChainBufferCount; ++i)
 		m_buffers[i] = std::move(buffers[i]);
 	m_currentIndex = m_swapChain->GetCurrentBackBufferIndex();
@@ -182,7 +210,9 @@ void D3D12SwapChain::Resize(uint32 width, uint32 height)
 	if (width == m_width && height == m_height)
 		return;
 	ReleaseBufferViews();
-	HRESULT hr = m_swapChain->ResizeBuffers(D3D12Const::kSwapChainBufferCount, width, height, kFormat, m_allowTearing ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0);
+	DXGI_SWAP_CHAIN_DESC1 desc{};
+	m_swapChain->GetDesc1(&desc);
+	HRESULT hr = m_swapChain->ResizeBuffers(D3D12Const::kSwapChainBufferCount, width, height, kFormat, desc.Flags);
 	if (FAILED(hr))
 	{
 		cemuLog_log(LogType::Force, "D3D12: ResizeBuffers failed: {}", D3D12_HResultToString(hr));
@@ -193,19 +223,32 @@ void D3D12SwapChain::Resize(uint32 width, uint32 height)
 	CreateBufferViews();
 }
 
-bool D3D12SwapChain::Present(uint32 syncInterval)
+bool D3D12SwapChain::Present(uint32 syncInterval, uint32 maxWaitMs)
 {
+	m_presentTimedOut = false;
 	if (!m_swapChain)
 		return false;
 #ifdef BOTWRECOMP
 	// The guest uses a 60 Hz vblank clock: one interval at 60 fps, two at 30.
 	// Never use ALLOW_TEARING, including callers requesting an unsynced present.
-	syncInterval = m_frameGeneration ? 1 : (g_target_fps >= 60 ? 1 : 2);
+	if (!(m_frameGeneration && m_type == TargetType::CoreWindow))
+		syncInterval = m_frameGeneration ? 1 : (g_target_fps >= 60 ? 1 : 2);
 #endif
 	UINT flags = 0;
 	if (syncInterval == 0 && m_allowTearing)
 		flags |= DXGI_PRESENT_ALLOW_TEARING;
 	const auto start = std::chrono::steady_clock::now();
+	// One queued frame at most. The second present waits for the generated
+	// frame's flip; SyncInterval holds it for exactly half a guest frame.
+	if (m_frameGeneration && m_type == TargetType::CoreWindow)
+	{
+		if (!m_frameLatencyWaitable)
+			return false;
+		const DWORD wait = WaitForSingleObjectEx(m_frameLatencyWaitable, maxWaitMs, FALSE);
+		m_presentTimedOut = wait == WAIT_TIMEOUT;
+		if (wait != WAIT_OBJECT_0)
+			return false;
+	}
 	HRESULT hr = m_swapChain->Present(syncInterval, flags);
 #if defined(BOTWRECOMP) && defined(_WIN32)
 	if (hr == S_OK)
@@ -221,7 +264,7 @@ bool D3D12SwapChain::Present(uint32 syncInterval)
 		return false;
 	if (FAILED(hr))
 		cemuLog_logDebug(LogType::Force, "D3D12: Present returned {}", D3D12_HResultToString(hr));
-	return true;
+	return !(m_frameGeneration && m_type == TargetType::CoreWindow && FAILED(hr));
 }
 
 D3D12SwapChain::PresentStats D3D12SwapChain::TakePresentStats()
