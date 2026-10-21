@@ -16,6 +16,8 @@ struct Preferences {
     bool setup_complete = false;
     bool auto_launch = false;
     int fps = 60;
+    int render_scale_percent = 0;
+    int upscaler = 0, fsr_quality = 0, frame_generation = 0;
     int volume = 100;
     int layout = 0;
 };

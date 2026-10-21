@@ -19,6 +19,8 @@ Settings get() {
 void apply() {
     auto s = get();
     g_target_fps = s.fps;
+    fsr::upscaler.store(fsr::effective_upscaler(s.upscaler));
+    fsr::frame_generation.store(fsr::effective_frame_generation(s.frame_generation));
     latte::set_display_mode(s.display);
     latte::set_output_filter(s.filter);
     window::set_rumble(s.rumble);

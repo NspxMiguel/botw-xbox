@@ -11,6 +11,8 @@
 
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12InternalPipelines.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Fsr.h"
+#include "../../../../../../src/fsr.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12PipelineCache.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/RendererShaderD3D12.h"
@@ -107,6 +109,24 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	ID3D12PipelineState *pso = m_pipelineCache->GetInternalPipeline(vs, ps, D3D12SwapChain::kFormat, DXGI_FORMAT_UNKNOWN, false, false);
 	if (!pso)
 		return;
+	// Run the existing color/output transform at internal resolution before EASU.
+	// DRC and downscales keep their existing output path.
+	sint32 inputWidth, inputHeight;
+	view->baseTexture->GetEffectiveSize(inputWidth, inputHeight, view->firstMip);
+	bool fsr = !padView && !m_fsrFailed &&
+			   fsr::should_upscale(fsr::upscaler.load(), inputWidth, inputHeight, imageWidth, imageHeight);
+	if (fsr && (!m_fsr || !m_fsr->Matches(inputWidth, inputHeight, imageWidth, imageHeight)))
+	{
+		// Keep the user's output filter for this frame; resize between presents.
+		m_fsrInputWidth = inputWidth;
+		m_fsrInputHeight = inputHeight;
+		m_fsrOutputWidth = imageWidth;
+		m_fsrOutputHeight = imageHeight;
+		m_fsrResizePending = true;
+		fsr = false;
+	}
+	if (fsr)
+		m_fsr->BeginInput();
 	// acquire the sampler table before recording any state (see GetSamplerTable)
 	D3D12_SAMPLER_DESC sampler = _MakeSampler(useLinearTexFilter);
 	const D3D12_GPU_DESCRIPTOR_HANDLE samplerTable = GetSamplerTable(&sampler, 1);
@@ -116,21 +136,22 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 
 	if (!m_state.rootSignatureBound)
 		BindRootSignatureAndHeaps();
-	D3D12_CPU_DESCRIPTOR_HANDLE rtv = swapChain->GetCurrentRTV();
+	D3D12_CPU_DESCRIPTOR_HANDLE rtv = fsr ? m_fsr->InputRTV() : swapChain->GetCurrentRTV();
 	m_cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
-	if (clearBackground)
+	if (clearBackground && !fsr)
 	{
 		const float clearColor[4] = {0, 0, 0, 0};
 		m_cmdList->ClearRenderTargetView(rtv, clearColor, 0, nullptr);
 	}
-	D3D12_VIEWPORT vp{(float)imageX, (float)imageY, (float)imageWidth, (float)imageHeight, 0.0f, 1.0f};
-	D3D12_RECT scissor{0, 0, (LONG)swapChain->GetWidth(), (LONG)swapChain->GetHeight()};
+	D3D12_VIEWPORT vp{fsr ? 0.f : (float)imageX, fsr ? 0.f : (float)imageY,
+					  fsr ? (float)inputWidth : (float)imageWidth, fsr ? (float)inputHeight : (float)imageHeight, 0.0f, 1.0f};
+	D3D12_RECT scissor{0, 0, fsr ? inputWidth : (LONG)swapChain->GetWidth(), fsr ? inputHeight : (LONG)swapChain->GetHeight()};
 	m_cmdList->RSSetViewports(1, &vp);
 	m_cmdList->RSSetScissorRects(1, &scissor);
 	m_cmdList->SetPipelineState(pso);
 	m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-	auto outputUniforms = shader->FillUniformBlockBuffer(*texView, {imageWidth, imageHeight}, padView);
+	auto outputUniforms = shader->FillUniformBlockBuffer(*texView, {fsr ? inputWidth : imageWidth, fsr ? inputHeight : imageHeight}, padView);
 	D3D12UploadAllocation ub = AllocateUpload(AlignUp<uint64>(sizeof(outputUniforms), D3D12Const::kCBVAlignment), D3D12Const::kCBVAlignment);
 	memcpy(ub.cpuPtr, &outputUniforms, sizeof(outputUniforms));
 
@@ -149,6 +170,8 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	m_cmdList->SetGraphicsRoot32BitConstants(D3D12Const::kRootParamRuntimeData, D3D12Const::kRuntimeDataDwords, runtimeData, 0);
 
 	m_cmdList->DrawInstanced(6, 1, 0, 0);
+	if (fsr)
+		m_fsr->Draw(*swapChain, imageX, imageY, imageWidth, imageHeight, clearBackground);
 
 	swapChain->SetDefinedContent();
 	InvalidateDrawState();

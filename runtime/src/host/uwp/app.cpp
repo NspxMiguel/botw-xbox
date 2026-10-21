@@ -438,6 +438,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         preferences.fps = number(L"fps", 60) >= 60 ? 60 : 30;
         preferences.volume = std::clamp(number(L"volume", 100), 0, 100);
         preferences.layout = number(L"layout", 0) == 1 ? 1 : 0;
+        preferences.render_scale_percent = std::clamp(number(L"renderScalePercent", 0), 0, 300);
+        preferences.upscaler = std::clamp(number(L"upscaler", 0), 0, 3);
+        preferences.fsr_quality = std::clamp(number(L"fsrQuality", 0), 0, 4);
+        preferences.frame_generation = std::clamp(number(L"frameGeneration", 0), 0, 2);
     }
     void save_preferences() {
         auto values = ApplicationData::Current().LocalSettings().Values();
@@ -446,10 +450,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         values.Insert(L"fps", box_value(preferences.fps));
         values.Insert(L"volume", box_value(preferences.volume));
         values.Insert(L"layout", box_value(preferences.layout));
+        values.Insert(L"renderScalePercent", box_value(preferences.render_scale_percent));
+        values.Insert(L"upscaler", box_value(preferences.upscaler));
+        values.Insert(L"fsrQuality", box_value(preferences.fsr_quality));
+        values.Insert(L"frameGeneration", box_value(preferences.frame_generation));
         Settings s = settings::get();
         s.fps = preferences.fps;
         s.volume = preferences.volume;
         s.layout = preferences.layout;
+        s.scale = preferences.render_scale_percent / 100.f;
+        s.upscaler = static_cast<fsr::Upscaler>(preferences.upscaler);
+        s.fsr_quality = static_cast<fsr::Quality>(preferences.fsr_quality);
+        s.frame_generation = static_cast<fsr::FrameGeneration>(preferences.frame_generation);
         s.gyro = false;
         settings::set(s, false);
     }

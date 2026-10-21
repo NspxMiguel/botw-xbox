@@ -1,0 +1,18 @@
+# Keep individual literals below MSVC C2026's 16 KB limit. Separate array
+# elements also avoid a large compile-time concatenation; join them at runtime.
+function(botw_embed_fsr1_chunks input symbol output)
+  file(READ "${input}" content)
+  string(FIND "${content}" ")amd_fsr\"" delimiter)
+  if(NOT delimiter EQUAL -1)
+    message(FATAL_ERROR "FSR source contains the raw string delimiter")
+  endif()
+  file(APPEND "${output}" "static constexpr const char *${symbol}[] = {\n")
+  string(LENGTH "${content}" length)
+  set(offset 0)
+  while(offset LESS length)
+    string(SUBSTRING "${content}" ${offset} 12000 chunk)
+    file(APPEND "${output}" "R\"amd_fsr(${chunk})amd_fsr\",\n")
+    math(EXPR offset "${offset} + 12000")
+  endwhile()
+  file(APPEND "${output}" "};\n")
+endfunction()
