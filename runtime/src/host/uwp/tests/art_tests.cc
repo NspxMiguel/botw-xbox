@@ -134,7 +134,21 @@ int main() {
     CHECK(black_contrast(art_accent({})) == 21);
     CHECK(black_contrast(art_accent({1, 1, {255, 0, 0, 0}})) == 21);
     CHECK(disc_angle(3, false, false) == 0 && disc_angle(3, true, true) == 0);
-    CHECK(disc_angle(0, true, false) == 0 && disc_angle(12, true, false) == 0);
-    CHECK(disc_angle(3, true, false) < 90 && disc_angle(6, true, false) == 180);
-    std::cout << "TGA, accent and motion tests passed\n";
+    CHECK(disc_angle(0, true, false) == 0);
+    for (int i = 1; i < 10000; ++i) {
+        double t = i * .001;
+        CHECK(disc_angle(t, true, false) > disc_angle(t - .001, true, false));
+        CHECK(disc_angle(t, true, true) == 0);
+        double speed = (disc_angle(t + .00001, true, false) - disc_angle(t, true, false)) / .00001;
+        CHECK(speed >= 0 && speed <= 900.001);
+        if (t > 1.201)
+            CHECK(std::abs(speed - 900) < .001);
+    }
+    CHECK(std::abs(disc_angle(1.2 - 1e-8, true, false) - disc_angle(1.2 + 1e-8, true, false)) < .0001);
+    CHECK(disc_angle(INFINITY, true, false) == 0);
+    CHECK(home_focus(0, 0) == 1 && home_focus(0, 1) == 1);
+    CHECK(home_focus(1, 0) == 1 && home_focus(1, 2) == 2);
+    CHECK(home_focus(2, 2) == 0 && home_focus(2, 3) == 0);
+    std::cout << "TGA, accent, disc_angle monotonic/continuous/900 deg per second plateau/reduced motion and "
+                 "focus tests passed\n";
 }

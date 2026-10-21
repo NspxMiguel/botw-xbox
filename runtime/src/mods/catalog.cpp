@@ -48,7 +48,7 @@ void ModCatalog::load(const fs::path &root, const packs::BuildPlan &plan) {
     entries_.clear();
     if (fs::exists(root))
         for (const auto &entry : fs::directory_iterator(root)) {
-            if (entry.is_symlink() || !entry.is_directory())
+            if (entry.is_symlink() || !entry.is_directory() || utf8(entry.path().filename()).starts_with("."))
                 continue;
             bool wrapped = false;
             for (const auto &child : fs::directory_iterator(entry.path()))
@@ -56,14 +56,17 @@ void ModCatalog::load(const fs::path &root, const packs::BuildPlan &plan) {
                     (lower(utf8(child.path().filename())) == "content" ||
                      lower(utf8(child.path().filename())) == "aoc"))
                     wrapped = true;
-            if (!wrapped)
+            bool graphics = fs::is_regular_file(entry.path() / "rules.txt") &&
+                            fs::is_regular_file(entry.path() / ".imported-graphics");
+            if (!wrapped && !graphics)
                 continue;
             auto name = utf8(entry.path().filename());
             // enabled.txt cannot represent line breaks. The ./ prefix and /. suffix
             // protect leading # and whitespace from the overlay's line trimming.
             if (name.find_first_of("\r\n") != name.npos)
                 continue;
-            entries_.push_back({"file:" + name, name, detect(entry.path()), false, false, {}});
+            entries_.push_back({"file:" + name, name, graphics ? Kind::graphics : detect(entry.path()), false,
+                                graphics, graphics ? "recompile to apply" : ""});
         }
     std::sort(entries_.begin(), entries_.end(), [](const auto &a, const auto &b) { return a.id < b.id; });
     for (size_t i = 0; i < plan.packs.size(); ++i)

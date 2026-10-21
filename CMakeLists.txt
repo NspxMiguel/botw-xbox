@@ -157,7 +157,10 @@ file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
 # BEGIN W8 mods
 # Keep the portable catalog explicit despite the runtime's recursive glob.
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/mods/")
-list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/mods/catalog.cpp)
+list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/mods/catalog.cpp
+  ${CMAKE_SOURCE_DIR}/runtime/src/mods/json_min.cpp
+  ${CMAKE_SOURCE_DIR}/runtime/src/mods/gamebanana.cpp
+  ${CMAKE_SOURCE_DIR}/runtime/src/mods/zip_install.cpp)
 # END W8 mods
 # ---- W1 platform sources (owned by W1) -------------------------------------------------------
 # Keep test mains and the other platform's implementation out of the application.

@@ -3,6 +3,7 @@
 #if defined(BOTW_PLATFORM_UWP)
 #include "audio.h"
 #include "../../audio/output.h"
+#include "drive_sound.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -37,6 +38,23 @@ Callback callback;
 IXAudio2 *engine = nullptr;
 IXAudio2MasteringVoice *master = nullptr;
 IXAudio2SourceVoice *source = nullptr;
+// Launcher voice has its own engine: menu pause must not mute the spin-up cue.
+IXAudio2 *drive_engine = nullptr;
+IXAudio2MasteringVoice *drive_master = nullptr;
+IXAudio2SourceVoice *drive_voice = nullptr;
+std::vector<float> drive_samples;
+void destroy_drive_locked() {
+    if (drive_voice)
+        drive_voice->DestroyVoice();
+    if (drive_master)
+        drive_master->DestroyVoice();
+    if (drive_engine)
+        drive_engine->Release();
+    drive_voice = nullptr;
+    drive_master = nullptr;
+    drive_engine = nullptr;
+    drive_samples.clear();
+}
 uint64_t submitted = 0;
 bool paused = false;
 float volume = 1;
@@ -137,6 +155,36 @@ int queued_frames() {
 }
 } // namespace audio
 namespace uwp {
+void play_drive_spinup(float level) {
+    std::lock_guard guard(lock);
+    destroy_drive_locked();
+    drive_samples = make_drive_spinup(48000);
+    WAVEFORMATEX format{};
+    format.wFormatTag = WAVE_FORMAT_IEEE_FLOAT;
+    format.nChannels = 1;
+    format.nSamplesPerSec = 48000;
+    format.wBitsPerSample = 32;
+    format.nBlockAlign = 4;
+    format.nAvgBytesPerSec = 192000;
+    HRESULT hr = XAudio2Create(&drive_engine, 0, XAUDIO2_DEFAULT_PROCESSOR);
+    if (SUCCEEDED(hr))
+        hr = drive_engine->CreateMasteringVoice(&drive_master, 2, 48000);
+    if (SUCCEEDED(hr))
+        hr = drive_engine->CreateSourceVoice(&drive_voice, &format);
+    XAUDIO2_BUFFER buffer{};
+    buffer.Flags = XAUDIO2_END_OF_STREAM;
+    buffer.AudioBytes = static_cast<UINT32>(drive_samples.size() * sizeof(float));
+    buffer.pAudioData = reinterpret_cast<const BYTE *>(drive_samples.data());
+    if (SUCCEEDED(hr))
+        hr = drive_voice->SetVolume(std::isfinite(level) ? std::clamp(level, 0.f, 1.f) : 0.f);
+    if (SUCCEEDED(hr))
+        hr = drive_voice->SubmitSourceBuffer(&buffer);
+    if (SUCCEEDED(hr))
+        hr = drive_voice->Start();
+    if (FAILED(hr))
+        destroy_drive_locked();
+}
+
 void pause_audio(bool value) {
     std::lock_guard guard(lock);
     if (paused == value)
@@ -151,6 +199,7 @@ void pause_audio(bool value) {
 }
 void shutdown_audio() {
     std::lock_guard guard(lock);
+    destroy_drive_locked();
     destroy_locked();
 }
 } // namespace uwp
