@@ -170,15 +170,6 @@ void start_runtime(void *window, int width, int height) {
     latte::create_renderer(window, width, height); // W2: IUnknown CoreWindow, not NSView.
     settings::apply();
     packs::install_loaded(loaded_rpx, d3d12_packs::hooks());
-    // The base texture constructor consumes the built-in scaling rules once.
-    // Accepted pack texture rules supply all overrides instead.
-    if (const auto *plan = d3d12_packs::active_plan) {
-        for (const auto &pack : plan->packs)
-            if (!pack.textures.empty()) {
-                g_render_scale = 1.f;
-                break;
-            }
-    }
     auto argv = os::build_argv("U-King.rpx");
     const auto &module = loader::main_module();
     threads::start_main(module.entry, 1, argv, module.stack_size);

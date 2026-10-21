@@ -139,6 +139,21 @@ std::vector<Field> texture_overrides(const BuildPlan &plan,
       }
     }
   }
+  // Merge first so a later identity can cancel an earlier size override.
+  result.erase(std::remove_if(result.begin(), result.end(),
+                              [&](const Field &field) {
+                                if (field.values.size() != 1)
+                                  return false;
+                                const double value =
+                                    std::trunc(field.values[0]);
+                                return (field.name == "overwriteWidth" &&
+                                        value == texture.width) ||
+                                       (field.name == "overwriteHeight" &&
+                                        value == texture.height) ||
+                                       (field.name == "overwriteDepth" &&
+                                        value == std::max(1u, texture.depth));
+                              }),
+               result.end());
   return result;
 }
 

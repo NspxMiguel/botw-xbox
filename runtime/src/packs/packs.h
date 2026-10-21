@@ -55,6 +55,8 @@ struct TextureDescription {
 };
 // Match against the ORIGINAL guest texture, before any overwrite. Later rules
 // override earlier fields, preserving the enabled-pack order from the manifest.
+// Effective identity dimensions are removed after merging (dimensions
+// truncate).
 bool matches(const TextureRule &rule, const TextureDescription &texture);
 std::vector<Field> texture_overrides(const BuildPlan &plan,
                                      const TextureDescription &texture);
@@ -64,7 +66,9 @@ const ShaderReplacement *find_shader(const BuildPlan &plan, uint64_t base_hash,
 
 // Renderer implementors must reject unsupported fields/capabilities in prepare,
 // before changing GPU state. Commit is called only after ALL packs are
-// accepted. Do not combine these rules with the built-in --scale rules.
+// accepted. Nonidentity pack dimensions replace built-in scaling only for the
+// matching texture; unmatched and identity-only textures retain built-in
+// scaling.
 class RendererHooks {
 public:
   virtual ~RendererHooks() = default;

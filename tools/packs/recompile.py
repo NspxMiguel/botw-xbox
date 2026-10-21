@@ -8,6 +8,7 @@ import importlib.util
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -21,6 +22,7 @@ from tools.packs.build import (
     prepare,
 )
 from tools.packs.patches import Assembler
+from tools.packs.preset import CONSOLES, write_manifest
 from tools.packs.rules import PackError
 
 
@@ -76,13 +78,30 @@ def configure_hook(driver, config, assembler, rpx_bytes):
     return state
 
 
+def selection_config(args):
+    if args.preset:
+        with tempfile.TemporaryDirectory(prefix="botw-packs-") as directory:
+            manifest = Path(directory) / "selection.json"
+            write_manifest(args.preset, args.console, args.graphic_packs, manifest)
+            return load_manifest(manifest)
+    return load_manifest(args.packs)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("rpx", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--packs", required=True, type=Path)
+    selection = parser.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--packs", type=Path)
+    selection.add_argument("--preset", choices=("remaster",))
+    parser.add_argument("--console", choices=CONSOLES)
+    parser.add_argument("--graphic-packs", type=Path)
     parser.add_argument("--llvm-mc")
     args = parser.parse_args()
+    if args.preset and (not args.console or args.graphic_packs is None):
+        parser.error("--preset requires --console and --graphic-packs")
+    if not args.preset and (args.console or args.graphic_packs is not None):
+        parser.error("--console and --graphic-packs require --preset")
     if (
         args.output.resolve() == ROOT
         or ROOT in args.output.resolve().parents
@@ -94,7 +113,7 @@ def main():
     )
     driver = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(driver)
-    config = load_manifest(args.packs)
+    config = selection_config(args)
     state = configure_hook(
         driver, config, Assembler(args.llvm_mc), args.rpx.read_bytes()
     )

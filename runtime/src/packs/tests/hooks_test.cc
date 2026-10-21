@@ -52,9 +52,98 @@ void be32(size_t offset, uint32_t value) {
   for (int i = 0; i < 4; ++i)
     expected_rpx[offset + i] = uint8_t(value >> (24 - i * 8));
 }
+void texture_scaling() {
+  struct Dimensions {
+    int width, height, depth;
+    bool hasResolutionOverwrite;
+  };
+  packs::BuildPlan plan;
+  plan.packs.push_back({"synthetic graphics", {}, {}, {}});
+  auto &rules = plan.packs[0].textures;
+  const packs::TextureDescription target{1280, 720, 1, 1, 0, false};
+  const packs::TextureDescription shadow{1024, 1024, 1, 1, 0, false};
+  // Native preset expressions truncate to identity, including pack rounding.
+  rules = {{{{"width", {1280}},
+             {"height", {720}},
+             {"overwriteWidth", {1280.49}},
+             {"overwriteHeight", {720}},
+             {"overwriteDepth", {1}}}}};
+  assert(packs::texture_overrides(plan, target).empty());
+  Dimensions scaled{1920, 1080, 1, true}; // Built-in scale 1.5.
+  assert(!d3d12_packs::apply_texture_overrides(plan, target, scaled));
+  assert(scaled.width == 1920 && scaled.height == 1080);
+  rules.push_back({{{"width", {1024}},
+                    {"height", {1024}},
+                    {"overwriteWidth", {3072}},
+                    {"overwriteHeight", {3072}}}});
+  Dimensions shadow_size{1024, 1024, 1, false};
+  assert(d3d12_packs::apply_texture_overrides(plan, shadow, shadow_size));
+  assert(shadow_size.width == 3072 && shadow_size.height == 3072 &&
+         shadow_size.hasResolutionOverwrite);
+  assert(!d3d12_packs::apply_texture_overrides(plan, target, scaled));
+  assert(scaled.width == 1920 && scaled.height == 1080);
+  // A partial explicit override preserves scaling on the other axes.
+  rules.push_back(
+      {{{"width", {1280}}, {"height", {720}}, {"overwriteWidth", {2560}}}});
+  assert(d3d12_packs::apply_texture_overrides(plan, target, scaled));
+  assert(scaled.width == 2560 && scaled.height == 1080 && scaled.depth == 1);
+  const packs::TextureDescription other{640, 360, 1, 1, 0, false};
+  Dimensions other_scaled{960, 540, 1, true};
+  assert(!d3d12_packs::apply_texture_overrides(plan, other, other_scaled));
+  assert(other_scaled.width == 960 && other_scaled.height == 540);
+  // A later identity cancels an earlier override before identity removal.
+  rules.push_back({{{"width", {1280}}, {"overwriteWidth", {1280}}}});
+  assert(packs::texture_overrides(plan, target).empty());
+  // Identity filtering also works for wildcard matches and normalized depth.
+  rules = {{{{"width", {-1}}, {"overwriteDepth", {1}}}}};
+  auto zero_depth = target;
+  zero_depth.depth = 0;
+  assert(packs::texture_overrides(plan, zero_depth).empty());
+  // Every partial rule applies identically to matched color and depth buffers.
+  // The constructor calls this helper for both, using their original formats.
+  const packs::TextureDescription depth_target{1280, 720, 1, 0x811, 0, false};
+  const packs::TextureDescription color_target{1280, 720, 1, 0x1a, 0, false};
+  const char *axes[] = {"overwriteWidth", "overwriteHeight", "overwriteDepth"};
+  const int sizes[] = {2560, 1440, 4};
+  for (int axis = 0; axis < 3; ++axis) {
+    rules = {{{{"width", {1280}},
+               {"height", {720}},
+               {axes[axis], {double(sizes[axis])}}}}};
+    for (const auto &texture : {color_target, depth_target}) {
+      Dimensions partial{1920, 1080, 1, true};
+      assert(d3d12_packs::apply_texture_overrides(plan, texture, partial));
+      assert(partial.width == (axis == 0 ? 2560 : 1920));
+      assert(partial.height == (axis == 1 ? 1440 : 1080));
+      assert(partial.depth == (axis == 2 ? 4 : 1));
+      assert(partial.hasResolutionOverwrite);
+      // Without built-in scaling, overwriteInfo's dimensions start at zero.
+      Dimensions unscaled{0, 0, 0, false};
+      assert(d3d12_packs::apply_texture_overrides(plan, texture, unscaled));
+      assert(unscaled.width == (axis == 0 ? 2560 : 1280));
+      assert(unscaled.height == (axis == 1 ? 1440 : 720));
+      assert(unscaled.depth == (axis == 2 ? 4 : 1));
+      assert(unscaled.hasResolutionOverwrite);
+    }
+  }
+  // An identity on one axis also preserves FSR when another axis changes.
+  rules = {{{{"width", {1280}},
+             {"overwriteWidth", {2560}},
+             {"overwriteHeight", {720}}}}};
+  Dimensions partial{1920, 1080, 3, true};
+  assert(d3d12_packs::apply_texture_overrides(plan, target, partial));
+  assert(partial.width == 2560 && partial.height == 1080 && partial.depth == 3);
+  rules = {{{{"width", {-1}}, {"overwriteWidth", {2560}}}}};
+  Dimensions normalized{0, 0, 0, false};
+  assert(d3d12_packs::apply_texture_overrides(plan, zero_depth, normalized));
+  assert(normalized.width == 2560 && normalized.height == 720 &&
+         normalized.depth == 1);
+  std::cout << "texture overrides: identity removal and per-texture scale "
+               "precedence passed\n";
+}
 } // namespace
 int main(int argc, char **argv) {
   assert(argc == 2);
+  texture_scaling();
   hash("", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
   hash("abc",
        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
