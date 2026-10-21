@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include <mutex>
+#include <string>
 #ifdef _WIN32
 #include <chrono>
 #if defined(BOTW_PLATFORM_UWP)
@@ -32,6 +33,10 @@ void log_set_file(const char* path) {
     if (count > 0) {
         std::wstring wide(size_t(count), L'\0');
         MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide.data(), count);
+        // Keep the previous run: a crash is usually followed by a relaunch that would truncate it.
+        auto previous = wide.substr(0, wide.size() - 1) + L".prev";
+        DeleteFileFromAppW(previous.c_str());
+        MoveFileFromAppW(wide.c_str(), previous.c_str());
         HANDLE handle = CreateFile2FromAppW(wide.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                                             CREATE_ALWAYS, nullptr);
         if (handle != INVALID_HANDLE_VALUE) {
@@ -47,6 +52,7 @@ void log_set_file(const char* path) {
     if (!g_log_file)
         OutputDebugStringA("BotW: could not open runtime log in LocalState.\n");
 #else
+    rename(path, (std::string(path) + ".prev").c_str());  // keep the previous run
     g_log_file = fopen(path, "w");
 #endif
     if (!g_log_file)
