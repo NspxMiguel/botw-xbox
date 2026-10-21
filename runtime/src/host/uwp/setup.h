@@ -18,7 +18,7 @@
 namespace uwp::setup {
 inline constexpr char expected_rpx[] = "ba58da5b95ce929e005d058ceb08b9b2788d1ab2bbc8a6c189bbadca0bb34d30";
 inline constexpr uint64_t margin = 2ull * 1024 * 1024 * 1024;
-enum class Step { welcome, guide, detect, verify, wrong_version, storage, copying, automatic, home };
+enum class Step { welcome, guide, detect, verify, wrong_version, storage, copying, buttons, automatic, home };
 enum class Mode { ask, copy, external, off };
 inline std::string mode_name(Mode m) {
     switch (m) {
@@ -125,6 +125,8 @@ struct State {
             else
                 step = Step::detect;
         } else if (step == Step::storage && verified)
+            step = Step::buttons;
+        else if (step == Step::buttons && verified)
             step = Step::automatic;
         else if (step == Step::automatic && verified)
             step = Step::home;
@@ -141,8 +143,10 @@ struct State {
         } else if (step == Step::verify || step == Step::wrong_version || step == Step::storage) {
             step = Step::detect;
             verified = false;
-        } else if (step == Step::automatic)
+        } else if (step == Step::buttons)
             step = Step::storage;
+        else if (step == Step::automatic)
+            step = Step::buttons;
     }
     void found() {
         verified = false;

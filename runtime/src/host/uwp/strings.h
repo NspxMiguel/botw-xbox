@@ -173,6 +173,7 @@ enum class Text {
     store_disabled,
     store_enable,
     store_disable,
+    buttons_question,
     count
 };
 inline std::wstring_view text(Text key, bool pt) {
@@ -198,8 +199,8 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Volume", L"Volume"},
          {L"Frame rate", L"Taxa de quadros"},
          {L"Button layout", L"Posição dos botões"},
-         {L"Nintendo positions", L"Posições Nintendo"},
-         {L"Button labels", L"Letras dos botões"},
+         {L"Nintendo · A is the right button", L"Nintendo · A é o botão da direita"},
+         {L"Xbox · A is the bottom button", L"Xbox · A é o botão de baixo"},
          {L"Place mods in this folder. Changes take effect next launch.",
           L"Coloque os mods nesta pasta. As mudanças valem na próxima abertura."},
          {L"Hold View + Menu for 0.5 s: quick menu. View + Y: GamePad screen. Xbox has no touch or gyro.",
@@ -417,7 +418,9 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Enabled", L"Ativo"},
          {L"Disabled", L"Desativado"},
          {L"Enable", L"Ativar"},
-         {L"Disable", L"Desativar"}}};
+         {L"Disable", L"Desativar"},
+         {L"Which buttons do you prefer?\nThe game's prompts follow your choice. You can change it later in Settings.",
+          L"Quais botões você prefere?\nOs avisos do jogo seguem a sua escolha. Dá pra mudar depois em Configurações."}}};
     return table.at(static_cast<size_t>(key))[pt ? 1 : 0];
 }
 } // namespace uwp

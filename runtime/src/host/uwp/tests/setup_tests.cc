@@ -438,6 +438,15 @@ void setup_test() {
     s.hash(expected_rpx);
     assert(s.step == Step::storage && s.verified);
     s.next();
+    assert(s.step == Step::buttons);
+    s.back();
+    assert(s.step == Step::storage);
+    s.next();
+    s.next();
+    assert(s.step == Step::automatic);
+    s.back();
+    assert(s.step == Step::buttons);
+    s.next();
     s.next();
     assert(s.step == Step::home);
     s.removed();

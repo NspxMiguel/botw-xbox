@@ -474,7 +474,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         preferences.auto_launch = boolean(L"autoLaunch", false);
         preferences.fps = number(L"fps", 60) >= 60 ? 60 : 30;
         preferences.volume = std::clamp(number(L"volume", 100), 0, 100);
-        preferences.layout = number(L"layout", 0) == 1 ? 1 : 0;
+        preferences.layout = number(L"buttonLayout", 1) == 1 ? 1 : 0;  // Xbox labels unless the player picked Nintendo
         preferences.render_scale_percent = std::clamp(number(L"renderScalePercent", 0), 0, 300);
         preferences.upscaler = std::clamp(number(L"upscaler", 0), 0, 3);
         preferences.fsr_quality = std::clamp(number(L"fsrQuality", 0), 0, 4);
@@ -486,7 +486,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         values.Insert(L"autoLaunch", box_value(preferences.auto_launch));
         values.Insert(L"fps", box_value(preferences.fps));
         values.Insert(L"volume", box_value(preferences.volume));
-        values.Insert(L"layout", box_value(preferences.layout));
+        values.Insert(L"buttonLayout", box_value(preferences.layout));
         values.Insert(L"renderScalePercent", box_value(preferences.render_scale_percent));
         values.Insert(L"upscaler", box_value(preferences.upscaler));
         values.Insert(L"fsrQuality", box_value(preferences.fsr_quality));
@@ -1214,6 +1214,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (storage_only)
                     co_return;
                 state.next();
+            } else if (state.step == Step::buttons) {
+                // Labels (1) put A on the bottom face button, so the game's prompts read like an Xbox pad.
+                setup_page(Text::layout, setup_label(Text::buttons_question),
+                           {setup_label(Text::labels), setup_label(Text::positions)}, preferences.layout == 1 ? 0 : 1);
+                int choice = co_await setup_choice();
+                if (choice == -2) {
+                    state.back();
+                    continue;
+                }
+                preferences.layout = choice == 0 ? 1 : 0;
+                save_preferences();
+                state.next();
             } else if (state.step == Step::automatic) {
                 setup_page(Text::title, setup_label(Text::auto_question),
                            {setup_label(Text::yes), setup_label(Text::no)});
@@ -1342,9 +1354,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         auto v = co_await choose(label(uwp::Text::volume), L"", {L"0%", L"50%", L"100%"});
                         preferences.volume = v * 50;
                     } else if (setting == 1) {
-                        preferences.layout =
-                            co_await choose(label(uwp::Text::layout), L"",
-                                            {label(uwp::Text::positions), label(uwp::Text::labels)});
+                        auto buttons = co_await choose(label(uwp::Text::layout), L"",
+                                                       {label(uwp::Text::labels), label(uwp::Text::positions),
+                                                        label(uwp::Text::back)});
+                        if (buttons < 2)
+                            preferences.layout = buttons == 0 ? 1 : 0;
                     }
                 }
             }
