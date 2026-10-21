@@ -17,8 +17,8 @@
 
 namespace uwp {
 namespace art_style {
-inline constexpr float width = 1280, height = 720, button_y = 624, button_h = 56;
-inline constexpr float margin = 64, button_w = 352, gap = 24;
+inline constexpr float width = 1280, height = 720, button_h = 56;
+inline constexpr float margin = 64;
 inline constexpr float title_size = 34, body_size = 17;
 inline D2D1_COLOR_F black(float alpha = 1) { return D2D1::ColorF(0, 0, 0, alpha); }
 inline D2D1_COLOR_F white(float alpha = 1) { return D2D1::ColorF(1, 1, 1, alpha); }
@@ -67,13 +67,28 @@ class ArtView {
     int focus = 0, selected = -1;
     ArtColor accent;
     std::wstring heading, detail, loading_text;
-    std::array<std::wstring, 3> buttons;
     // Mods share the home surface before boot; seven visible 56px pill targets.
     bool mods_mode = false;
     std::vector<std::wstring> rows;
+    std::vector<bool> row_enabled;
+    bool enabled(size_t row) const { return row >= row_enabled.size() || row_enabled[row]; }
     size_t first_row() const { return focus < 6 ? 0 : static_cast<size_t>(focus - 5); }
     int action_count() const { return mods_mode ? static_cast<int>(rows.size()) : 3; }
-    void step(int delta) { focus = (focus + delta + action_count()) % action_count(); }
+    void step(int delta) {
+        for (int attempts = 0; attempts < action_count(); ++attempts) {
+            focus = (focus + delta + action_count()) % action_count();
+            if (!mods_mode || enabled(static_cast<size_t>(focus)))
+                break;
+        }
+    }
+    void navigate(int direction) {
+        // 0 up, 1 right, 2 down, 3 left. Disc=Play, gear=Settings, boxes=Mods.
+        if (mods_mode) {
+            step(direction == 0 || direction == 3 ? -1 : 1);
+            return;
+        }
+        focus = home_focus(focus, direction);
+    }
     bool ready() const { return target != nullptr; }
     void close() {
         // Release the CoreWindow swap chain now: the D3D12 renderer creates its own on the same window.
@@ -132,12 +147,13 @@ class ArtView {
             collection.Get(), &scrim));
         if (art.tv)
             hero = bitmap(*art.tv);
-        if (art.icon) {
+        if (art.icon)
             disc = bitmap(*art.icon);
+        {
             Ptr<ID2D1EllipseGeometry> outer, hole;
-            auto center = D2D1::Point2F(1112, 512);
-            check(factory->CreateEllipseGeometry(D2D1::Ellipse(center, 74, 74), &outer));
-            check(factory->CreateEllipseGeometry(D2D1::Ellipse(center, 10, 10), &hole));
+            auto center = D2D1::Point2F(640, 360);
+            check(factory->CreateEllipseGeometry(D2D1::Ellipse(center, 150, 150), &outer));
+            check(factory->CreateEllipseGeometry(D2D1::Ellipse(center, 20, 20), &hole));
             check(factory->CreatePathGeometry(&disc_mask));
             Ptr<ID2D1GeometrySink> sink;
             check(disc_mask->Open(&sink));
@@ -155,15 +171,16 @@ class ArtView {
             for (size_t i = first; i < rows.size() && i < first + 7; ++i) {
                 float top = 160 + (i - first) * 64;
                 if (x >= art_style::margin && x <= art_style::width - art_style::margin && y >= top &&
-                    y <= top + art_style::button_h)
+                    y <= top + art_style::button_h && enabled(i))
                     return static_cast<int>(i);
             }
             return -1;
         }
-        for (int i = 0; i < 3; ++i) {
-            float left = art_style::margin + i * (art_style::button_w + art_style::gap);
-            if (x >= left && x <= left + art_style::button_w && y >= art_style::button_y &&
-                y <= art_style::button_y + art_style::button_h)
+        if ((x - 640) * (x - 640) + (y - 360) * (y - 360) <= 150 * 150)
+            return 0;
+        for (int i = 1; i <= 2; ++i) {
+            float cy = 56 + (i - 1) * 64;
+            if ((x - 1224) * (x - 1224) + (y - cy) * (y - cy) <= 24 * 24)
                 return i;
         }
         return -1;
@@ -184,13 +201,13 @@ class ArtView {
             for (size_t i = first; i < rows.size() && i < first + 7; ++i) {
                 float top = 160 + (i - first) * 64;
                 auto rect = D2D1::RectF(margin, top, width - margin, top + button_h);
-                bool focused = static_cast<int>(i) == focus;
+                bool focused = static_cast<int>(i) == focus && enabled(i);
                 if (focused) {
                     brush->SetColor(D2D1::ColorF(accent.r, accent.g, accent.b));
                     target->FillRoundedRectangle(D2D1::RoundedRect(rect, button_h / 2, button_h / 2),
                                                  brush.Get());
                 }
-                brush->SetColor(focused ? black() : white());
+                brush->SetColor(focused ? black() : white(enabled(i) ? 1.f : .4f));
                 text(rows[i], D2D1::RectF(margin + 24, top + 17, width - margin - 24, top + button_h));
             }
             brush->SetColor(white());
@@ -207,38 +224,63 @@ class ArtView {
             target->DrawBitmap(hero.Get(), D2D1::RectF(x, y, width - x, height - y));
             target->FillRectangle(D2D1::RectF(0, 0, width, height), scrim.Get());
         }
+        const auto center = D2D1::Point2F(640, 360);
+        brush->SetColor(black(.85f));
+        target->FillGeometry(disc_mask.Get(), brush.Get());
         if (disc) {
-            const auto center = D2D1::Point2F(1112, 512);
             target->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), disc_mask.Get()), disc_layer.Get());
             target->SetTransform(
-                D2D1::Matrix3x2F::Rotation(disc_angle(seconds, loading, reduced_motion), center) * transform);
+                D2D1::Matrix3x2F::Rotation(
+                    static_cast<float>(std::fmod(disc_angle(seconds, loading, reduced_motion), 360.)),
+                    center) *
+                transform);
             auto size = disc->GetSize();
             float side = std::min(size.width, size.height);
             auto source = D2D1::RectF((size.width - side) / 2, (size.height - side) / 2,
                                       (size.width + side) / 2, (size.height + side) / 2);
-            target->DrawBitmap(disc.Get(), D2D1::RectF(1038, 438, 1186, 586), 1,
+            target->DrawBitmap(disc.Get(), D2D1::RectF(490, 210, 790, 510), 1,
                                D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, source);
             target->SetTransform(transform);
             target->PopLayer();
-            brush->SetColor(white(.18f));
-            target->DrawEllipse(D2D1::Ellipse(center, 73, 73), brush.Get(), 1);
-
-            target->DrawEllipse(D2D1::Ellipse(center, 14, 14), brush.Get(), 1);
         }
-        // Backplate is unnecessary: all copy lives in the closed part of the scrim.
+        // The center hole reveals the artwork rather than a painted spindle.
+        brush->SetColor(white(.18f));
+        target->DrawEllipse(D2D1::Ellipse(center, 149, 149), brush.Get(), 1);
+        target->DrawEllipse(D2D1::Ellipse(center, 24, 24), brush.Get(), 1);
+        if (focus == 0 || loading) {
+            float alpha = loading && reduced_motion ? float(.55 + .25 * std::sin(seconds * 2.1)) : 1.f;
+            brush->SetColor(D2D1::ColorF(accent.r, accent.g, accent.b, alpha));
+            target->DrawEllipse(D2D1::Ellipse(center, 155, 155), brush.Get(), 3);
+        }
+        // Accessibility names: disc = Play, gear = Settings, stacked boxes = Mods.
+        for (int i = 1; i <= 2 && !loading; ++i) {
+            auto c = D2D1::Point2F(1224, 56 + (i - 1) * 64.f);
+            brush->SetColor(focus == i ? D2D1::ColorF(accent.r, accent.g, accent.b) : black(.9f));
+            target->FillEllipse(D2D1::Ellipse(c, 24, 24), brush.Get());
+            brush->SetColor(focus == i ? black() : white());
+            if (i == 1) {
+                target->DrawEllipse(D2D1::Ellipse(c, 9, 9), brush.Get(), 2);
+                target->DrawEllipse(D2D1::Ellipse(c, 3, 3), brush.Get(), 2);
+                for (int tooth = 0; tooth < 8; ++tooth) {
+                    double angle = tooth * 3.141592653589793 / 4;
+                    target->DrawLine(
+                        D2D1::Point2F(c.x + 9 * float(std::cos(angle)), c.y + 9 * float(std::sin(angle))),
+                        D2D1::Point2F(c.x + 14 * float(std::cos(angle)), c.y + 14 * float(std::sin(angle))),
+                        brush.Get(), 3);
+                }
+            } else {
+                target->DrawRectangle(D2D1::RectF(c.x - 11, c.y - 6, c.x + 5, c.y + 10), brush.Get(), 2);
+                target->DrawLine(D2D1::Point2F(c.x - 5, c.y - 11), D2D1::Point2F(c.x + 11, c.y - 11),
+                                 brush.Get(), 2);
+                target->DrawLine(D2D1::Point2F(c.x + 11, c.y - 11), D2D1::Point2F(c.x + 11, c.y + 5),
+                                 brush.Get(), 2);
+            }
+        }
         brush->SetColor(white());
-        text(heading, D2D1::RectF(margin, 540, 1000, 586), true);
-        text(loading ? loading_text : detail, D2D1::RectF(margin, 588, 1000, 620));
-        for (int i = 0; i < 3 && !loading; ++i) {
-            float left = margin + i * (button_w + gap);
-            auto rect = D2D1::RectF(left, button_y, left + button_w, button_y + button_h);
-            auto pill = D2D1::RoundedRect(rect, button_h / 2, button_h / 2);
-            brush->SetColor(i == focus ? D2D1::ColorF(accent.r, accent.g, accent.b) : black(.94f));
-            target->FillRoundedRectangle(pill, brush.Get());
-            brush->SetColor(i == focus ? black() : white());
-            text(buttons[i],
-                 D2D1::RectF(left + 24, button_y + 17, left + button_w - 24, button_y + button_h));
-        }
+        text(heading, D2D1::RectF(margin, 626, 1100, 672), true);
+        // Only missing-game/failure messages may accompany the title on home.
+        if (!loading)
+            text(detail, D2D1::RectF(margin, 674, 1150, 720));
         check(target->EndDraw());
         check(swapchain->Present(1, 0));
     }

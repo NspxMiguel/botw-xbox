@@ -110,11 +110,25 @@ struct GameArt {
         return tv ? art_accent(*tv) : icon ? art_accent(*icon) : drc ? art_accent(*drc) : ArtColor{};
     }
 };
-inline float disc_angle(double seconds, bool loading, bool reduced_motion) {
+inline int home_focus(int focus, int direction) {
+    if (focus == 0 && (direction == 0 || direction == 1))
+        return 1;
+    if (focus == 1 && direction == 2)
+        return 2;
+    if (focus == 2 && (direction == 2 || direction == 3))
+        return 0;
+    if (focus == 2 && direction == 0)
+        return 1;
+    return focus;
+}
+// Integral of smoothstep velocity: degrees stay unwrapped, continuous and monotonic.
+inline double disc_angle(double seconds, bool loading, bool reduced_motion) {
     if (!loading || reduced_motion || !std::isfinite(seconds) || seconds <= 0)
         return 0;
-    double phase = std::fmod(seconds, 12.) / 12.;
-    // Smoothstep: zero velocity at the wrap, a slow eased revolution.
-    return float(360 * phase * phase * (3 - 2 * phase));
+    constexpr double ramp = 1.2, speed = 900;
+    if (seconds >= ramp)
+        return speed * (seconds - ramp / 2);
+    double u = seconds / ramp;
+    return speed * ramp * (u * u * u - u * u * u * u / 2);
 }
 } // namespace uwp

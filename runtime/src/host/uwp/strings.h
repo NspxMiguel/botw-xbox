@@ -42,6 +42,19 @@ enum class Text {
     mods_next,
     mods_up,
     mods_down,
+    recompile_apply,
+    get_mods,
+    add_link,
+    search,
+    download,
+    online_error,
+    unsupported,
+    installed,
+    enter_link,
+    enter_search,
+    confirm,
+    page,
+    cancel_transfer,
     count
 };
 inline std::wstring_view text(Text key, bool pt) {
@@ -95,7 +108,23 @@ inline std::wstring_view text(Text key, bool pt) {
           L"Não foi possível importar ou salvar. Confira permissões e espaço livre e tente novamente."},
          {L"Next mod / actions", L"Próximo mod / ações"},
          {L"Move up", L"Subir"},
-         {L"Move down", L"Descer"}}};
+         {L"Move down", L"Descer"},
+         {L"Recompile to apply", L"Recompile para aplicar"},
+         {L"Get mods", L"Baixar mods"},
+         {L"Add from link", L"Adicionar por link"},
+         {L"Search", L"Buscar"},
+         {L"Downloading…", L"Baixando…"},
+         {L"Unable to get this mod. Check the link, connection and free space, then try again.",
+          L"Não foi possível obter este mod. Confira o link, a conexão e o espaço livre e tente novamente."},
+         {L"Unsupported format — extract on a PC and import from USB.",
+          L"Formato não suportado — extraia no PC e importe pelo USB."},
+         {L"Installed and disabled. Enable the mod in the list.",
+          L"Instalado e desativado. Ative o mod na lista."},
+         {L"Enter an https link to a .zip file", L"Digite um link https para um arquivo .zip"},
+         {L"Search GameBanana", L"Buscar no GameBanana"},
+         {L"OK", L"OK"},
+         {L"Page", L"Página"},
+         {L"B / Esc: cancel · LB / RB: page", L"B / Esc: cancelar · LB / RB: página"}}};
     return table.at(static_cast<size_t>(key))[pt ? 1 : 0];
 }
 } // namespace uwp

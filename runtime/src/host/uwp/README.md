@@ -136,7 +136,13 @@ in its lower portion. Saturated hue buckets select the accent from the player's
 art; neutral/transparent pixels do not dominate, and the accent is lifted until
 its WCAG contrast on black reaches 4.5:1. Without a saturated hue it uses white.
 The focused pill uses black text on this accent. Keyboard arrows/Tab/Enter,
-pointer and controller D-pad/A navigate the three 56-pixel home actions.
+pointer and controller D-pad/A navigate the disc and two icon actions. The disc
+is the only play target: center (640, 360), radius 150 in a 1280×720 logical
+surface. Settings and Mods are 48px circles at (1224, 56) and (1224, 120),
+with a 32px edge margin. Up/Right from the disc focuses Settings, Down focuses
+Mods, and Down/Left from Mods returns to the disc. Up from Settings stays there;
+Menu opens Settings. Hover, taps, Enter and Space use the same targets. Only
+the bottom-left title and missing-game/failure messages accompany home art.
 
 Optional personal disc art lives in **LocalState/art/**, beside LocalState/game
 and LocalState/mods. Create `art/disc.png` or `art/cover.png` there; priority is a
@@ -144,9 +150,18 @@ valid `disc.png`, then a valid `cover.png`, then the dump's `iconTex.tga`. WIC
 decodes only PNG containers, with the same memory bounds. Overrides are read only
 when a valid game is detected. Restart the launcher to reload personal artwork.
 The disc is a circular centered crop with a transparent center hole and subtle
-rings. Its 12-second smoothstep rotation runs only during runtime preparation;
-Windows `UISettings.AnimationsEnabled` is checked each frame, and disabled
-animations leave it stationary. Failed loads and leaving the home stop animation.
+rings. During runtime preparation its angular velocity follows smoothstep from
+zero to 2.5 revolutions/s over 1.2s, then stays constant. `disc_angle` integrates
+velocity without wrapping, keeping position and velocity continuous. Only the
+Direct2D drawing angle wraps. Windows `UISettings.AnimationsEnabled` is checked
+each frame; disabled animations replace rotation with a slow accent-ring pulse.
+Failed loads and leaving the home stop animation.
+
+The launch cue is synthesized by portable `make_drive_spinup`: 1.6s of mono
+48kHz float PCM, a 70–380Hz motor with harmonics, low-pass noise, three short
+seek transients and amplitude fades. A separate XAudio2 engine/voice plays it
+once at the saved user volume, independently of the paused game mixer. Buffer
+storage outlives playback and is released after DestroyVoice on shutdown.
 
 The home owns a Direct2D/D3D11 CoreWindow swapchain **only before guest boot**;
 it releases all graphics resources before handing the window to W2. While a
@@ -189,3 +204,41 @@ and coroutine code requires the Microsoft SDK and was reviewed, not compiled or
 run on this Mac. On Xbox, verify empty/long lists, locked packs, USB disconnect,
 name collisions, permission/space failures, controller release gating, and the
 live-guest dialog fallback. No artwork assets are added by this feature.
+
+## Online mods
+
+The Mods list includes **Get mods** and **Add from link** in both system-selected
+languages. GameBanana browsing uses the public v11 API for Wii U game 5866,
+15-record index pages, search, and per-mod download files. LB/RB (PageUp/PageDown)
+change pages. Records display name/category/author; download choices display
+file size and explicitly disable unsupported formats. Text entry uses a native
+CoreWindow dialog with CoreTextEditContext and the system InputPane, supporting
+Xbox keyboard text updates, selection and Unicode. The live-guest fallback uses
+MessageDialog because the renderer retains the CoreWindow surface.
+
+HttpClient streams downloads into unique files in LocalState/mods/.downloads.
+B/Escape cancels the current request/read. Known API and HTTP lengths must match;
+MD5 is checked with Windows.Security.Cryptography.Core when supplied. Direct
+links must use HTTPS and a .zip path (query strings are allowed). Progress reports
+received and total KiB, or an unknown total. No remote art is cached.
+
+Portable `mods::install_zip` accepts stored/deflate ZIPs with CRC checks, at most
+20,000 entries and 4GiB total expanded size. It rejects encryption, ZIP64 size
+sentinels, symlinks, absolute/traversal/drive/alternate-stream paths, duplicate
+case-folded names and Windows reserved names. Extraction is streamed in 64KiB
+chunks to an isolated staging directory. It searches through three nested levels
+for content/ or aoc/, then rules.txt, flattens the selected root into a uniquely
+reserved mod directory and removes staging/partial output on exceptions.
+Downloaded graphics packs receive `.imported-graphics` and appear locked with
+“Recompile to apply”. New file mods remain disabled. Existing installed folders
+are never replaced. Compiled graphics behavior and enabled.txt remain compatible.
+
+Validation adds `mods_online_tests` (handwritten JSON plus synthetic zlib-built
+ZIPs) and `uwp_drive_sound_tests` (length, finite samples, peak, spectral centroid).
+No network, game data or media fixtures are required. `check-syntax.sh` checks
+portable/Direct2D/audio code on the Mac and explicitly reports the SDK gate for
+app.cpp/mod_network.h. From a VS developer shell it also invokes cl.exe /Zs on
+app.cpp and its WinRT headers. Set UWP_REQUIRE_SDK=1 to make a missing SDK fail.
+This Mac cannot validate WinRT projections: Xbox/native-keyboard behavior,
+HTTP/cancellation/MD5 and the native-dialog fallback require the Windows SDK
+build and on-device checks. A portable or MinGW pass does not verify those APIs.

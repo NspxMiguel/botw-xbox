@@ -3,6 +3,8 @@
 #include "../../host/window.h"
 #include "../../latte/latte.h"
 #include "../../mods/catalog.h"
+#include "../../mods/gamebanana.h"
+#include "../../mods/zip_install.h"
 #include "../../settings.h"
 #include "art_png.h"
 #include "art_view.h"
@@ -10,12 +12,14 @@
 #include "controller.h"
 #include "host.h"
 #include "launcher.h"
+#include "mod_network.h"
 #include "runtime.h"
 #include "strings.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <memory>
 #include <thread>
 #include <vector>
 #include <windows.h>
@@ -34,16 +38,17 @@
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
 #include <winrt/Windows.UI.Popups.h>
+#include <winrt/Windows.UI.Text.Core.h>
 #include <winrt/Windows.UI.ViewManagement.h>
 
 using namespace winrt;
-using namespace Windows::ApplicationModel;
-using namespace Windows::ApplicationModel::Core;
-using namespace Windows::Foundation;
-using namespace Windows::Gaming::Input;
-using namespace Windows::Storage;
-using namespace Windows::UI::Core;
-using namespace Windows::UI::Popups;
+using namespace winrt::Windows::ApplicationModel;
+using namespace winrt::Windows::ApplicationModel::Core;
+using namespace winrt::Windows::Foundation;
+using namespace winrt::Windows::Gaming::Input;
+using namespace winrt::Windows::Storage;
+using namespace winrt::Windows::UI::Core;
+using namespace winrt::Windows::UI::Popups;
 
 namespace {
 CoreWindow host_window{nullptr};
@@ -59,7 +64,7 @@ void active(bool value) {
 }
 void update_size() {
     auto bounds = host_window.Bounds();
-    auto dpi = Windows::Graphics::Display::DisplayInformation::GetForCurrentView().LogicalDpi();
+    auto dpi = winrt::Windows::Graphics::Display::DisplayInformation::GetForCurrentView().LogicalDpi();
     pixel_width = std::max(1, static_cast<int>(bounds.Width * dpi / 96.f));
     pixel_height = std::max(1, static_cast<int>(bounds.Height * dpi / 96.f));
 }
@@ -104,14 +109,20 @@ std::optional<uwp::ArtImage> read_art(StorageFolder const &meta, wchar_t const *
     }
 }
 
-struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
+struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool pt = false, menu_open = false, running = false, boot_attempted = false;
     bool failed = false, foreground = true, suspended = false, opening = false;
     uwp::Preferences preferences;
     uwp::Controller controller;
     uwp::GameArt art;
     uwp::ArtView home;
-    bool mods_open = false;
+    bool mods_open = false, browser_open = false, text_entry = false, transfer_active = false;
+    int browser_action = 0;
+    std::wstring input_text;
+    uwp::Transfer transfer;
+    winrt::Windows::UI::Text::Core::CoreTextEditContext edit_context{nullptr};
+    winrt::Windows::UI::Text::Core::CoreTextRange text_selection{};
+    event_token pointer_moved{}, character_received{};
     int mods_action = 0;
     uint32_t home_buttons = ~uint32_t(0);
     std::chrono::steady_clock::time_point loading_since{};
@@ -156,7 +167,7 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             else
                 resize_home();
         });
-        dpi = Windows::Graphics::Display::DisplayInformation::GetForCurrentView().DpiChanged(
+        dpi = winrt::Windows::Graphics::Display::DisplayInformation::GetForCurrentView().DpiChanged(
             [this](auto const &, auto const &) {
                 update_size();
                 if (running)
@@ -165,11 +176,41 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                     resize_home();
             });
         key_down = window.KeyDown([this](auto const &, KeyEventArgs const &e) {
-            if (!home.shown || home.loading)
+            if ((!home.shown && !transfer_active && !text_entry && !browser_open) || home.loading)
                 return;
-            using Windows::System::VirtualKey;
+            using winrt::Windows::System::VirtualKey;
             auto key = e.VirtualKey();
-            if (mods_open) {
+            if (transfer_active) {
+                if (key == VirtualKey::Escape)
+                    transfer.cancel();
+                return;
+            }
+            if (text_entry) {
+                if (key == VirtualKey::Escape)
+                    home.selected = 2;
+                if (key == VirtualKey::Enter)
+                    home.selected = 1;
+                if (key == VirtualKey::Back && !edit_context && !input_text.empty()) {
+                    auto last = input_text.back();
+                    input_text.pop_back();
+                    if (last >= 0xdc00 && last <= 0xdfff && !input_text.empty())
+                        input_text.pop_back();
+                    int32_t end = static_cast<int32_t>(input_text.size());
+                    text_selection = {end, end};
+                    if (edit_context)
+                        edit_context.NotifyTextChanged(
+                            {end, end + (last >= 0xdc00 && last <= 0xdfff ? 2 : 1)}, 0, text_selection);
+                }
+                return;
+            }
+            if (browser_open) {
+                if (key == VirtualKey::Escape)
+                    browser_action = 1;
+                if (key == VirtualKey::PageUp)
+                    browser_action = -1;
+                if (key == VirtualKey::PageDown)
+                    browser_action = 2;
+            } else if (mods_open) {
                 if (key == VirtualKey::Escape)
                     mods_action = 1;
                 if (key == VirtualKey::X)
@@ -178,9 +219,11 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                     mods_action = 2;
             }
             if (key == VirtualKey::Left || key == VirtualKey::Up)
-                home.step(-1);
+                home.navigate(key == VirtualKey::Up ? 0 : 3);
             if (key == VirtualKey::Right || key == VirtualKey::Down || key == VirtualKey::Tab)
-                home.step(1);
+                home.navigate(key == VirtualKey::Down ? 2 : 1);
+            if (!mods_open && !browser_open && key == VirtualKey::GamepadMenu)
+                home.selected = 1;
             if (key == VirtualKey::Enter || key == VirtualKey::Space)
                 home.selected = home.focus;
         });
@@ -192,6 +235,37 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             home.selected =
                 home.hit(point.X * pixel_width / bounds.Width, point.Y * pixel_height / bounds.Height);
         });
+        pointer_moved = window.PointerMoved([this](auto const &, PointerEventArgs const &e) {
+            if (!home.shown || home.loading || transfer_active || text_entry)
+                return;
+            auto p = e.CurrentPoint().Position();
+            auto bounds = host_window.Bounds();
+            int hit = home.hit(p.X * pixel_width / bounds.Width, p.Y * pixel_height / bounds.Height);
+            if (hit >= 0)
+                home.focus = hit;
+        });
+        character_received =
+            window.CharacterReceived([this](auto const &, CharacterReceivedEventArgs const &e) {
+                // The focused CoreTextEditContext already receives typed text; feed it here only without one.
+                if (!text_entry || edit_context)
+                    return;
+                auto c = e.KeyCode();
+                auto old_length = static_cast<int32_t>(input_text.size());
+                if (c >= 32 && c <= 0x10ffff && input_text.size() < 4096) {
+                    if (c > 0xffff) {
+                        c -= 0x10000;
+                        input_text += wchar_t(0xd800 + (c >> 10));
+                        input_text += wchar_t(0xdc00 + (c & 1023));
+                    } else
+                        input_text += wchar_t(c);
+                    text_selection = {static_cast<int32_t>(input_text.size()),
+                                      static_cast<int32_t>(input_text.size())};
+                    if (edit_context)
+                        edit_context.NotifyTextChanged({old_length, old_length},
+                                                       static_cast<int32_t>(input_text.size()) - old_length,
+                                                       text_selection);
+                }
+            });
         update_size();
     }
     void Load(hstring const &) {}
@@ -205,11 +279,13 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         CoreApplication::MainView().Activated(activating);
         host_window.KeyDown(key_down);
         host_window.PointerPressed(pointer_pressed);
+        host_window.PointerMoved(pointer_moved);
+        host_window.CharacterReceived(character_received);
         host_window.Closed(closed);
         host_window.VisibilityChanged(visibility);
         host_window.Activated(activated);
         host_window.SizeChanged(size);
-        Windows::Graphics::Display::DisplayInformation::GetForCurrentView().DpiChanged(dpi);
+        winrt::Windows::Graphics::Display::DisplayInformation::GetForCurrentView().DpiChanged(dpi);
         host_window = nullptr;
     }
     void neutral() {
@@ -316,6 +392,8 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         candidates = std::move(found);
     }
     IAsyncOperation<int32_t> choose(hstring title, hstring body, std::vector<hstring> choices) {
+        auto cancellation = co_await get_cancellation_token();
+        cancellation.enable_propagation();
         MessageDialog dialog(body, title);
         for (size_t i = 0; i < choices.size(); ++i)
             dialog.Commands().Append(UICommand(choices[i], nullptr, box_value(static_cast<int32_t>(i))));
@@ -328,18 +406,18 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (!home.ready())
             return;
         auto heading = home.heading, detail = home.detail, loading_text = home.loading_text;
-        auto buttons = home.buttons;
         auto rows = home.rows;
+        auto row_enabled = home.row_enabled;
         bool mods_mode = home.mods_mode;
         bool shown = home.shown, loading = home.loading;
         int focus = home.focus;
         try {
-            home.open(static_cast<IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
+            home.open(static_cast<::IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
             home.heading = std::move(heading);
             home.detail = std::move(detail);
             home.loading_text = std::move(loading_text);
-            home.buttons = std::move(buttons);
             home.rows = std::move(rows);
+            home.row_enabled = std::move(row_enabled);
             home.mods_mode = mods_mode;
             home.shown = shown;
             home.loading = loading;
@@ -349,7 +427,7 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
     }
     void show_home() {
-        home.open(static_cast<IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
+        home.open(static_cast<::IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
         home.heading = label(uwp::Text::title).c_str();
         home.loading_text = label(uwp::Text::loading).c_str();
         home_buttons = ~uint32_t(0); // Require release before accepting a controller action.
@@ -363,8 +441,6 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (!home.ready())
             co_return co_await choose(label(uwp::Text::title), body, choices);
         home.detail = body.c_str();
-        for (size_t i = 0; i < 3; ++i)
-            home.buttons[i] = choices[i].c_str();
         auto dispatcher = host_window.Dispatcher();
         while (home.selected < 0 && home.shown && !quit) {
             co_await resume_after(std::chrono::milliseconds(16));
@@ -527,6 +603,368 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                 throw std::runtime_error("No mod folders found");
         }
     }
+    IAsyncOperation<int32_t> online_rows(hstring heading, std::vector<std::wstring> rows,
+                                         hstring detail = L"", std::vector<bool> enabled = {}) {
+        browser_action = 0;
+        if (!home.ready() || running) {
+            size_t cursor = 0;
+            auto dispatcher = host_window.Dispatcher();
+            for (;;) {
+                auto operation =
+                    choose(heading, hstring(std::wstring(detail) + L"\n\n" + rows.at(cursor)),
+                           {label(uwp::Text::confirm), label(uwp::Text::mods_next), label(uwp::Text::back)});
+                while (operation.Status() == AsyncStatus::Started && !browser_action && !quit) {
+                    co_await resume_after(std::chrono::milliseconds(16));
+                    co_await resume_foreground(dispatcher);
+                }
+                if (browser_action || quit) {
+                    operation.Cancel();
+                    co_return browser_action == -1 ? -2 : browser_action == 2 ? -3 : -1;
+                }
+                auto action = co_await operation;
+                if (action == 0) {
+                    if (cursor < enabled.size() && !enabled[cursor])
+                        continue;
+                    co_return static_cast<int32_t>(cursor);
+                }
+                if (action == 2)
+                    co_return -1;
+                cursor = (cursor + 1) % rows.size();
+            }
+        }
+        home.mods_mode = true;
+        home.shown = true;
+        home.loading = false;
+        home.heading = heading.c_str();
+        home.detail = detail.c_str();
+        home.loading_text = label(uwp::Text::cancel_transfer).c_str();
+        home.rows = std::move(rows);
+        home.row_enabled = std::move(enabled);
+        home.focus = 0;
+        if (!home.enabled(0))
+            home.step(1);
+        home.selected = -1;
+        home_buttons = ~uint32_t(0);
+        auto dispatcher = host_window.Dispatcher();
+        while (home.selected < 0 && !browser_action && !quit && home.ready()) {
+            co_await resume_after(std::chrono::milliseconds(16));
+            co_await resume_foreground(dispatcher);
+        }
+        if (quit || browser_action == 1 || !home.ready())
+            co_return -1;
+        if (browser_action == -1)
+            co_return -2;
+        if (browser_action == 2)
+            co_return -3;
+        co_return home.selected;
+    }
+    void begin_text_entry() {
+        using namespace winrt::Windows::UI::Text::Core;
+        input_text.clear();
+        text_selection = {0, 0};
+        text_entry = true;
+        edit_context = CoreTextServicesManager::GetForCurrentView().CreateEditContext();
+        edit_context.InputScope(CoreTextInputScope::Default);
+        edit_context.InputPaneDisplayPolicy(CoreTextInputPaneDisplayPolicy::Manual);
+        edit_context.TextRequested([this](auto const &, CoreTextTextRequestedEventArgs const &args) {
+            auto request = args.Request();
+            auto range = request.Range();
+            auto start = std::clamp(range.StartCaretPosition, 0, static_cast<int32_t>(input_text.size()));
+            auto end = std::clamp(range.EndCaretPosition, start, static_cast<int32_t>(input_text.size()));
+            request.Text(hstring(input_text.substr(start, end - start)));
+        });
+        edit_context.SelectionRequested(
+            [this](auto const &, CoreTextSelectionRequestedEventArgs const &args) {
+                args.Request().Selection(text_selection);
+            });
+        edit_context.TextUpdating([this](auto const &, CoreTextTextUpdatingEventArgs const &args) {
+            auto range = args.Range();
+            auto replacement = args.Text();
+            if (range.StartCaretPosition < 0 || range.EndCaretPosition < range.StartCaretPosition ||
+                range.EndCaretPosition > static_cast<int32_t>(input_text.size()) ||
+                input_text.size() - (range.EndCaretPosition - range.StartCaretPosition) + replacement.size() >
+                    4096) {
+                args.Result(CoreTextTextUpdatingResult::Failed);
+                return;
+            }
+            input_text.replace(range.StartCaretPosition, range.EndCaretPosition - range.StartCaretPosition,
+                               replacement.c_str(), replacement.size());
+            text_selection = args.NewSelection();
+            args.Result(CoreTextTextUpdatingResult::Succeeded);
+        });
+        edit_context.SelectionUpdating([this](auto const &, CoreTextSelectionUpdatingEventArgs const &args) {
+            text_selection = args.Selection();
+            args.Result(CoreTextSelectionUpdatingResult::Succeeded);
+        });
+        edit_context.LayoutRequested([](auto const &, CoreTextLayoutRequestedEventArgs const &args) {
+            auto window = host_window.Bounds();
+            auto bounds = args.Request().LayoutBounds();
+            Rect field{window.X + 64 * window.Width / 1280, window.Y + 160 * window.Height / 720,
+                       1152 * window.Width / 1280, 56 * window.Height / 720};
+            bounds.ControlBounds(field);
+            bounds.TextBounds(field);
+        });
+        edit_context.NotifyFocusEnter();
+    }
+    void end_text_entry() noexcept {
+        try {
+            if (edit_context)
+                edit_context.NotifyFocusLeave();
+            winrt::Windows::UI::ViewManagement::InputPane::GetForCurrentView().TryHide();
+        } catch (...) {
+        }
+        edit_context = nullptr;
+        text_entry = false;
+    }
+    // Native CoreWindow text dialog, with the system InputPane (including Xbox keyboard).
+    // CharacterReceived retains UTF-16 input; no web view, XAML island or URL launch is needed.
+    IAsyncOperation<hstring> enter_text(uwp::Text prompt) {
+        struct Guard {
+            App &app;
+            ~Guard() { app.end_text_entry(); }
+        } guard{*this};
+        begin_text_entry();
+        if (!home.ready() || running) {
+            // A running guest owns the surface: collect typed input while its native dialog is open.
+
+            auto pane = winrt::Windows::UI::ViewManagement::InputPane::GetForCurrentView();
+            pane.TryShow();
+            MessageDialog dialog(L"", label(prompt));
+            dialog.Commands().Append(UICommand(label(uwp::Text::confirm), nullptr, box_value(0)));
+            dialog.Commands().Append(UICommand(label(uwp::Text::back), nullptr, box_value(1)));
+            dialog.CancelCommandIndex(1);
+            auto operation = dialog.ShowAsync();
+            auto dispatcher = host_window.Dispatcher();
+            while (operation.Status() == AsyncStatus::Started) {
+                co_await resume_after(std::chrono::milliseconds(16));
+                co_await resume_foreground(dispatcher);
+                if (quit || browser_action == 1) {
+                    operation.Cancel();
+                    co_return hstring{};
+                }
+                dialog.Content(hstring(input_text));
+            }
+            auto answer = co_await operation;
+            if (answer && unbox_value<int32_t>(answer.Id()) == 0)
+                co_return hstring(input_text);
+            co_return hstring{};
+        }
+        browser_action = 0;
+        auto pane = winrt::Windows::UI::ViewManagement::InputPane::GetForCurrentView();
+        home.row_enabled.clear();
+        home.heading = label(prompt).c_str();
+        home.detail = L"";
+        home.rows = {L"", std::wstring(label(uwp::Text::confirm)), std::wstring(label(uwp::Text::back))};
+        home.focus = 0;
+        home.selected = -1;
+        home.shown = true;
+        home.mods_mode = true;
+        home.loading_text = L"";
+        pane.TryShow();
+        home_buttons = ~uint32_t(0);
+        auto dispatcher = host_window.Dispatcher();
+        for (;;) {
+            co_await resume_after(std::chrono::milliseconds(16));
+            co_await resume_foreground(dispatcher);
+            if (quit || browser_action == 1 || home.selected == 2 || !home.ready()) {
+                pane.TryHide();
+                co_return hstring{};
+            }
+            if (home.selected == 1) {
+                pane.TryHide();
+                co_return hstring(input_text);
+            }
+            if (home.selected == 0) {
+                pane.TryShow();
+                home.selected = -1;
+            }
+            home.rows[0] = input_text + L"▏";
+        }
+    }
+    IAsyncAction install_online(mods::OnlineFile file, std::string name) {
+        if (!file.supported()) {
+            co_await choose(label(uwp::Text::mods), label(uwp::Text::unsupported), {label(uwp::Text::back)});
+            co_return;
+        }
+        auto folder = co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
+        auto downloads =
+            co_await folder.CreateFolderAsync(L".downloads", CreationCollisionOption::OpenIfExists);
+        auto temporary =
+            co_await downloads.CreateFileAsync(L"download.zip", CreationCollisionOption::GenerateUniqueName);
+        auto path = std::filesystem::path(temporary.Path().c_str());
+        auto root = std::filesystem::path(folder.Path().c_str());
+        transfer = {};
+        transfer_active = true;
+        home.focus = 0;
+        home.row_enabled.clear();
+        home.heading = label(uwp::Text::download).c_str();
+        home.detail = L"";
+        home.rows = {std::wstring(to_hstring(name))};
+        home.loading_text = label(uwp::Text::cancel_transfer).c_str();
+        home.selected = -1;
+        bool error = false;
+        auto dispatcher = host_window.Dispatcher();
+        MessageDialog progress_dialog(label(uwp::Text::download), to_hstring(name));
+        IAsyncOperation<IUICommand> progress_operation{nullptr};
+        auto progress_active = std::make_shared<bool>(true);
+        try {
+            if (running || !home.ready()) {
+                progress_dialog.Commands().Append(UICommand(label(uwp::Text::back)));
+                progress_operation = progress_dialog.ShowAsync();
+                progress_operation.Completed([this, progress_active](auto const &, auto status) {
+                    if (status == AsyncStatus::Completed)
+                        host_window.Dispatcher().RunAsync(CoreDispatcherPriority::Normal,
+                                                          [this, progress_active] {
+                                                              if (*progress_active && transfer_active)
+                                                                  transfer.cancel();
+                                                          });
+                });
+            }
+            co_await uwp::download_mod(
+                file, path, transfer,
+                [this, &progress_dialog, &progress_operation](uint64_t size, uint64_t total) {
+                    home.rows = {std::to_wstring(size / 1024) + L" / " +
+                                 (total ? std::to_wstring(total / 1024) : L"?") + L" KiB"};
+                    if (progress_operation)
+                        progress_dialog.Content(hstring(home.rows[0]));
+                });
+            transfer.check();
+            // Extraction cannot be interrupted midway; rollback is owned by the installer.
+            transfer_active = false;
+            home.heading = label(uwp::Text::loading).c_str();
+            co_await resume_background();
+            std::exception_ptr failure;
+            try {
+                mods::install_zip(path, root, name);
+            } catch (...) {
+                failure = std::current_exception();
+            }
+            co_await resume_foreground(dispatcher);
+            if (failure)
+                std::rethrow_exception(failure);
+        } catch (...) {
+            error = true;
+        }
+        transfer_active = false;
+        transfer.pending = nullptr;
+        *progress_active = false;
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        if (progress_operation) {
+            try {
+                progress_operation.Cancel();
+                co_await progress_operation;
+            } catch (...) {
+            }
+        }
+        if (!transfer.cancelled)
+            co_await choose(label(uwp::Text::mods),
+                            label(error ? uwp::Text::online_error : uwp::Text::installed),
+                            {label(uwp::Text::back)});
+    }
+    IAsyncAction online_mods(bool link) {
+        browser_open = true;
+        struct Guard {
+            App &app;
+            ~Guard() {
+                app.browser_open = false;
+                app.text_entry = false;
+                app.transfer_active = false;
+            }
+        } guard{*this};
+        bool error = false;
+        try {
+            if (link) {
+                auto url = to_string(co_await enter_text(uwp::Text::enter_link));
+                if (url.empty())
+                    co_return;
+                if (!mods::https_zip_url(url))
+                    throw std::runtime_error("Invalid ZIP link");
+                auto end = url.find('?');
+                auto clean = url.substr(0, end);
+                auto name = clean.substr(clean.rfind('/') + 1);
+                co_await install_online({name, url, "", 0}, name.substr(0, name.size() - 4));
+                co_return;
+            }
+            unsigned page = 1;
+            std::string query;
+            for (;;) {
+                transfer = {};
+                transfer_active = true;
+                home.focus = 0;
+                home.heading = label(uwp::Text::get_mods).c_str();
+                home.detail = L"";
+                home.rows = {std::wstring(label(uwp::Text::loading))};
+                home.loading_text = label(uwp::Text::cancel_transfer).c_str();
+                auto json = co_await uwp::fetch_json(mods::gamebanana_url(page, query), transfer);
+                transfer_active = false;
+                auto result = mods::parse_gamebanana(to_string(json));
+                std::vector<std::wstring> rows;
+                for (auto &m : result.records)
+                    rows.push_back(std::wstring(to_hstring(m.name + " · " + m.category + " · " + m.author)));
+                int search_index = static_cast<int>(rows.size());
+                rows.push_back(label(uwp::Text::search).c_str());
+                rows.push_back(label(uwp::Text::back).c_str());
+                auto selected = co_await online_rows(
+                    label(uwp::Text::get_mods), std::move(rows),
+                    hstring(std::wstring(label(uwp::Text::page)) + L" " + std::to_wstring(page)));
+                if (selected == -1 || selected == search_index + 1)
+                    co_return;
+                if (selected == -2) {
+                    if (page > 1)
+                        --page;
+                    continue;
+                }
+                if (selected == -3) {
+                    if (!result.records.empty() && (!result.count || page * 15 < result.count))
+                        ++page;
+                    continue;
+                }
+                if (selected == search_index) {
+                    // ponytail: empty = cancelled, keeps the current search; a "clear search" row if players ask.
+                    if (auto typed = to_string(co_await enter_text(uwp::Text::enter_search)); !typed.empty()) {
+                        query = typed;
+                        page = 1;
+                    }
+                    continue;
+                }
+                auto mod = result.records.at(selected);
+                transfer = {};
+                transfer_active = true;
+                home.focus = 0;
+                home.rows = {std::wstring(label(uwp::Text::loading))};
+                auto files_json = co_await uwp::fetch_json(mods::gamebanana_files_url(mod.id), transfer);
+                transfer_active = false;
+                auto files = mods::parse_gamebanana_files(to_string(files_json));
+                std::vector<std::wstring> file_rows;
+                for (auto &f : files)
+                    file_rows.push_back(
+                        std::wstring(to_hstring(f.name)) + L" · " + std::to_wstring(f.size / 1024) + L" KiB" +
+                        (f.supported() ? L"" : L" · " + std::wstring(label(uwp::Text::unsupported))));
+                file_rows.push_back(label(uwp::Text::back).c_str());
+                std::vector<bool> enabled;
+                for (auto const &file : files)
+                    enabled.push_back(file.supported());
+                enabled.push_back(true);
+                for (;;) {
+                    auto index = co_await online_rows(to_hstring(mod.name), file_rows,
+                                                      to_hstring(mod.category + " · " + mod.author), enabled);
+                    if (index < 0 || index >= static_cast<int>(files.size()))
+                        break;
+                    if (!files[index].supported())
+                        continue; // Listed, deliberately disabled.
+                    co_await install_online(files[index], mod.name);
+                    break;
+                }
+            }
+        } catch (...) {
+            error = true;
+        }
+        transfer_active = false;
+        transfer.pending = nullptr;
+        if (error && !transfer.cancelled)
+            co_await choose(label(uwp::Text::mods), label(uwp::Text::online_error), {label(uwp::Text::back)});
+    }
     std::wstring mod_label(const mods::ModInfo &entry) const {
         auto kind = entry.kind == mods::Kind::translation ? uwp::Text::translation
                     : entry.kind == mods::Kind::dubbing   ? uwp::Text::dubbing
@@ -534,7 +972,10 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                                                           : uwp::Text::files;
         return std::wstring(to_hstring(entry.name)) + L" · " + label(kind).c_str() + L" · " +
                label(entry.enabled ? uwp::Text::mod_on : uwp::Text::mod_off).c_str() +
-               (entry.locked ? L" · " + std::wstring(label(uwp::Text::rebuild)) : L"");
+               (entry.locked ? L" · " + std::wstring(label(entry.note == "recompile to apply"
+                                                               ? uwp::Text::recompile_apply
+                                                               : uwp::Text::rebuild))
+                             : L"");
     }
     IAsyncAction manage_mods() {
         auto folder = co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
@@ -572,10 +1013,13 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                     label(catalog.list().empty() ? uwp::Text::mods_empty : uwp::Text::mods_help).c_str();
                 home.loading_text = label(uwp::Text::mods_controls).c_str();
                 home.rows.clear();
+                home.row_enabled.clear();
                 for (auto const &entry : catalog.list())
                     home.rows.push_back(mod_label(entry));
                 home.rows.push_back(label(uwp::Text::import_usb).c_str());
                 home.rows.push_back(label(uwp::Text::save_mods).c_str());
+                home.rows.push_back(label(uwp::Text::get_mods).c_str());
+                home.rows.push_back(label(uwp::Text::add_link).c_str());
                 home.focus = std::clamp(home.focus, 0, static_cast<int>(home.rows.size()) - 1);
                 home.selected = -1;
                 auto dispatcher = host_window.Dispatcher();
@@ -603,10 +1047,12 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                 mods_action = 0;
             } else {
                 auto count = catalog.list().size();
-                cursor %= count + 2;
-                auto body = cursor < count
-                                ? hstring(mod_label(catalog.list()[cursor]))
-                                : label(cursor == count ? uwp::Text::import_usb : uwp::Text::save_mods);
+                cursor %= count + 4;
+                auto body = cursor < count ? hstring(mod_label(catalog.list()[cursor]))
+                                           : label(cursor == count       ? uwp::Text::import_usb
+                                                   : cursor == count + 1 ? uwp::Text::save_mods
+                                                   : cursor == count + 2 ? uwp::Text::get_mods
+                                                                         : uwp::Text::add_link);
                 auto action = co_await choose(
                     label(uwp::Text::mods), body,
                     {label(uwp::Text::yes), label(uwp::Text::mods_next), label(uwp::Text::save_mods)});
@@ -636,7 +1082,12 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                     catalog.save();
                     co_return;
                 }
-                if (selected == static_cast<int>(catalog.list().size())) {
+                if (selected == static_cast<int>(catalog.list().size()) + 2 ||
+                    selected == static_cast<int>(catalog.list().size()) + 3) {
+                    catalog.save();
+                    co_await online_mods(selected == static_cast<int>(catalog.list().size()) + 3);
+                    catalog.load(root, packs::compiled_plan());
+                } else if (selected == static_cast<int>(catalog.list().size())) {
                     catalog.save();
                     co_await import_mods();
                     catalog.load(root, packs::compiled_plan());
@@ -671,6 +1122,7 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             home.shown = home.ready();
             home.loading = true;
             loading_since = std::chrono::steady_clock::now();
+            uwp::play_drive_spinup(preferences.volume / 100.f);
             auto dispatcher = host_window.Dispatcher();
             auto user = to_string(local.Path());
             co_await resume_background();
@@ -725,7 +1177,7 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             allow_auto = false;
             hstring body = failed ? label(boot_attempted && !running ? uwp::Text::restart : uwp::Text::error)
                            : decision.select_game ? label(uwp::Text::missing)
-                                                  : label(uwp::Text::controls);
+                                                  : hstring{};
             std::vector<hstring> choices{label(running                ? uwp::Text::resume
                                                : decision.select_game ? uwp::Text::select
                                                                       : uwp::Text::play),
@@ -762,7 +1214,7 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
         } guard{opening};
         try {
             if (startup) {
-                auto languages = Windows::Globalization::ApplicationLanguages::Languages();
+                auto languages = winrt::Windows::Globalization::ApplicationLanguages::Languages();
                 pt = languages.Size() && std::wstring_view(languages.GetAt(0)).starts_with(L"pt");
                 local = ApplicationData::Current().LocalFolder();
                 read_preferences();
@@ -787,18 +1239,36 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
             neutral();
             pad = current;
         }
-        if (home.shown && !home.loading && pad && visible) {
+        if ((home.shown || transfer_active || text_entry || browser_open) && !home.loading && pad &&
+            visible) {
             auto buttons = static_cast<uint32_t>(pad.GetCurrentReading().Buttons);
             if (home_buttons == ~uint32_t(0)) {
                 if (!buttons)
                     home_buttons = 0;
             } else {
                 auto pressed = buttons & ~home_buttons;
-                if (pressed & (uwp::left | uwp::up))
-                    home.step(-1);
-                if (pressed & (uwp::right | uwp::down))
-                    home.step(1);
-                if (mods_open) {
+                if (transfer_active) {
+                    if (pressed & uwp::b)
+                        transfer.cancel();
+                    home_buttons = buttons;
+                    return;
+                }
+                if (pressed & uwp::up)
+                    home.navigate(0);
+                if (pressed & uwp::right)
+                    home.navigate(1);
+                if (pressed & uwp::down)
+                    home.navigate(2);
+                if (pressed & uwp::left)
+                    home.navigate(3);
+                if (browser_open) {
+                    if (pressed & uwp::b)
+                        browser_action = 1;
+                    if (!text_entry && (pressed & uwp::lb))
+                        browser_action = -1;
+                    if (!text_entry && (pressed & uwp::rb))
+                        browser_action = 2;
+                } else if (mods_open) {
                     if (pressed & uwp::b)
                         mods_action = 1;
                     if (pressed & (uwp::x | uwp::lb))
@@ -806,6 +1276,8 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
                     if (pressed & (uwp::y | uwp::rb))
                         mods_action = 2;
                 }
+                if (!mods_open && !browser_open && (pressed & uwp::menu))
+                    home.selected = 1;
                 if (pressed & uwp::a)
                     home.selected = home.focus;
                 home_buttons = buttons;
@@ -835,7 +1307,7 @@ struct App final : implements<App, IFrameworkViewSource, IFrameworkView> {
     void Run() {
         active(true);
         open_menu(true);
-        Windows::UI::ViewManagement::UISettings ui_settings;
+        winrt::Windows::UI::ViewManagement::UISettings ui_settings;
         while (!quit) {
             host_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
             if (failed && local && !opening && visible)
