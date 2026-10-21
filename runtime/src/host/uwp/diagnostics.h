@@ -3,9 +3,12 @@
 #include "formats/reader.h"
 #include "setup.h"
 #include "strings.h"
+#include <cctype>
 #include <fstream>
 #include <map>
 #include <memory>
+#include <set>
+#include <tuple>
 namespace uwp::setup {
 enum class IssueKind { missing, wrong_size, version, title, incomplete, optional, keys };
 struct Issue {
@@ -115,6 +118,57 @@ inline bool usable_source(const std::vector<Diagnosis> &diagnoses, const std::st
     return std::any_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
         return d.folder == folder && d.format == format && d.source == source && !d.incomplete();
     });
+}
+// A scan repeats every second; remember what was logged so only new or changed verdicts reach the log.
+struct LogMemo {
+    std::map<std::string, std::string> last;
+    std::string drives;
+    // Forget everything when the set of drives changes, so the new layout is logged in full.
+    void drive_list(const std::string &now) {
+        if (now != drives) {
+            last.clear();
+            drives = now;
+        }
+    }
+    bool changed(const std::string &key, const std::string &line) {
+        auto it = last.find(key);
+        if (it != last.end() && it->second == line)
+            return false;
+        last[key] = line;
+        return true;
+    }
+};
+// The same game can be reached by several paths (picked folder and drive, layered base and its layers).
+struct ItemKey {
+    std::string folder;
+    Format format = Format::folder;
+    std::string file;
+    std::vector<std::string> layers;
+};
+inline std::string normal_path(std::string path) {
+    for (auto &c : path)
+        c = c == '/' ? '\\' : char(std::tolower((unsigned char)c));
+    while (path.size() > 1 && path.back() == '\\')
+        path.pop_back();
+    return path;
+}
+// Indices of the first item per (folder, format, file); an item whose folder is a layer of another item is
+// the same game as that layered item.
+inline std::vector<size_t> distinct_items(const std::vector<ItemKey> &items) {
+    std::vector<size_t> kept;
+    std::set<std::tuple<std::string, Format, std::string>> seen;
+    for (size_t i = 0; i < items.size(); ++i) {
+        auto folder = normal_path(items[i].folder);
+        bool layer = false;
+        for (size_t j = 0; j < items.size() && !layer; ++j)
+            if (j != i)
+                for (auto &l : items[j].layers)
+                    layer |= normal_path(l) == folder && folder != normal_path(items[j].folder) &&
+                             items[j].format == items[i].format;
+        if (!layer && seen.emplace(folder, items[i].format, items[i].file).second)
+            kept.push_back(i);
+    }
+    return kept;
 }
 inline Diagnosis diagnose(const Probe &p, std::string folder, Format format, const std::string &name = "") {
     Diagnosis d{std::move(folder), format, {}, name};

@@ -186,7 +186,30 @@ void chord_input_tests() {
         assert(!chord.guest_buttons);
     }
 }
+void dedupe_and_log_tests() {
+    // Same game via a picked folder and a drive path: counted once.
+    std::vector<ItemKey> keys{{"E:\\NXbox\\games\\BotW\\", Format::folder, "", {}},
+                              {"e:/nxbox/games/botw", Format::folder, "", {}},
+                              {"E:\\a.wua", Format::wua, "a.wua", {}},
+                              {"E:\\b.wua", Format::wua, "b.wua", {}}};
+    assert((distinct_items(keys) == std::vector<size_t>{0, 2, 3}));
+    // A folder that is a layer of a layered item is the same game as that item.
+    keys = {{"E:\\base", Format::folder, "", {"E:\\base", "E:\\update"}},
+            {"E:\\update", Format::folder, "", {}},
+            {"F:\\other", Format::folder, "", {}}};
+    assert((distinct_items(keys) == std::vector<size_t>{0, 2}));
+    LogMemo memo;
+    assert(memo.changed("E:\\game", "valid") && !memo.changed("E:\\game", "valid"));
+    assert(memo.changed("E:\\game", "incomplete") && memo.changed("E:\\game", "valid"));
+    memo.drive_list("E:|");
+    assert(memo.changed("E:\\game", "valid"));
+    memo.drive_list("E:|");
+    assert(!memo.changed("E:\\game", "valid"));
+    memo.drive_list("E:|F:|");
+    assert(memo.changed("E:\\game", "valid"));
+}
 int main() {
+    dedupe_and_log_tests();
     auto root =
         fs::temp_directory_path() /
         ("w13-fixture-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

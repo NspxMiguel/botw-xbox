@@ -5,6 +5,7 @@
 #include "formats/layout.h"
 #include "setup.h"
 #include <atomic>
+#include <cstdio>
 #include <fstream>
 #include <memory>
 #include <windows.h>
@@ -165,10 +166,19 @@ inline bool game_folder(Folder root) {
 }
 // Probe common locations directly as well as enumerating: a broker can expose a
 // known child even when listing its parent fails. Depth remains relative to the drive.
-template <typename Visit> inline void search_removable(Visit visit) {
+template <typename Visit> inline void search_removable(Visit visit, LogMemo *memo = nullptr) {
     try {
-        for (auto drive : winrt::Windows::Storage::KnownFolders::RemovableDevices().GetFoldersAsync().get()) {
-            LOG("Setup search drive: %s", winrt::to_string(drive.Path()).c_str());
+        auto drives = winrt::Windows::Storage::KnownFolders::RemovableDevices().GetFoldersAsync().get();
+        if (memo) {
+            std::string list;
+            for (auto drive : drives)
+                list += winrt::to_string(drive.Path()) + "|";
+            memo->drive_list(list);
+        }
+        for (auto drive : drives) {
+            auto drive_path = winrt::to_string(drive.Path());
+            if (!memo || memo->changed("drive " + drive_path, ""))
+                LOG("Setup search drive: %s", drive_path.c_str());
             for (auto path : {L"NXbox\\games", L"NXbox", L"games", L"wiiu", L"BotW"}) {
                 try {
                     visit(drive.GetFolderAsync(path).get(), drive,
@@ -185,20 +195,24 @@ template <typename Visit> inline void search_removable(Visit visit) {
             visit(drive, drive, 0);
         }
     } catch (winrt::hresult_error const &e) {
-        LOG("Setup drive enumeration failed: 0x%08x", unsigned(e.code().value));
+        char code[16];
+        snprintf(code, sizeof code, "0x%08x", unsigned(e.code().value));
+        if (!memo || memo->changed("drive enumeration", code))
+            LOG("Setup drive enumeration failed: %s", code);
     }
 }
-inline Folder remembered_game() {
+inline Folder remembered_game(LogMemo *memo = nullptr) {
     try {
         auto access = winrt::Windows::Storage::AccessCache::StorageApplicationPermissions::FutureAccessList();
         if (access.ContainsItem(L"game-folder"))
             return access.GetFolderAsync(L"game-folder").get();
     } catch (winrt::hresult_error const &) {
-        LOG("Setup remembered folder is unavailable");
+        if (!memo || memo->changed("remembered", ""))
+            LOG("Setup remembered folder is unavailable");
     }
     return nullptr;
 }
-inline std::vector<Item> scan(Folder local, Folder remembered = nullptr) {
+inline std::vector<Item> scan(Folder local, Folder remembered = nullptr, LogMemo *memo = nullptr) {
     std::vector<Item> result;
     struct Title {
         Folder folder{nullptr}, drive{nullptr};
@@ -253,10 +267,10 @@ inline std::vector<Item> scan(Folder local, Folder remembered = nullptr) {
     if (!result.empty())
         visited.insert(std::wstring(result.front().folder.Path()));
     if (!remembered)
-        remembered = remembered_game();
+        remembered = remembered_game(memo);
     if (remembered)
         walk(remembered, remembered, 0);
-    search_removable(walk);
+    search_removable(walk, memo);
     // Pair split Loadiine/Dumpling folders by title family, never by translated display name.
     for (auto &item : result) {
         if ((item.format != Format::folder && item.format != Format::nus) ||
@@ -327,14 +341,21 @@ inline Probe storage_probe(Folder root) {
             },
             [root, native](const std::string &s) { return open_reader(root.GetFileAsync(native(s)).get()); }};
 }
-inline void log_diagnosis(const Diagnosis &d) {
+inline void log_diagnosis(const Diagnosis &d, LogMemo *memo = nullptr) {
     auto issue =
         std::find_if(d.issues.begin(), d.issues.end(), [](auto &i) { return i.kind != IssueKind::optional; });
-    LOG("Setup candidate %s%s%s: %s%s", d.folder.c_str(), d.source.empty() ? "" : "/", d.source.c_str(),
-        d.incomplete() ? "incomplete; first issue: " : "valid", d.incomplete() ? issue->path.c_str() : "");
+    auto key = d.folder + (d.source.empty() ? "" : "/") + d.source;
+    auto verdict = d.incomplete() ? "incomplete; first issue: " + issue->path : std::string("valid");
+    if (!memo || memo->changed(key, verdict))
+        LOG("Setup candidate %s: %s", key.c_str(), verdict.c_str());
+}
+// Log a candidate verdict (e.g. "ignored") only when it is new or differs from the previous scan.
+inline void log_verdict(LogMemo *memo, const std::string &key, const std::string &verdict) {
+    if (!memo || memo->changed(key, verdict))
+        LOG("Setup candidate %s: %s", key.c_str(), verdict.c_str());
 }
 inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &cache,
-                                               Folder remembered = nullptr) {
+                                               Folder remembered = nullptr, LogMemo *memo = nullptr) {
     std::vector<Diagnosis> result;
     cache.begin();
     std::set<std::wstring> visited;
@@ -352,23 +373,22 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
             if (nus || unpacked || game_folder(root)) {
                 auto d = diagnose(p, path, nus ? Format::nus : Format::folder);
                 if (nus || unpacked || !d.incomplete()) {
-                    log_diagnosis(d);
+                    log_diagnosis(d, memo);
                     result.push_back(std::move(d));
                 } else
-                    LOG("Setup candidate %s: ignored", path.c_str());
+                    log_verdict(memo, path, "ignored");
             } else
-                LOG("Setup candidate %s: ignored", path.c_str());
+                log_verdict(memo, path, "ignored");
             for (auto file : root.GetFilesAsync().get())
                 if (auto format = file_format(winrt::to_string(file.FileType()))) {
                     auto properties = file.GetBasicPropertiesAsync().get();
                     if (auto d = cache.get(p, winrt::to_string(root.Path()), *format,
                                            winrt::to_string(file.Name()), properties.Size(),
                                            properties.DateModified().time_since_epoch().count())) {
-                        log_diagnosis(*d);
+                        log_diagnosis(*d, memo);
                         result.push_back(std::move(*d));
                     } else
-                        LOG("Setup candidate %s/%s: ignored", path.c_str(),
-                            winrt::to_string(file.Name()).c_str());
+                        log_verdict(memo, path + "/" + winrt::to_string(file.Name()), "ignored");
                 }
             if (!nus && depth < 3)
                 for (auto folder : root.GetFoldersAsync().get()) {
@@ -378,7 +398,7 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
                         walk(folder, depth + 1);
                 }
         } catch (...) { /* A hot-unplug is retried on the next scan. */
-            LOG("Setup candidate %s: ignored (unavailable)", winrt::to_string(root.Path()).c_str());
+            log_verdict(memo, winrt::to_string(root.Path()), "ignored (unavailable)");
         }
     };
     try {
@@ -387,10 +407,10 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
     } catch (...) {
     }
     if (!remembered)
-        remembered = remembered_game();
+        remembered = remembered_game(memo);
     if (remembered)
         walk(remembered, 0);
-    search_removable([&](Folder root, Folder, unsigned depth) { walk(root, depth); });
+    search_removable([&](Folder root, Folder, unsigned depth) { walk(root, depth); }, memo);
     cache.end();
     return result;
 }

@@ -72,6 +72,7 @@ enum class Text {
     select_game_folder,
     scan_again,
     drive_removed,
+    wrong_folder,
     setup_verify,
     setup_wrong,
     setup_storage,
@@ -282,6 +283,7 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Scan again", L"Buscar novamente"},
          {L"The USB drive was removed. Reconnect it to continue.",
           L"O USB foi removido. Conecte novamente para continuar."},
+         {L"That folder doesn't contain Breath of the Wild.", L"Essa pasta não contém o Breath of the Wild."},
          {L"Checking your game", L"Conferindo seu jogo"},
          {L"This executable is not version 1.5.0 (v208).\nUpdate the game on your Wii U, dump the update "
           L"again and merge it over the base game.",

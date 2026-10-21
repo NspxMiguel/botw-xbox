@@ -746,6 +746,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
         } guard{*this};
         uwp::setup::DiagnosticCache diagnostic_cache;
+        uwp::setup::LogMemo scan_log;
         uwp::setup::Item selected;
         StorageFolder game{nullptr};
         uint64_t game_size = 0;
@@ -788,13 +789,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 setup_page(Text::setup_insert,
                            setup_label(state.drive_removed ? Text::drive_removed : Text::setup_search));
                 std::vector<uwp::setup::Item> items;
-                bool first_scan = true;
+                bool first_scan = true, wrong_pick = false;
+                std::string picked_path;
                 while (state.step == Step::detect && !quit) {
                     std::vector<uwp::setup::Diagnosis> diagnoses;
                     co_await setup_work(
                         [&] {
-                            items = uwp::setup::scan(local);
-                            diagnoses = uwp::setup::scan_diagnostics(local, diagnostic_cache);
+                            items = uwp::setup::scan(local, nullptr, &scan_log);
+                            diagnoses =
+                                uwp::setup::scan_diagnostics(local, diagnostic_cache, nullptr, &scan_log);
                             for (auto &item : items) {
                                 if (item.format != uwp::setup::Format::folder || item.layers.empty())
                                     continue;
@@ -811,7 +814,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                 diagnoses.push_back(
                                     uwp::setup::diagnose(uwp::setup::layered_probe(std::move(layers)),
                                                          to_string(item.folder.Path()), item.format));
-                                uwp::setup::log_diagnosis(diagnoses.back());
+                                uwp::setup::log_diagnosis(diagnoses.back(), &scan_log);
                             }
                         },
                         true);
@@ -826,11 +829,38 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                std::tie(b.folder, b.format, b.source);
                     });
                     std::vector<int> valid_items;
+                    std::vector<uwp::setup::ItemKey> keys;
+                    std::vector<int> usable;
                     for (size_t i = 0; i < items.size(); ++i) {
                         auto &item = items[i];
-                        if (uwp::setup::usable_source(diagnoses, to_string(item.folder.Path()), item.format,
-                                                      item.file ? to_string(item.file.Name()) : ""))
-                            valid_items.push_back(int(i));
+                        auto folder = to_string(item.folder.Path());
+                        auto file = item.file ? to_string(item.file.Name()) : "";
+                        if (uwp::setup::usable_source(diagnoses, folder, item.format, file)) {
+                            usable.push_back(int(i));
+                            keys.push_back({folder, item.format, file, {}});
+                            for (auto &layer : item.layers)
+                                keys.back().layers.push_back(to_string(layer.folder.Path()));
+                        }
+                    }
+                    // The same game reached by two paths must not defeat the single-game auto-select.
+                    for (auto k : uwp::setup::distinct_items(keys))
+                        valid_items.push_back(usable[k]);
+                    if (!picked_path.empty()) {
+                        // A picked folder that yields no game is forgotten instead of rescanned forever.
+                        auto prefix = uwp::setup::normal_path(picked_path);
+                        // An incomplete game is still a game: its missing files are listed instead.
+                        wrong_pick = std::none_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
+                            return uwp::setup::normal_path(d.folder).starts_with(prefix);
+                        });
+                        if (wrong_pick) {
+                            try {
+                                AccessCache::StorageApplicationPermissions::FutureAccessList().Remove(
+                                    L"game-folder");
+                            } catch (hresult_error const &) {
+                            }
+                            LOG("Setup picked folder has no game: %s", picked_path.c_str());
+                        }
+                        picked_path.clear();
                     }
                     if (valid_items.size() == 1) {
                         selected = items[size_t(valid_items.front())];
@@ -848,7 +878,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     };
                     bool partial = false, keys_only = true;
                     if (valid_items.empty()) {
-                        row(setup_label(Text::select_game_folder), setup_label(Text::game_not_found), -1, -2);
+                        row(setup_label(Text::select_game_folder),
+                            setup_label(wrong_pick ? Text::wrong_folder : Text::game_not_found), -1, -2);
                         row(setup_label(Text::scan_again), L"", -1, -3);
                         row(setup_label(Text::back), L"", -1, -4);
                     }
@@ -881,7 +912,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     auto heading =
                         setup_label(partial ? (keys_only ? Text::keys_missing : Text::files_missing)
                                             : Text::setup_insert);
-                    auto detail = valid_items.empty() ? setup_label(Text::game_not_found) : L"";
+                    auto detail = valid_items.empty()
+                                      ? setup_label(wrong_pick ? Text::wrong_folder : Text::game_not_found)
+                                      : L"";
                     // Keep focus, scroll and pending input intact across identical scan snapshots.
                     if (first_scan || rows != home.rows || notes != home.issue_notes ||
                         kinds != home.issue_kinds || heading != home.heading || detail != home.detail ||
@@ -928,7 +961,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                             if (picked) {
                                 AccessCache::StorageApplicationPermissions::FutureAccessList().AddOrReplace(
                                     L"game-folder", picked);
-                                LOG("Setup picked folder: %s", to_string(picked.Path()).c_str());
+                                picked_path = to_string(picked.Path());
+                                wrong_pick = false;
+                                LOG("Setup picked folder: %s", picked_path.c_str());
                             }
                         } catch (hresult_error const &e) {
                             LOG("Setup folder picker failed: 0x%08x", unsigned(e.code().value));
