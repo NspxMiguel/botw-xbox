@@ -201,7 +201,7 @@ inline std::vector<Found> detect(const std::filesystem::path &root) {
             if (entry.is_symlink(ec))
                 continue;
             if (entry.is_directory(ec)) {
-                if (depth < 2)
+                if (depth < 3)
                     visit(entry.path(), depth + 1);
             } else if (entry.is_regular_file(ec))
                 if (auto format = file_format(entry.path().extension().string()))

@@ -196,7 +196,8 @@ inline std::vector<Item> scan(Folder local) {
             for (auto file : root.GetFilesAsync().get())
                 if (auto format = file_format(winrt::to_string(file.FileType())))
                     result.push_back({root, drive, file, *format, std::wstring(file.Name())});
-            if (depth < 2)
+            // Depth 3 reaches X:\NXbox\games\BotW, where the NXbox FTP server stores uploads.
+            if (depth < 3)
                 for (auto folder : root.GetFoldersAsync().get())
                     walk(folder, drive, depth + 1);
         } catch (winrt::hresult_error const &) { /* A drive can disappear between any two calls. */
@@ -300,7 +301,7 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
                                            properties.DateModified().time_since_epoch().count()))
                         result.push_back(std::move(*d));
                 }
-            if (!nus && depth < 2)
+            if (!nus && depth < 3)
                 for (auto folder : root.GetFoldersAsync().get()) {
                     auto name = folder.Name();
                     if (!unpacked ||
@@ -407,7 +408,7 @@ inline std::vector<Entry> source_entries(const Item &item, Progress &progress) {
                 keys.insert(keys.end(), parsed.begin(), parsed.end());
             }
         }
-        if (depth < 2)
+        if (depth < 3)
             for (auto child : folder.GetFoldersAsync().get())
                 search(child, depth + 1);
     };

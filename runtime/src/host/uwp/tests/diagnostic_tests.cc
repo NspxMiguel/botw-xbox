@@ -230,8 +230,9 @@ int main() {
     write(root / "a/b/Zelda-found", "code/cos.xml");
     write(root / "a/b/c/Zelda-too-deep", "code/cos.xml");
     auto all = diagnose_tree(root);
-    assert(std::any_of(all.begin(), all.end(), [](auto &v) { return v.folder.ends_with("Zelda-found"); }) ==
-           false); // depth 3
+    // Depth 3 is X:\NXbox\games\BotW (NXbox FTP uploads); depth 4 stays out.
+    assert(std::any_of(all.begin(), all.end(), [](auto &v) { return v.folder.ends_with("Zelda-found"); }));
+    assert(std::none_of(all.begin(), all.end(), [](auto &v) { return v.folder.ends_with("Zelda-too-deep"); }));
     write(root / "a/Zelda-depth2", "code/cos.xml");
     all = diagnose_tree(root);
     assert(std::any_of(all.begin(), all.end(), [](auto &v) { return v.folder.ends_with("Zelda-depth2"); }));
