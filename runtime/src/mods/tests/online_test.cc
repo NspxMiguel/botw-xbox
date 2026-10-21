@@ -134,6 +134,12 @@ int main() {
         fs::path p;
         ~Guard() { fs::remove_all(p); }
     } guard{root};
+    // content and aoc/content belong to the same root for every archive backend.
+    auto detection = root / "detection";
+    fs::create_directories(detection / "Mod" / "content");
+    fs::create_directories(detection / "Mod" / "aoc" / "content");
+    CHECK(mods::find_root(detection, 0, false) == detection / "Mod");
+    fs::remove_all(detection);
     auto archive = root / "test.zip", installed = root / "mods";
     zip(archive, {{"release/nested/mod/content/Message/test.txt", "translation", false},
                   {"release/nested/mod/aoc/Sound/voice.bin", std::string(160000, 'x'), true}});
@@ -155,6 +161,13 @@ int main() {
     zip(archive, {{"pack/rules.txt", "[Definition]", true}});
     auto graphics = mods::install_zip(archive, installed, "Graphics");
     CHECK(graphics.graphics && fs::exists(graphics.path / "rules.txt"));
+    zip(archive, {{"BreathOfTheWild/Graphics/rules.txt", "[Definition]"},
+                  {"BreathOfTheWild/FPS++/rules.txt", "[Definition]"}});
+    auto chosen = mods::install_zip(archive, root / "selected-packs", "FPS", "src/BreathOfTheWild/FPS++");
+    CHECK(chosen.graphics && fs::exists(chosen.path / "rules.txt"));
+    CHECK(mods::selected_pack_directory("release/BreathOfTheWild/Graphics", "src/BreathOfTheWild/Graphics"));
+    CHECK(!mods::selected_pack_directory("release/OtherGame/Graphics", "src/BreathOfTheWild/Graphics"));
+    CHECK(!mods::selected_pack_directory("release/BreathOfTheWild/FPS++", "src/BreathOfTheWild/Graphics"));
     mods::ModCatalog catalog;
     catalog.load(installed, {});
     CHECK(catalog.list().size() == 3);

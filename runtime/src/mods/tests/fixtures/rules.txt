@@ -1,0 +1,9 @@
+[Definition]
+name = Resolution
+path = "The Legend of Zelda: Breath of the Wild/Graphics"
+description = "Change render resolution. Player supplied fixture."
+version = 6
+[Preset]
+name = 1920x1080
+[Preset]
+name = 3840x2160
