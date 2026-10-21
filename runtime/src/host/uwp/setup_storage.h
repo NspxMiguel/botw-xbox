@@ -228,6 +228,7 @@ inline std::vector<Item> scan(Folder local, Folder remembered = nullptr, LogMemo
     } catch (winrt::hresult_error const &) {
     }
     std::set<std::wstring> visited;
+    auto deadline = std::chrono::steady_clock::now() + kSearchBudget;
     std::function<void(Folder, Folder, unsigned)> walk = [&](Folder root, Folder drive, unsigned depth) {
         if (!visited.insert(std::wstring(root.Path())).second)
             return;
@@ -254,8 +255,7 @@ inline std::vector<Item> scan(Folder local, Folder remembered = nullptr, LogMemo
             for (auto file : root.GetFilesAsync().get())
                 if (auto format = file_format(winrt::to_string(file.FileType())))
                     result.push_back({root, drive, file, *format, std::wstring(file.Name())});
-            // Depth 3 reaches X:\NXbox\games\BotW, where the NXbox FTP server stores uploads.
-            if (depth < 3)
+            if (depth < kSearchDepth && std::chrono::steady_clock::now() < deadline)
                 for (auto folder : root.GetFoldersAsync().get())
                     walk(folder, drive, depth + 1);
         } catch (winrt::hresult_error const &) { /* A drive can disappear between any two calls. */
@@ -359,6 +359,7 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
     std::vector<Diagnosis> result;
     cache.begin();
     std::set<std::wstring> visited;
+    auto deadline = std::chrono::steady_clock::now() + kSearchBudget;
     std::function<void(Folder, unsigned)> walk = [&](Folder root, unsigned depth) {
         if (!visited.insert(std::wstring(root.Path())).second)
             return;
@@ -390,7 +391,7 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
                     } else
                         log_verdict(memo, path + "/" + winrt::to_string(file.Name()), "ignored");
                 }
-            if (!nus && depth < 3)
+            if (!nus && depth < kSearchDepth && std::chrono::steady_clock::now() < deadline)
                 for (auto folder : root.GetFoldersAsync().get()) {
                     auto name = folder.Name();
                     if (!unpacked ||
@@ -498,7 +499,7 @@ inline std::vector<Entry> source_entries(const Item &item, Progress &progress) {
                 keys.insert(keys.end(), parsed.begin(), parsed.end());
             }
         }
-        if (depth < 3)
+        if (depth < kSearchDepth)
             for (auto child : folder.GetFoldersAsync().get())
                 search(child, depth + 1);
     };

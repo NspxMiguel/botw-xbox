@@ -470,7 +470,7 @@ inline std::vector<Diagnosis> diagnose_tree(const std::filesystem::path &root) {
                 if (auto f = file_format(e.path().extension().string());
                     f && looks_like_title(p, *f, e.path().filename().string()))
                     result.push_back(diagnose(p, dir.generic_string(), *f, e.path().filename().string()));
-            } else if (!nus && depth < 3 && e.is_directory(ec)) {
+            } else if (!nus && depth < kSearchDepth && e.is_directory(ec)) {
                 auto name = e.path().filename().string();
                 if (!unpacked || (name != "code" && name != "content" && name != "meta" && name != "aoc"))
                     visit(e.path(), depth + 1);

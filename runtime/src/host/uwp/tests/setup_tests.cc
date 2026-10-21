@@ -435,9 +435,9 @@ void setup_test() {
     std::ofstream(root / "install/title.tik") << "test";
     for (auto ext : {".wua", ".wud", ".wux", ".zip", ".7z"})
         std::ofstream(root / (std::string("game") + ext)) << "synthetic";
-    fs::create_directories(root / "a/b/deep/too-deep");
-    std::ofstream(root / "a/b/deep/found.wux") << "x";
-    std::ofstream(root / "a/b/deep/too-deep/ignored.wux") << "x";
+    fs::create_directories(root / "a/b/c/deep/too-deep");
+    std::ofstream(root / "a/b/c/deep/found.wux") << "x";
+    std::ofstream(root / "a/b/c/deep/too-deep/ignored.wux") << "x";
     auto found = detect(root);
     assert(found.size() == 8);
     assert(std::any_of(found.begin(), found.end(),

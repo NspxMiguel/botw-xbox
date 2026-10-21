@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cctype>
 #include <charconv>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -16,6 +17,10 @@
 #include <vector>
 
 namespace uwp::setup {
+// Folder levels below a drive the game search enters: X:\NXbox\games\BotW is 3, one spare level for
+// folders like X:\Games\WiiU\Zelda\<dump>. The UWP walk also stops descending after kSearchBudget.
+constexpr unsigned kSearchDepth = 4;
+constexpr std::chrono::seconds kSearchBudget{10};
 inline constexpr char expected_rpx[] = "ba58da5b95ce929e005d058ceb08b9b2788d1ab2bbc8a6c189bbadca0bb34d30";
 inline constexpr uint64_t margin = 2ull * 1024 * 1024 * 1024;
 enum class Step { welcome, guide, detect, verify, wrong_version, storage, copying, buttons, automatic, home };
@@ -205,7 +210,7 @@ inline std::vector<Found> detect(const std::filesystem::path &root) {
             if (entry.is_symlink(ec))
                 continue;
             if (entry.is_directory(ec)) {
-                if (depth < 3)
+                if (depth < kSearchDepth)
                     visit(entry.path(), depth + 1);
             } else if (entry.is_regular_file(ec))
                 if (auto format = file_format(entry.path().extension().string()))

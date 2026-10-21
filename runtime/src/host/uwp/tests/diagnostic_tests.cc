@@ -134,7 +134,7 @@ void discovery_tests(const fs::path &root) {
     write(complete, "code/app.xml", "<title_version>00d0</title_version>");
     write(complete, "meta/meta.xml", "<title_id>00050000101c9400</title_id>");
     write(complete, "content/Pack/Bootup.pack");
-    auto too_deep = root / "one/two/three/BotW";
+    auto too_deep = root / "one/two/three/four/BotW";
     write(too_deep, "code/cos.xml");
     auto diagnoses = diagnose_tree(root);
     assert(std::none_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
@@ -305,10 +305,10 @@ int main() {
                        *file_format(fs::path(name).extension().string()), name),
               {{name, IssueKind::incomplete}});
     }
-    write(root / "a/b/Zelda-found", "code/cos.xml");
-    write(root / "a/b/c/Zelda-too-deep", "code/cos.xml");
+    write(root / "a/b/c/Zelda-found", "code/cos.xml");
+    write(root / "a/b/c/d/Zelda-too-deep", "code/cos.xml");
     auto all = diagnose_tree(root);
-    // Depth 3 is X:\NXbox\games\BotW (NXbox FTP uploads); depth 4 stays out.
+    // Depth 4 is found (one level under X:\NXbox\games\BotW); depth 5 stays out.
     assert(std::any_of(all.begin(), all.end(), [](auto &v) { return v.folder.ends_with("Zelda-found"); }));
     assert(std::none_of(all.begin(), all.end(), [](auto &v) { return v.folder.ends_with("Zelda-too-deep"); }));
     write(root / "a/Zelda-depth2", "code/cos.xml");
