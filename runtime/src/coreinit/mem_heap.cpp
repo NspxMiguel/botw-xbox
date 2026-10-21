@@ -1,5 +1,6 @@
 // coreinit MEM: expanded heaps, frame heaps, allocators, default/base heaps, memory bounds.
 // Heap headers live in guest memory (games read heapStart/heapEnd); allocation state is host-side.
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <unordered_map>
@@ -354,8 +355,8 @@ HLE_EXPORT(coreinit, DCZeroRange) {
 }
 HLE_EXPORT(coreinit, OSIsAddressValid) { RET(ARG(0) >= 0x01000000); }
 HLE_EXPORT(coreinit, OSIsAddressRangeDCValid) { RET(1); }
-HLE_EXPORT(coreinit, OSCoherencyBarrier) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
-HLE_EXPORT(coreinit, OSMemoryBarrier) { __atomic_thread_fence(__ATOMIC_SEQ_CST); }
+HLE_EXPORT(coreinit, OSCoherencyBarrier) { std::atomic_thread_fence(std::memory_order_seq_cst); }
+HLE_EXPORT(coreinit, OSMemoryBarrier) { std::atomic_thread_fence(std::memory_order_seq_cst); }
 HLE_EXPORT(coreinit, OSEnableOverlayArena) { RET(0); }
 HLE_EXPORT(coreinit, OSIsEnabledOverlayArena) { RET(0); }
 
