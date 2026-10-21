@@ -83,6 +83,17 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
     // One guest address space per process. Resume uses the existing guest; never load a second RPX.
     g_game_root = game;
     g_user_root = user;
+    log_set_file((g_user_root + "/runtime.log").c_str());
+#if defined(_WIN32)
+    // The console gives no crash dialog: leave the faulting code and its offset in BotWRecomp.exe in the log.
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS *e) -> LONG {
+        auto pc = reinterpret_cast<uintptr_t>(e->ExceptionRecord->ExceptionAddress);
+        auto exe = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        LOG("FATAL exception 0x%08lx at exe+0x%llx (pc 0x%llx)", e->ExceptionRecord->ExceptionCode,
+            (unsigned long long)(pc - exe), (unsigned long long)pc);
+        return EXCEPTION_CONTINUE_SEARCH;
+    });
+#endif
     mem::init();
     dispatch::init();
     std::string error;
