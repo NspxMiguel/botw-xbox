@@ -1,7 +1,9 @@
 // GamePad motion (gyro / accelerometer / attitude) from a host controller's sensors, e.g. the
 // DualSense. Port of Cemu's input/motion (MahonySensorFusion, WiiUMotionHandler, MotionSample) and
 // its SDL sensor handling (SDLControllerProvider), MPL-2.0, so values match what games expect there.
+#include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <mutex>
 
 #include "input.h"
@@ -109,9 +111,45 @@ void integrate(float dt) {
     x_vector(g_imu.q * Quat::angle_axis(kPi / 2, 0, 1, 0), m.dir + 6);
     g_valid = true;
 }
+
+std::atomic<bool> g_real_sensor{false}, g_tilt_mode{false};
+float g_tilt[2]{};  // virtual pitch, roll (rad)
+
+void feed(bool gyro, const float data[3], uint64_t ts);
 }  // namespace
 
 void motion_sensor(bool gyro, const float data[3], uint64_t ts) {
+    g_real_sensor.store(true, std::memory_order_relaxed);
+    feed(gyro, data, ts);
+}
+
+void set_tilt_mode(bool on) { g_tilt_mode.store(on, std::memory_order_relaxed); }
+
+bool virtual_tilt(float sx, float sy, uint64_t ts) {
+    if (g_real_sensor.load(std::memory_order_relaxed)) return false;
+    static const bool forced = [] { const char* e = std::getenv("BOTW_VIRTUAL_TILT"); return e && *e == '1'; }();
+    if (!forced && !g_tilt_mode.load(std::memory_order_relaxed)) sx = sy = 0;  // ease back to flat
+    static uint64_t last = 0;
+    float dt = last ? std::fmin((float)(ts - last) / 1e9f, 0.1f) : 1.0f / 60;
+    last = ts;
+    // ponytail: 40 degree range with a fixed smoothing constant; tune on the Myahm Agana maze.
+    const float range = 0.70f, k = 1 - expf(-dt * 12);
+    float target[2] = {sy * range, sx * range}, rate[2];
+    for (int i = 0; i < 2; i++) {
+        float next = g_tilt[i] + (target[i] - g_tilt[i]) * k;
+        rate[i] = dt > 0 ? (next - g_tilt[i]) / dt : 0;
+        g_tilt[i] = next;
+    }
+    float p = g_tilt[0], r = g_tilt[1];
+    const float acc[3] = {9.81f * sinf(r) * cosf(p), 9.81f * cosf(r) * cosf(p), 9.81f * sinf(p)};  // flat: +y
+    const float gyro[3] = {rate[0], 0, rate[1]};
+    feed(true, gyro, ts);
+    feed(false, acc, ts + 1);
+    return true;
+}
+
+namespace {
+void feed(bool gyro, const float data[3], uint64_t ts) {
     std::lock_guard<std::mutex> l(g_lock);
     uint64_t& last = gyro ? g_ts_gyro : g_ts_acc;
     if (ts <= last) return;
@@ -138,6 +176,7 @@ void motion_sensor(bool gyro, const float data[3], uint64_t ts) {
         g_has_acc = g_has_gyro = false;
     }
 }
+}  // namespace
 
 void motion_reset() {
     std::lock_guard<std::mutex> l(g_lock);

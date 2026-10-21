@@ -32,4 +32,8 @@ struct Motion {
 void motion_sensor(bool gyro, const float data[3], uint64_t timestamp_ns);  // SDL units: rad/s, m/s^2
 void motion_reset();
 bool motion(Motion* out);  // false until a controller with motion sensors reports
+// Controllers without a gyro (every Xbox pad): while tilt mode is on, the right stick tilts a virtual GamePad.
+// Tilt mode follows the game's motion-puzzle state (set_tilt_mode); BOTW_VIRTUAL_TILT=1 forces it on for tests.
+void set_tilt_mode(bool on);
+bool virtual_tilt(float sx, float sy, uint64_t timestamp_ns);  // false when a real sensor drives motion
 }  // namespace input

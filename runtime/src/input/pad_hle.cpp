@@ -1,6 +1,7 @@
 // vpad / vpadbase / padscore HLE. The GamePad (VPAD channel 0) is fed from input::gamepad();
 // no Wii Remotes / Pro Controllers are reported (WPADProbe -> no controller).
 #include <algorithm>
+#include <chrono>
 
 #include "../hle.h"
 #include "input.h"
@@ -42,6 +43,8 @@ HLE_EXPORT(vpad, VPADRead) {
     wf(buf + 0x14, s.rx);
     wf(buf + 0x18, s.ry);
     wf(buf + 0x30, 1.0f);  // accXY
+    input::virtual_tilt(s.rx, s.ry, (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch()).count());
     input::Motion m;
     if (input::motion(&m)) {  // controller gyro / accelerometer
         for (int k = 0; k < 3; k++) {
