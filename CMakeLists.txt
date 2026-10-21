@@ -244,6 +244,10 @@ if(BOTW_PLATFORM STREQUAL "uwp")
   if(MSVC)
     target_compile_options(BotWRecomp PRIVATE /await:strict /permissive- /utf-8)
     target_link_options(BotWRecomp PRIVATE /SUBSYSTEM:WINDOWS /APPCONTAINER)
+    # DLLs NXbox does not import: load them on first use, so a console without one still starts and logs it.
+    target_link_options(BotWRecomp PRIVATE /DELAYLOAD:D3DCOMPILER_47.dll /DELAYLOAD:XAudio2_9.dll
+                        /DELAYLOAD:api-ms-win-gaming-deviceinformation-l1-1-0.dll)
+    target_link_libraries(BotWRecomp PRIVATE delayimp)
   endif()
 endif()
 # END W3 UWP host target configuration
