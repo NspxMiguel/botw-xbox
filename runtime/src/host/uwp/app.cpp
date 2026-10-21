@@ -15,6 +15,7 @@
 #include "launcher.h"
 #include "mod_network.h"
 #include "qr.h"
+#include "quick_view.h"
 #include "runtime.h"
 #include "setup_storage.h"
 #include "strings.h"
@@ -29,6 +30,7 @@
 #include <winrt/Windows.ApplicationModel.Activation.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Gaming.Input.h>
 #include <winrt/Windows.Globalization.h>
@@ -181,11 +183,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool failed = false, foreground = true, suspended = false, opening = false;
     uwp::Preferences preferences;
     uwp::Controller controller;
+    uwp::HoldChord quick_chord;
+    uwp::setup::Repeat quick_repeat;
+    bool quick_was_open = false;
+    float render_scale_choice = 0;
     uwp::GameArt art;
     uwp::ArtView home;
     bool mods_open = false, browser_open = false, text_entry = false, transfer_active = false;
     bool setup_active = false, setup_busy = false, setup_guide = false;
     int setup_action = 0;
+    bool accepted_forms = false, setup_detect = false;
     uwp::setup::Progress setup_progress;
     uwp::setup::Repeat setup_repeat;
     std::string setup_error, saved_usb_mode, saved_game_source;
@@ -199,7 +206,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     uint32_t home_buttons = ~uint32_t(0);
     std::chrono::steady_clock::time_point loading_since{};
     event_token key_down{}, pointer_pressed{};
-    StorageFolder local{nullptr}, selected_game{nullptr};
+    StorageFolder local{nullptr}, selected_game{nullptr}, screenshots{nullptr};
     std::vector<uwp::Candidate> candidates;
     Gamepad pad{nullptr};
     std::chrono::steady_clock::time_point next_rumble{};
@@ -259,9 +266,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 e.Handled(true);
                 // Real pads use the repeat/edge sampler below; virtual keys also support remote input.
                 if (pad && (key == VirtualKey::GamepadA || key == VirtualKey::GamepadB ||
+                            key == VirtualKey::GamepadX ||
                             key == VirtualKey::GamepadDPadUp || key == VirtualKey::GamepadDPadDown ||
                             key == VirtualKey::GamepadDPadLeft || key == VirtualKey::GamepadDPadRight))
                     return;
+                if (key == VirtualKey::GamepadX && setup_detect && !setup_busy) {
+                    accepted_forms = !accepted_forms;
+                    setup_action = -5;
+                }
                 if (key == VirtualKey::GamepadA)
                     key = VirtualKey::Enter;
                 if (key == VirtualKey::GamepadDPadUp)
@@ -543,6 +555,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto row_enabled = home.row_enabled;
         bool mods_mode = home.mods_mode;
         bool setup_mode = home.setup_mode;
+        bool diagnostics_mode = home.diagnostics_mode;
+        auto issue_kinds = home.issue_kinds;
+        auto issue_notes = home.issue_notes;
         bool silver_setup = home.silver_setup, missing_game = home.missing_game;
         double flip_time = home.flip_time;
         auto modules = home.qr_modules;
@@ -558,6 +573,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             home.row_enabled = std::move(row_enabled);
             home.mods_mode = mods_mode;
             home.setup_mode = setup_mode;
+            home.diagnostics_mode = diagnostics_mode;
+            home.issue_kinds = std::move(issue_kinds);
+            home.issue_notes = std::move(issue_notes);
             home.silver_setup = silver_setup;
             home.missing_game = missing_game;
             home.flip_time = flip_time;
@@ -604,6 +622,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             show_home();
         home.shown = true;
         home.setup_mode = true;
+        home.silver_setup = true;
+        home.diagnostics_mode = false;
         home.mods_mode = false;
         home.loading = false;
         home.heading = setup_label(title);
@@ -638,7 +658,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         setup_progress.total = 0;
         setup_error.clear();
         home.selected = -1;
-        home.rows.clear();
+        if (!home.diagnostics_mode)
+            home.rows.clear();
         home.loading_text = setup_label(uwp::Text::setup_cancel);
         std::string error;
         co_await resume_background();
@@ -677,12 +698,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             App &app;
             ~SetupGuard() {
                 app.setup_active = false;
+                app.setup_detect = false;
                 app.setup_busy = false;
                 app.home.setup_mode = false;
+                app.home.diagnostics_mode = false;
                 app.home.shown = false;
                 app.home.qr_modules.clear();
             }
         } guard{*this};
+        uwp::setup::DiagnosticCache diagnostic_cache;
         uwp::setup::Item selected;
         StorageFolder game{nullptr};
         uint64_t game_size = 0;
@@ -691,6 +715,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         for (;;) {
             if (quit)
                 co_return;
+            setup_detect = state.step == Step::detect;
             if (state.step == Step::welcome) {
                 setup_page(Text::setup_welcome, setup_label(Text::setup_intro),
                            {setup_label(Text::setup_next)});
@@ -725,16 +750,88 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                            setup_label(state.drive_removed ? Text::drive_removed : Text::setup_search));
                 std::vector<uwp::setup::Item> items;
                 while (state.step == Step::detect && !quit) {
-                    // Enumeration is fresh every second. No persisted drive letters or stale picker tokens.
-                    co_await setup_work([&] { items = uwp::setup::scan(local); });
-                    home.loading_text = setup_label(Text::setup_hints);
+                    std::vector<uwp::setup::Diagnosis> diagnoses;
+                    co_await setup_work([&] {
+                        items = uwp::setup::scan(local);
+                        diagnoses = uwp::setup::scan_diagnostics(local, diagnostic_cache);
+                        for (auto &item : items) {
+                            if (item.format != uwp::setup::Format::folder || item.layers.empty())
+                                continue;
+                            std::vector<uwp::setup::Probe> layers;
+                            for (auto &layer : item.layers) {
+                                if (layer.prefix == "dlc/")
+                                    continue;
+                                layers.push_back(uwp::setup::storage_probe(layer.folder));
+                                auto path = to_string(layer.folder.Path());
+                                std::erase_if(diagnoses, [&](auto &d) {
+                                    return d.folder == path && d.format == uwp::setup::Format::folder;
+                                });
+                            }
+                            diagnoses.push_back(
+                                uwp::setup::diagnose(uwp::setup::layered_probe(std::move(layers)),
+                                                     to_string(item.folder.Path()), item.format));
+                        }
+                    });
                     home.rows.clear();
+                    home.issue_kinds.clear();
+                    home.issue_notes.clear();
+                    std::vector<int> item_rows;
+                    auto row = [&](std::wstring path, std::wstring note, int kind = -1, int item = -1) {
+                        home.rows.push_back(std::move(path));
+                        home.issue_notes.push_back(std::move(note));
+                        home.issue_kinds.push_back(kind);
+                        item_rows.push_back(item);
+                    };
+                    bool partial = false, keys_only = true;
+                    for (auto &d : diagnoses)
+                        if (d.incomplete()) {
+                            partial = true;
+                            keys_only &= std::all_of(d.issues.begin(), d.issues.end(), [](auto &issue) {
+                                return issue.kind == uwp::setup::IssueKind::keys;
+                            });
+                            row(to_hstring(d.source.empty() ? d.folder : d.folder + "/" + d.source).c_str(),
+                                L"");
+                            for (auto &issue : d.issues)
+                                row(to_hstring(issue.path).c_str(), uwp::setup::issue_text(issue, pt),
+                                    int(issue.kind));
+                            if (d.format == uwp::setup::Format::wud || d.format == uwp::setup::Format::wux)
+                                row(setup_label(Text::keys_missing), setup_label(Text::own_keys));
+                            else
+                                row(setup_label(Text::copy_missing) + std::wstring(to_hstring(d.folder)) +
+                                        setup_label(Text::copy_missing_end), L"");
+                        }
+                    for (size_t i = 0; i < items.size(); ++i) {
+                        auto &item = items[i];
+                        if (item.file && !std::any_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
+                                return d.folder == to_string(item.folder.Path()) && d.format == item.format &&
+                                       d.source == to_string(item.file.Name());
+                            }))
+                            continue;
+                        bool bad = std::any_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
+                            if (!d.incomplete() || d.folder != to_string(item.folder.Path()))
+                                return false;
+                            return d.format == item.format &&
+                                   (!item.file || d.source == to_string(item.file.Name()));
+                        });
+                        if (!bad)
+                            row(item.name, setup_label(Text::setup_next), -1, int(i));
+                    }
+                    if (diagnoses.empty() || accepted_forms) {
+                        for (auto key : {Text::accepted_folder, Text::accepted_disc, Text::accepted_nus,
+                                         Text::accepted_wua, Text::accepted_archive})
+                            row(setup_label(key), L"");
+                    }
+                    home.diagnostics_mode = partial || diagnoses.empty() || accepted_forms;
+                    home.heading =
+                        setup_label(partial ? (keys_only ? Text::keys_missing : Text::files_missing)
+                                    : diagnoses.empty() || accepted_forms ? Text::accepted_forms
+                                                                          : Text::setup_insert);
+                    home.detail.clear();
+                    home.loading_text = setup_label(Text::diagnostic_hints);
                     home.selected = -1;
-                    for (auto &item : items)
-                        home.rows.push_back(item.name);
-                    home.focus = std::clamp(home.focus, 0, std::max(0, int(items.size()) - 1));
+                    home.focus = std::clamp(home.focus, 0, std::max(0, int(home.rows.size()) - 1));
                     auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
-                    while (!quit && home.selected < 0 && setup_action != -2 &&
+                    while (!quit && home.selected < 0 && !setup_action &&
                            std::chrono::steady_clock::now() < until) {
                         co_await resume_after(std::chrono::milliseconds(16));
                         co_await resume_foreground(dispatcher);
@@ -745,16 +842,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         state.back();
                         break;
                     }
-                    if (home.selected >= 0 && size_t(home.selected) < items.size()) {
-                        selected = items[size_t(home.selected)];
-                        if (selected.format == uwp::setup::Format::seven_zip) {
-                            setup_page(Text::setup_insert, setup_label(Text::unsupported),
-                                       {setup_label(Text::back)});
-                            co_await setup_choice();
-                            setup_action = 0;
-                            home.selected = -1;
-                            continue;
-                        }
+                    if (setup_action == -5) {
+                        setup_action = 0;
+                        continue;
+                    }
+                    if (home.selected >= 0 && size_t(home.selected) < item_rows.size() &&
+                        item_rows[size_t(home.selected)] >= 0) {
+                        selected = items[size_t(item_rows[size_t(home.selected)])];
+                        home.diagnostics_mode = false;
                         state.found();
                     }
                 }
@@ -792,6 +887,21 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                                 ? L"\n\n" + setup_label(Text::setup_keys)
                                                 : L""),
                                        {setup_label(Text::retry)});
+                            if (selected.file && message == Text::setup_failed) {
+                                home.heading = setup_label(Text::files_missing);
+                                home.diagnostics_mode = true;
+                                home.rows = {
+                                    std::wstring(selected.folder.Path()), std::wstring(selected.file.Name()),
+                                    setup_label(Text::copy_missing) + std::wstring(selected.folder.Path()) +
+                                        setup_label(Text::copy_missing_end)};
+                                home.issue_kinds = {-1, int(uwp::setup::IssueKind::incomplete), -1};
+                                home.issue_notes = {L"",
+                                                    setup_error == "Extract .7z on a PC"
+                                                        ? setup_label(Text::unsupported)
+                                                        : setup_label(Text::fix_incomplete),
+                                                    L""};
+                                home.loading_text = setup_label(Text::diagnostic_hints);
+                            }
                             co_await setup_choice();
                         }
                         state.step = Step::detect;
@@ -1777,6 +1887,112 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         neutral();
         uwp::pause_audio(!visible.load());
     }
+    void update_quick_rows() {
+        std::lock_guard lock(uwp::quick_menu.mutex);
+        auto &q = uwp::quick_menu;
+        q.title = setup_label(uwp::Text::quick_menu);
+        q.hints = setup_label(uwp::Text::quick_hints);
+        q.rows = {setup_label(uwp::Text::resume),
+                  setup_label(uwp::Text::launcher_home),
+                  setup_label(uwp::Text::render_scale) + L": " +
+                      std::to_wstring(render_scale_choice).substr(0, 3) + L"× — " +
+                      setup_label(uwp::Text::scale_restart),
+                  setup_label(uwp::Text::fps) + L": " + std::to_wstring(preferences.fps),
+                  setup_label(uwp::Text::mods),
+                  setup_label(uwp::Text::volume) + L": " + std::to_wstring(preferences.volume) + L"%",
+                  setup_label(uwp::Text::screenshot),
+                  setup_label(uwp::Text::quit_game)};
+    }
+    fire_and_forget return_home(bool mods) {
+        auto lifetime = get_strong();
+        try {
+            // Guest address-space teardown is unavailable. A restart preserves saves/preferences,
+            // and the one-shot destination suppresses auto boot without changing its setting.
+            auto values = ApplicationData::Current().LocalSettings().Values();
+            values.Insert(L"launcherDestination", box_value(mods ? hstring(L"mods") : hstring(L"home")));
+            auto reason = co_await CoreApplication::RequestRestartAsync(L"launcher");
+            (void)reason;
+            std::lock_guard lock(uwp::quick_menu.mutex);
+            uwp::quick_menu.hints = setup_label(uwp::Text::restart_failed);
+        } catch (...) {
+            std::lock_guard lock(uwp::quick_menu.mutex);
+            uwp::quick_menu.hints = setup_label(uwp::Text::restart_failed);
+        }
+    }
+    fire_and_forget capture_screenshot() {
+        auto lifetime = get_strong();
+        try {
+            if (!screenshots)
+                screenshots =
+                    co_await local.CreateFolderAsync(L"screenshots", CreationCollisionOption::OpenIfExists);
+            auto name = L"BotW-" +
+                        std::to_wstring(std::chrono::system_clock::now().time_since_epoch().count()) +
+                        L".png";
+            {
+                std::lock_guard lock(uwp::quick_menu.mutex);
+                uwp::quick_menu.screenshot_path = std::wstring(screenshots.Path()) + L"\\" + name;
+            }
+            if (uwp::quick_menu.requested)
+                uwp::quick_menu.capture = true;
+        } catch (...) {
+            uwp::quick_menu.capture_result = -1;
+        }
+    }
+    void poll_quick(const GamepadReading &reading, double now) {
+        if (!uwp::quick_menu.paused)
+            return;
+        auto buttons = uint32_t(reading.Buttons);
+        if (reading.LeftThumbstickY > .5)
+            buttons |= uwp::up;
+        if (reading.LeftThumbstickY < -.5)
+            buttons |= uwp::down;
+        if (reading.LeftThumbstickX < -.5)
+            buttons |= uwp::left;
+        if (reading.LeftThumbstickX > .5)
+            buttons |= uwp::right;
+        auto pressed = quick_repeat.update(buttons, uwp::up | uwp::down | uwp::left | uwp::right, now);
+        if ((pressed & uwp::b) || ((pressed & uwp::menu) && !(buttons & uwp::view))) {
+            uwp::quick_menu.requested = false;
+            return;
+        }
+        int focus;
+        {
+            std::lock_guard lock(uwp::quick_menu.mutex);
+            auto &q = uwp::quick_menu;
+            if (pressed & uwp::up)
+                q.focus = (q.focus + 7) % 8;
+            if (pressed & uwp::down)
+                q.focus = (q.focus + 1) % 8;
+            focus = q.focus;
+        }
+        if (!(pressed & (uwp::a | uwp::left | uwp::right)))
+            return;
+        bool activate = (pressed & uwp::a) != 0;
+        if (focus == 0 && activate)
+            uwp::quick_menu.requested = false;
+        else if (focus == 1 && activate)
+            return_home(false);
+        else if (focus == 2) {
+            render_scale_choice = uwp::cycle_scale(render_scale_choice, uwp::runtime_max_render_scale());
+            ApplicationData::Current().LocalSettings().Values().Insert(L"renderScale",
+                                                                       box_value(render_scale_choice));
+        } else if (focus == 3) {
+            preferences.fps = preferences.fps == 30 ? 60 : 30;
+            save_preferences();
+        } else if (focus == 4 && activate)
+            return_home(true);
+        else if (focus == 5) {
+            preferences.volume = std::clamp(preferences.volume + (pressed & uwp::left ? -10 : 10), 0, 100);
+            save_preferences();
+        } else if (focus == 6 && activate) {
+            capture_screenshot();
+        } else if (focus == 7 && activate) {
+            quit = true;
+            uwp::quick_menu.requested = false;
+            CoreApplication::Exit();
+        }
+        update_quick_rows();
+    }
     IAsyncAction menu(bool allow_auto) {
         if (menu_open)
             co_return;
@@ -1867,6 +2083,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 pt = languages.Size() && std::wstring_view(languages.GetAt(0)).starts_with(L"pt");
                 local = ApplicationData::Current().LocalFolder();
                 read_preferences();
+                auto values = ApplicationData::Current().LocalSettings().Values();
+                render_scale_choice = unbox_value_or<float>(values.TryLookup(L"renderScale"), 0.f);
+                uwp::set_runtime_render_scale(render_scale_choice);
                 auto dispatcher = host_window.Dispatcher();
                 co_await resume_background();
                 bool setup_done = local.TryGetItemAsync(L"setup_done.txt").get() != nullptr;
@@ -1881,6 +2100,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 co_await local.CreateFolderAsync(L"art", CreationCollisionOption::OpenIfExists);
                 co_await scan();
             }
+            auto values = ApplicationData::Current().LocalSettings().Values();
+            auto destination = unbox_value_or<hstring>(values.TryLookup(L"launcherDestination"), L"");
+            if (!destination.empty()) {
+                values.Remove(L"launcherDestination");
+                startup = false;
+            }
+            if (destination == L"mods")
+                co_await manage_mods();
             co_await menu(startup);
         } catch (hresult_error const &e) {
             failed = true;
@@ -1918,6 +2145,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto pads = Gamepad::Gamepads();
         Gamepad current = pads.Size() ? pads.GetAt(0) : nullptr;
         if (current != pad) {
+            quick_chord = {};
             neutral();
             pad = current;
         }
@@ -1953,6 +2181,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
                             .count();
                     pressed = setup_repeat.update(buttons, uwp::up | uwp::down | uwp::left | uwp::right, now);
+                    if ((pressed & uwp::x) && setup_detect && !setup_busy) {
+                        accepted_forms = !accepted_forms;
+                        setup_action = -5;
+                    }
                     if (pressed & uwp::b) {
                         if (setup_busy)
                             setup_progress.cancel = true;
@@ -2018,18 +2250,93 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 home_buttons = buttons;
             }
         }
-        if (!pad || !running || menu_open || !visible)
+        if (quick_was_open && !uwp::quick_menu.requested && !uwp::quick_menu.paused) {
+            quick_was_open = false;
+            menu_visible = false;
+            neutral();
+            uwp::pause_audio(!visible.load());
+        }
+        if (!running || menu_open || !visible)
             return;
-        auto r = pad.GetCurrentReading();
-        auto mapped =
-            controller.update({static_cast<uint32_t>(r.Buttons), r.LeftThumbstickX, r.LeftThumbstickY,
-                               r.RightThumbstickX, r.RightThumbstickY, r.LeftTrigger, r.RightTrigger},
-                              layout);
-        input::set_gamepad(mapped.pad);
-        if (mapped.return_to_menu) {
-            open_menu(false);
+        GamepadReading r{};
+        double seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (uwp::quick_menu.requested) {
+            // Sample all connected pads and a physical keyboard, even after the opening pad leaves.
+            uint32_t buttons = 0;
+            for (auto other : pads) {
+                auto reading = other.GetCurrentReading();
+                buttons |= uint32_t(reading.Buttons);
+                if (reading.LeftThumbstickY > .5)
+                    buttons |= uwp::up;
+                if (reading.LeftThumbstickY < -.5)
+                    buttons |= uwp::down;
+                if (reading.LeftThumbstickX < -.5)
+                    buttons |= uwp::left;
+                if (reading.LeftThumbstickX > .5)
+                    buttons |= uwp::right;
+            }
+            bool keyboard = winrt::Windows::Devices::Input::KeyboardCapabilities().KeyboardPresent() != 0;
+            if (!pads.Size() && !keyboard) {
+                uwp::quick_menu.requested = false;
+                return;
+            }
+            if (keyboard) {
+                using winrt::Windows::System::VirtualKey;
+                for (auto [key, button] : {std::pair{VirtualKey::Up, uwp::up},
+                                           {VirtualKey::Down, uwp::down},
+                                           {VirtualKey::Left, uwp::left},
+                                           {VirtualKey::Right, uwp::right},
+                                           {VirtualKey::Enter, uwp::a},
+                                           {VirtualKey::Space, uwp::a},
+                                           {VirtualKey::Escape, uwp::b}})
+                    if ((host_window.GetKeyState(key) & CoreVirtualKeyStates::Down) !=
+                        CoreVirtualKeyStates::None)
+                        buttons |= button;
+            }
+            r.Buttons = GamepadButtons(buttons);
+            poll_quick(r, seconds);
+            int capture = uwp::quick_menu.capture_result.exchange(0);
+            if (capture) {
+                std::lock_guard lock(uwp::quick_menu.mutex);
+                uwp::quick_menu.hints =
+                    setup_label(capture > 0 ? uwp::Text::screenshot_saved : uwp::Text::screenshot_failed);
+            }
             return;
         }
+        if (quick_was_open || !pad)
+            return;
+        r = pad.GetCurrentReading();
+        if (quick_chord.update(uint32_t(r.Buttons), seconds)) {
+            neutral();
+            menu_visible = true;
+            quick_was_open = true;
+            uwp::pause_audio(true);
+            if (render_scale_choice <= 0)
+                render_scale_choice = uwp::runtime_render_scale();
+            {
+                std::lock_guard lock(uwp::quick_menu.mutex);
+                uwp::quick_menu.focus = 0;
+                uwp::quick_menu.reduced_motion =
+                    !winrt::Windows::UI::ViewManagement::UISettings().AnimationsEnabled();
+            }
+            update_quick_rows();
+            quick_repeat = {};
+            quick_repeat.held = uint32_t(r.Buttons);
+            uwp::quick_menu.requested = true;
+            return;
+        }
+        auto guest_buttons = quick_chord.guest_buttons;
+        bool replay_pair = (guest_buttons & (uwp::view | uwp::menu)) == (uwp::view | uwp::menu);
+        // This host already arbitrates the chord. Replay an aborted pair without
+        // re-triggering Controller's immediate return-to-menu shortcut.
+        auto mapped = controller.update(
+            {replay_pair ? guest_buttons & ~(uwp::view | uwp::menu) : guest_buttons, r.LeftThumbstickX,
+             r.LeftThumbstickY, r.RightThumbstickX, r.RightThumbstickY, r.LeftTrigger, r.RightTrigger},
+            layout);
+        if (replay_pair)
+            mapped.pad.buttons |= input::BTN_PLUS | input::BTN_MINUS;
+        input::set_gamepad(mapped.pad);
         if (mapped.toggle_gamepad_screen)
             drc = !drc.load();
         auto now = std::chrono::steady_clock::now();
@@ -2080,6 +2387,15 @@ namespace uwp {
 void *core_window() { return host_window ? get_abi(host_window) : nullptr; }
 bool gamepad_screen_requested() { return drc; }
 bool presentation_allowed() { return visible; }
+void present_quick_menu(void *device, void *queue, void *chain) {
+    try {
+        draw_quick_menu(device, queue, chain);
+    } catch (const std::exception &) {
+        quick_menu.requested = false;
+        quick_menu.paused = false;
+        OutputDebugStringW(L"BotW: quick menu graphics failed.\n");
+    }
+}
 void set_visibility_callback(VisibilityCallback callback) { visibility_callback = callback; }
 } // namespace uwp
 namespace window {

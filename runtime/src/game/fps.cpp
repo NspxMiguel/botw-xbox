@@ -1,3 +1,6 @@
+#if defined(BOTW_PLATFORM_UWP)
+#include "../host/uwp/quick_menu.h"
+#endif
 // 60 fps (--fps 60). Finding and approach credit: Cemu's FPS++ pack (Xalphenos, rajkosto, epigramx,
 // Crementif, leoetlino, Pig, Exzap); this is an independent host-side implementation of the same idea.
 //
@@ -41,7 +44,11 @@ BOTW_HOOK(0x031faae8) {
 // swap has flipped, so a frame that misses a vblank waits for the next one (30 fps). At 60 fps pace
 // with the GPU fence only, so slow frames show at e.g. 45 fps instead of dropping to 30.
 BOTW_HOOK(0x031faccc) {  // stwu r1, -32(r1) on entry
-    if (fps60() && !g_cap30) g_skip_vsync_wait = true;
+#if defined(BOTW_PLATFORM_UWP)
+  uwp::wait_for_guest_resume();
+#endif
+  if (fps60() && !g_cap30)
+    g_skip_vsync_wait = true;
 }
 BOTW_HOOK(0x031facec) {  // lwz r0, 8(r1): swap count, compared against the flip count in r12 next
     if (fps60() && !g_cap30) c->r[12] = c->r[0];

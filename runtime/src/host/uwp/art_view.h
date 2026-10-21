@@ -3,6 +3,7 @@
 // Header-only so the host's existing source list remains sufficient.
 #include "art.h"
 #include "materials.h"
+#include "ui_style.h"
 #include <chrono>
 #include <d2d1.h>
 #include <d2d1_1.h>
@@ -28,13 +29,7 @@ inline constexpr UINT32 D2D1_3DPERSPECTIVETRANSFORM_PROP_ROTATION_ORIGIN = 6;
 inline constexpr UINT32 D2D1_3DPERSPECTIVETRANSFORM_PROP_ROTATION = 7;
 #endif
 namespace uwp {
-namespace art_style {
-inline constexpr float width = 1280, height = 720, button_h = 56;
-inline constexpr float margin = 64;
-inline constexpr float title_size = 34, body_size = 17;
-inline D2D1_COLOR_F black(float alpha = 1) { return D2D1::ColorF(0, 0, 0, alpha); }
-inline D2D1_COLOR_F white(float alpha = 1) { return D2D1::ColorF(1, 1, 1, alpha); }
-} // namespace art_style
+
 class ArtView {
     template <class T> using Ptr = Microsoft::WRL::ComPtr<T>;
     Ptr<ID3D11Device> device;
@@ -54,7 +49,7 @@ class ArtView {
     std::chrono::steady_clock::time_point last_tick{};
     double elapsed = 0;
     Ptr<IDWriteFactory> fonts;
-    Ptr<IDWriteTextFormat> title_font, body_font;
+    Ptr<IDWriteTextFormat> title_font, body_font, mono_font;
     Ptr<ID2D1Bitmap> hero, disc;
     Ptr<ID2D1PathGeometry> disc_mask;
     Ptr<ID2D1Layer> disc_layer;
@@ -95,7 +90,9 @@ class ArtView {
     ArtColor accent;
     std::wstring heading, detail, loading_text;
     // Mods share the home surface before boot; seven visible 56px pill targets.
-    bool setup_mode = false;
+    bool setup_mode = false, diagnostics_mode = false;
+    std::vector<int> issue_kinds;
+    std::vector<std::wstring> issue_notes;
     float progress = -1;
     std::vector<std::vector<bool>> qr_modules;
     bool mods_mode = false;
@@ -103,8 +100,9 @@ class ArtView {
     std::vector<bool> row_enabled;
     bool enabled(size_t row) const { return row >= row_enabled.size() || row_enabled[row]; }
     size_t first_row() const {
-        return setup_mode ? (focus < 3 ? 0 : static_cast<size_t>(focus - 2))
-                          : (focus < 6 ? 0 : static_cast<size_t>(focus - 5));
+        return diagnostics_mode ? (focus < 7 ? 0 : static_cast<size_t>(focus - 6))
+               : setup_mode     ? (focus < 3 ? 0 : static_cast<size_t>(focus - 2))
+                                : (focus < 6 ? 0 : static_cast<size_t>(focus - 5));
     }
     int action_count() const { return (mods_mode || setup_mode) ? static_cast<int>(rows.size()) : 3; }
     void step(int delta) {
@@ -196,6 +194,9 @@ class ArtView {
                                       DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
                                       art_style::body_size, L"", &body_font));
         check(target->CreateSolidColorBrush(art_style::white(), &brush));
+        check(fonts->CreateTextFormat(L"Consolas", nullptr, DWRITE_FONT_WEIGHT_NORMAL,
+                                      DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL,
+                                      art_style::body_size, L"", &mono_font));
         // Three stops; the upper half stays untouched and the footer closes to near-black.
         D2D1_GRADIENT_STOP stops[] = {
             {.5f, art_style::black(0)}, {.82f, art_style::black(.82f)}, {1, art_style::black(.98f)}};
@@ -227,8 +228,14 @@ class ArtView {
         y *= art_style::height / pixel_h;
         if (mods_mode || setup_mode) {
             auto first = first_row();
-            for (size_t i = first; i < rows.size() && i < first + (setup_mode ? 3 : 7); ++i) {
-                float top = (setup_mode ? 440.f : 160.f) + (i - first) * 64;
+            for (size_t i = first; i < rows.size() && i < first + (diagnostics_mode ? 7
+                                                                   : setup_mode     ? 3
+                                                                                    : 7);
+                 ++i) {
+                float top = (diagnostics_mode ? 124.f
+                             : setup_mode     ? 440.f
+                                              : 160.f) +
+                            (i - first) * (diagnostics_mode ? 70.f : 64.f);
                 if (x >= art_style::margin && x <= art_style::width - art_style::margin && y >= top &&
                     y <= top + art_style::button_h && enabled(i))
                     return static_cast<int>(i);
@@ -361,6 +368,53 @@ class ArtView {
                 target->DrawBitmap(silver_bg.Get(), D2D1::RectF(0, 0, width, height));
             brush->SetColor(silver_setup ? black(.92f) : white());
             text(heading, D2D1::RectF(margin, 48, width - margin, 100), true);
+            if (diagnostics_mode) {
+                auto first = first_row();
+                for (size_t i = first; i < rows.size() && i < first + 7; ++i) {
+                    float y = 124 + float(i - first) * 70;
+                    int kind = i < issue_kinds.size() ? issue_kinds[i] : -1;
+                    if (int(i) == focus) {
+                        brush->SetColor(white(.75f));
+                        target->FillRoundedRectangle(
+                            D2D1::RoundedRect(D2D1::RectF(margin, y, width - margin, y + 66), 28, 28),
+                            brush.Get());
+                    }
+                    if (kind >= 0) {
+                        // Vector warning triangle; no font or emoji dependency.
+                        Ptr<ID2D1PathGeometry> triangle;
+                        check(factory->CreatePathGeometry(&triangle));
+                        Ptr<ID2D1GeometrySink> sink;
+                        check(triangle->Open(&sink));
+                        sink->BeginFigure(D2D1::Point2F(margin + 20, y + 8), D2D1_FIGURE_BEGIN_FILLED);
+                        sink->AddLine(D2D1::Point2F(margin + 9, y + 29));
+                        sink->AddLine(D2D1::Point2F(margin + 31, y + 29));
+                        sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        check(sink->Close());
+                        brush->SetColor(art_style::warning());
+                        target->FillGeometry(triangle.Get(), brush.Get());
+                        brush->SetColor(black());
+                        target->DrawLine(D2D1::Point2F(margin + 20, y + 14),
+                                         D2D1::Point2F(margin + 20, y + 21), brush.Get(), 2);
+                        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(margin + 20, y + 25), 1, 1),
+                                            brush.Get());
+                        brush->SetColor(kind == 0   ? art_style::missing()
+                                        : kind == 5 ? art_style::optional()
+                                                    : art_style::warning());
+                        target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(margin + 43, y + 20), 3, 3),
+                                            brush.Get());
+                    }
+                    brush->SetColor(black(.92f));
+                    target->DrawText(rows[i].c_str(), UINT32(rows[i].size()), mono_font.Get(),
+                                     D2D1::RectF(margin + 56, y + 5, width - margin - 12, y + 37),
+                                     brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                    if (i < issue_notes.size())
+                        text(issue_notes[i], D2D1::RectF(margin + 56, y + 32, width - margin - 12, y + 66));
+                }
+                brush->SetColor(black(.8f));
+                text(loading_text, D2D1::RectF(margin, 648, width - margin, 704));
+                finish_frame();
+                return;
+            }
             text(detail, D2D1::RectF(margin, 124, qr_modules.empty() ? width - margin : 920, 420));
             if (!qr_modules.empty()) {
                 float module = 5, left = 976, top = 136;

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "diagnostics.h"
 #include "formats/layout.h"
 #include "setup.h"
 #include <atomic>
@@ -21,6 +22,7 @@ struct __declspec(uuid("DF19938F-5462-48A0-BE65-D2A3271A08D6")) IStorageFolderHa
 };
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Storage.FileProperties.h>
+#include <winrt/Windows.Storage.Search.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Storage.h>
 namespace uwp::setup {
@@ -246,6 +248,79 @@ inline std::vector<Item> scan(Folder local) {
         std::remove_if(result.begin(), result.end(),
                        [&](auto &item) { return update_paths.contains(std::wstring(item.folder.Path())); }),
         result.end());
+    return result;
+}
+inline Probe storage_probe(Folder root) {
+    auto native = [](std::string path) {
+        std::replace(path.begin(), path.end(), '/', '\\');
+        return winrt::to_hstring(path);
+    };
+    return {[root, native](const std::string &s) -> std::optional<uint64_t> {
+                try {
+                    return root.GetFileAsync(native(s)).get().GetBasicPropertiesAsync().get().Size();
+                } catch (...) {
+                    return {};
+                }
+            },
+            [root, native](const std::string &s) {
+                try {
+                    return bool(root.GetFolderAsync(native(s)).get());
+                } catch (...) {
+                    return false;
+                }
+            },
+            [root, native](const std::string &s) {
+                try {
+                    return root.GetFolderAsync(native(s)).get().GetItemsAsync(0, 1).get().Size() != 0;
+                } catch (...) {
+                    return false;
+                }
+            },
+            [root, native](const std::string &s) { return open_reader(root.GetFileAsync(native(s)).get()); }};
+}
+inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &cache) {
+    std::vector<Diagnosis> result;
+    cache.begin();
+    std::function<void(Folder, unsigned)> walk = [&](Folder root, unsigned depth) {
+        try {
+            if (root.TryGetItemAsync(L"setup-source.txt").get() &&
+                !root.TryGetItemAsync(L"setup-complete.txt").get())
+                return;
+            auto p = storage_probe(root);
+            bool nus = p.file("title.tmd").has_value();
+            bool unpacked = looks_unpacked(p, winrt::to_string(root.Name()));
+            if (nus || unpacked)
+                result.push_back(
+                    diagnose(p, winrt::to_string(root.Path()), nus ? Format::nus : Format::folder));
+            for (auto file : root.GetFilesAsync().get())
+                if (auto format = file_format(winrt::to_string(file.FileType()))) {
+                    auto properties = file.GetBasicPropertiesAsync().get();
+                    if (auto d = cache.get(p, winrt::to_string(root.Path()), *format,
+                                           winrt::to_string(file.Name()), properties.Size(),
+                                           properties.DateModified().time_since_epoch().count()))
+                        result.push_back(std::move(*d));
+                }
+            if (!nus && depth < 2)
+                for (auto folder : root.GetFoldersAsync().get()) {
+                    auto name = folder.Name();
+                    if (!unpacked ||
+                        (name != L"code" && name != L"content" && name != L"meta" && name != L"aoc"))
+                        walk(folder, depth + 1);
+                }
+        } catch (...) { /* A hot-unplug is retried on the next scan. */
+        }
+    };
+    try {
+        auto game = local.GetFolderAsync(L"game").get();
+        walk(game, 0);
+    } catch (...) {
+    }
+    try {
+        for (auto drive : winrt::Windows::Storage::KnownFolders::RemovableDevices().GetFoldersAsync().get())
+            walk(drive, 0);
+    } catch (...) {
+    }
+    cache.end();
     return result;
 }
 inline uint64_t tree_size(Folder root, Progress &progress, unsigned depth = 0) {
