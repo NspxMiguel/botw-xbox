@@ -106,6 +106,60 @@ void recognition_tests(const fs::path &root) {
     cache.end();
     assert(cache.entries.empty());
 }
+void discovery_tests(const fs::path &root) {
+    // The unrelated emulator directory seen on Xbox must never become a BotW diagnosis.
+    auto unrelated = root / "Nativra/games/1145360";
+    write(unrelated, "content/unrelated.bin");
+    write(unrelated, "code/app.xml", "<title_id>0005000012345678</title_id>");
+    assert(!looks_unpacked(filesystem_probe(unrelated), "1145360"));
+    write(unrelated, "title.tmd", "unrelated");
+    assert(!looks_nus(filesystem_probe(unrelated), "1145360"));
+    assert(!game_name("1145360") && !game_name("0005000012345678"));
+    auto metadata = root / "metadata";
+    for (auto family : {"00050000", "0005000e", "0005000c"})
+        for (auto region : {"101c9300", "101c9400", "101c9500"}) {
+            std::string id = std::string(family) + region;
+            assert(game_name(id));
+            for (auto path : {"code/app.xml", "meta/meta.xml"}) {
+                fs::remove_all(metadata);
+                write(metadata, path, "<title_id>" + id + "</title_id>");
+                assert(looks_unpacked(filesystem_probe(metadata), "metadata"));
+            }
+        }
+    auto partial = root / "BotW-partial";
+    write(partial, "code/cos.xml");
+    auto complete = root / "NXbox/games/BotW";
+    write(complete, "code/U-King.rpx");
+    write(complete, "code/cos.xml");
+    write(complete, "code/app.xml", "<title_version>00d0</title_version>");
+    write(complete, "meta/meta.xml", "<title_id>00050000101c9400</title_id>");
+    write(complete, "content/Pack/Bootup.pack");
+    auto too_deep = root / "one/two/three/BotW";
+    write(too_deep, "code/cos.xml");
+    auto diagnoses = diagnose_tree(root);
+    assert(std::none_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
+        return d.folder == unrelated.generic_string() || d.folder == too_deep.generic_string();
+    }));
+    assert(std::any_of(diagnoses.begin(), diagnoses.end(),
+                       [&](auto &d) { return d.folder == complete.generic_string() && !d.incomplete(); }));
+    std::vector<fs::path> selectable;
+    for (auto &candidate : {partial, unrelated, complete, too_deep})
+        if (usable_source(diagnoses, candidate.generic_string(), Format::folder))
+            selectable.push_back(candidate);
+    assert(selectable == std::vector<fs::path>{complete});
+    assert(!usable_source(diagnoses, complete.generic_string(), Format::zip, "other.zip"));
+    auto second = root / "BotW-second";
+    fs::copy(complete, second, fs::copy_options::recursive);
+    diagnoses = diagnose_tree(root);
+    selectable.clear();
+    for (auto &candidate : {partial, complete, second})
+        if (usable_source(diagnoses, candidate.generic_string(), Format::folder))
+            selectable.push_back(candidate);
+    assert((selectable == std::vector<fs::path>{complete, second}));
+    fs::remove(complete / "content/Pack/Bootup.pack");
+    diagnoses = diagnose_tree(root);
+    assert(!usable_source(diagnoses, complete.generic_string(), Format::folder));
+}
 void chord_input_tests() {
     uwp::HoldChord chord;
     assert(!chord.update(uwp::menu | uwp::a, 0) && chord.guest_buttons == uwp::a);
@@ -145,6 +199,7 @@ int main() {
     } cleanup{root};
     recognition_tests(root / "recognition");
     chord_input_tests();
+    discovery_tests(root / "discovery");
     auto empty = root / "Zelda-empty";
     fs::create_directories(empty);
     exact(diagnose(filesystem_probe(empty), empty.string(), Format::folder),

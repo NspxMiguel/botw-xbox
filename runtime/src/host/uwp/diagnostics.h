@@ -57,17 +57,64 @@ inline std::string hex_id(uint64_t value, unsigned width) {
     out << std::hex << std::setfill('0') << std::setw(int(width)) << value;
     return out.str();
 }
+inline bool botw_title(uint64_t id) {
+    auto family = id >> 32;
+    auto title = uint32_t(id);
+    return (family == 0x00050000 || family == 0x0005000e || family == 0x0005000c) &&
+           (title == 0x101c9300 || title == 0x101c9400 || title == 0x101c9500);
+}
 inline bool game_name(std::string name) {
     std::transform(name.begin(), name.end(), name.begin(),
                    [](unsigned char c) { return char(std::tolower(c)); });
-    if (name.starts_with("botw") || name.starts_with("zelda"))
+    if (name.find("botw") != name.npos || name.find("zelda") != name.npos ||
+        name.find("breath of the wild") != name.npos)
         return true;
-    if (name.size() != 16)
+    if (name.size() != 16 ||
+        !std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isxdigit(c); }))
         return false;
-    return std::all_of(name.begin(), name.end(), [](unsigned char c) { return std::isxdigit(c); });
+    return botw_title(std::stoull(name, nullptr, 16));
 }
 inline bool looks_unpacked(const Probe &p, const std::string &name) {
-    return game_name(name) || p.directory("code") || p.directory("content") || p.directory("meta");
+    if (game_name(name))
+        return true;
+    for (auto path : {"code/app.xml", "meta/meta.xml"}) {
+        try {
+            if (!p.file(path))
+                continue;
+            auto r = p.reader(path);
+            if (r.size > 1024 * 1024)
+                continue;
+            auto bytes = r.bytes(0, size_t(r.size));
+            auto id = title_id(std::string(bytes.begin(), bytes.end()));
+            if (id && botw_title(*id))
+                return true;
+        } catch (...) {
+        }
+    }
+    return false;
+}
+inline bool looks_nus(const Probe &p, const std::string &name) {
+    if (looks_unpacked(p, name))
+        return true;
+    // NUS has binary title metadata rather than app.xml/meta.xml.
+    for (auto [path, offset] : {std::pair{"title.tik", 0x1dc}, std::pair{"title.tmd", 0x18c}}) {
+        try {
+            if (!p.file(path))
+                continue;
+            auto r = p.reader(path);
+            if (r.size >= unsigned(offset) + 8 && botw_title(formats::integer(r.bytes(offset, 8), 0, 8)))
+                return true;
+        } catch (...) {
+        }
+    }
+    return false;
+}
+// Discovery and the picker require a matching, complete diagnosis before offering a source.
+inline bool usable_source(const std::vector<Diagnosis> &diagnoses, const std::string &folder, Format format,
+                          const std::string &source = "") {
+    return std::any_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
+        return d.folder == folder && d.format == format && d.source == source && !d.incomplete();
+    });
 }
 inline Diagnosis diagnose(const Probe &p, std::string folder, Format format, const std::string &name = "") {
     Diagnosis d{std::move(folder), format, {}, name};
@@ -356,7 +403,7 @@ inline std::vector<Diagnosis> diagnose_tree(const std::filesystem::path &root) {
     std::vector<Diagnosis> result;
     std::function<void(std::filesystem::path, unsigned)> visit = [&](auto dir, unsigned depth) {
         auto p = filesystem_probe(dir);
-        bool nus = p.file("title.tmd").has_value();
+        bool nus = p.file("title.tmd").has_value() && looks_nus(p, dir.filename().string());
         bool unpacked = looks_unpacked(p, dir.filename().string());
         if (nus || unpacked)
             result.push_back(diagnose(p, dir.generic_string(), nus ? Format::nus : Format::folder));

@@ -86,8 +86,10 @@ The first launch opens a controller-driven setup, with an on-screen guide and a 
 **1.5.0 / v208**. The recommended layout on an exFAT or NTFS USB drive is `BotW/code/`,
 `BotW/content/`, `BotW/meta/`, and optionally `BotW/aoc/` for DLC. Decrypted folders need no keys.
 
-Setup scans removable drives automatically (through two folder levels), also checking
-`LocalState/game`; no Xbox folder picker is used. It accepts unpacked and split Loadiine dumps,
+Setup scans every removable drive automatically through three folder levels, including common
+`NXbox/`, `NXbox/games/`, `games/`, `wiiu/` and `BotW*` locations, also checking
+`LocalState/game`. A complete source takes priority over incomplete dumps; a single valid source
+continues automatically. If none is found, select its folder with the system picker or scan again. It accepts unpacked and split Loadiine dumps,
 `.wua` (ZArchive), `.wud`/`.wux`, NUS/installable titles, and `.zip`. Extract `.7z` on a PC first.
 Split base/update/DLC folders are matched by title ID; the update overrides the base and DLC
 content maps to `aoc/`. For encrypted images only, keep your own `otp.bin` (or validated

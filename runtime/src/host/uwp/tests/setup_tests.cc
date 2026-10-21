@@ -403,10 +403,15 @@ void setup_test() {
     std::ofstream(root / "install/title.tik") << "test";
     for (auto ext : {".wua", ".wud", ".wux", ".zip", ".7z"})
         std::ofstream(root / (std::string("game") + ext)) << "synthetic";
-    fs::create_directories(root / "a/b/deep");
-    std::ofstream(root / "a/b/deep/ignored.wux") << "x";
+    fs::create_directories(root / "a/b/deep/too-deep");
+    std::ofstream(root / "a/b/deep/found.wux") << "x";
+    std::ofstream(root / "a/b/deep/too-deep/ignored.wux") << "x";
     auto found = detect(root);
-    assert(found.size() == 7);
+    assert(found.size() == 8);
+    assert(std::any_of(found.begin(), found.end(),
+                       [](auto &item) { return item.path.filename() == "found.wux"; }));
+    assert(std::none_of(found.begin(), found.end(),
+                        [](auto &item) { return item.path.filename() == "ignored.wux"; }));
     std::set<Format> formats;
     for (auto &item : found)
         formats.insert(item.format);

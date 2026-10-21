@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "../../log.h"
 #include "diagnostics.h"
 #include "formats/layout.h"
 #include "setup.h"
@@ -16,11 +17,13 @@ enum HANDLE_CREATION_OPTIONS : unsigned { HCO_OPEN_EXISTING = 0x3 };
 struct IOplockBreakingHandler;
 struct __declspec(uuid("DF19938F-5462-48A0-BE65-D2A3271A08D6")) IStorageFolderHandleAccess : ::IUnknown {
     virtual HRESULT __stdcall Create(LPCWSTR fileName, HANDLE_CREATION_OPTIONS creationOptions,
-                                     HANDLE_ACCESS_OPTIONS accessOptions, HANDLE_SHARING_OPTIONS sharingOptions,
-                                     HANDLE_OPTIONS options, IOplockBreakingHandler *oplockBreakingHandler,
+                                     HANDLE_ACCESS_OPTIONS accessOptions,
+                                     HANDLE_SHARING_OPTIONS sharingOptions, HANDLE_OPTIONS options,
+                                     IOplockBreakingHandler *oplockBreakingHandler,
                                      HANDLE *interopHandle) = 0;
 };
 #include <winrt/Windows.Foundation.Collections.h>
+#include <winrt/Windows.Storage.AccessCache.h>
 #include <winrt/Windows.Storage.FileProperties.h>
 #include <winrt/Windows.Storage.Search.h>
 #include <winrt/Windows.Storage.Streams.h>
@@ -127,7 +130,10 @@ inline Space space(Folder root) {
         return {free.QuadPart, capacity.QuadPart, true};
     try {
         std::vector<winrt::hstring> keys{L"System.FreeSpace", L"System.Capacity"};
-        auto values = root.Properties().RetrievePropertiesAsync(winrt::single_threaded_vector<winrt::hstring>({keys[0], keys[1]})).get();
+        auto values =
+            root.Properties()
+                .RetrievePropertiesAsync(winrt::single_threaded_vector<winrt::hstring>({keys[0], keys[1]}))
+                .get();
         if (values.HasKey(keys[0]) && values.HasKey(keys[1])) {
             result = {winrt::unbox_value<uint64_t>(values.Lookup(keys[0])),
                       winrt::unbox_value<uint64_t>(values.Lookup(keys[1])), true};
@@ -157,7 +163,42 @@ inline bool game_folder(Folder root) {
         return false;
     }
 }
-inline std::vector<Item> scan(Folder local) {
+// Probe common locations directly as well as enumerating: a broker can expose a
+// known child even when listing its parent fails. Depth remains relative to the drive.
+template <typename Visit> inline void search_removable(Visit visit) {
+    try {
+        for (auto drive : winrt::Windows::Storage::KnownFolders::RemovableDevices().GetFoldersAsync().get()) {
+            LOG("Setup search drive: %s", winrt::to_string(drive.Path()).c_str());
+            for (auto path : {L"NXbox\\games", L"NXbox", L"games", L"wiiu", L"BotW"}) {
+                try {
+                    visit(drive.GetFolderAsync(path).get(), drive,
+                          std::wstring_view(path) == L"NXbox\\games" ? 2u : 1u);
+                } catch (winrt::hresult_error const &) {
+                }
+            }
+            try {
+                for (auto folder : drive.GetFoldersAsync().get())
+                    if (game_name(winrt::to_string(folder.Name())))
+                        visit(folder, drive, 1);
+            } catch (winrt::hresult_error const &) {
+            }
+            visit(drive, drive, 0);
+        }
+    } catch (winrt::hresult_error const &e) {
+        LOG("Setup drive enumeration failed: 0x%08x", unsigned(e.code().value));
+    }
+}
+inline Folder remembered_game() {
+    try {
+        auto access = winrt::Windows::Storage::AccessCache::StorageApplicationPermissions::FutureAccessList();
+        if (access.ContainsItem(L"game-folder"))
+            return access.GetFolderAsync(L"game-folder").get();
+    } catch (winrt::hresult_error const &) {
+        LOG("Setup remembered folder is unavailable");
+    }
+    return nullptr;
+}
+inline std::vector<Item> scan(Folder local, Folder remembered = nullptr) {
     std::vector<Item> result;
     struct Title {
         Folder folder{nullptr}, drive{nullptr};
@@ -172,7 +213,10 @@ inline std::vector<Item> scan(Folder local) {
             result.push_back({game, local, nullptr, Format::folder, std::wstring(game.Name())});
     } catch (winrt::hresult_error const &) {
     }
+    std::set<std::wstring> visited;
     std::function<void(Folder, Folder, unsigned)> walk = [&](Folder root, Folder drive, unsigned depth) {
+        if (!visited.insert(std::wstring(root.Path())).second)
+            return;
         try {
             if (auto id = title_id(read_text(root, L"code\\app.xml")))
                 titles.push_back(
@@ -204,11 +248,15 @@ inline std::vector<Item> scan(Folder local) {
         } catch (std::runtime_error const &) {   /* Malformed metadata is not a game candidate. */
         }
     };
-    try {
-        for (auto drive : winrt::Windows::Storage::KnownFolders::RemovableDevices().GetFoldersAsync().get())
-            walk(drive, drive, 0);
-    } catch (winrt::hresult_error const &) {
-    }
+    // Prefer the picker object over the same path exposed by removableStorage:
+    // its grant can expose files filtered out of drive enumeration.
+    if (!result.empty())
+        visited.insert(std::wstring(result.front().folder.Path()));
+    if (!remembered)
+        remembered = remembered_game();
+    if (remembered)
+        walk(remembered, remembered, 0);
+    search_removable(walk);
     // Pair split Loadiine/Dumpling folders by title family, never by translated display name.
     for (auto &item : result) {
         if ((item.format != Format::folder && item.format != Format::nus) ||
@@ -279,27 +327,48 @@ inline Probe storage_probe(Folder root) {
             },
             [root, native](const std::string &s) { return open_reader(root.GetFileAsync(native(s)).get()); }};
 }
-inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &cache) {
+inline void log_diagnosis(const Diagnosis &d) {
+    auto issue =
+        std::find_if(d.issues.begin(), d.issues.end(), [](auto &i) { return i.kind != IssueKind::optional; });
+    LOG("Setup candidate %s%s%s: %s%s", d.folder.c_str(), d.source.empty() ? "" : "/", d.source.c_str(),
+        d.incomplete() ? "incomplete; first issue: " : "valid", d.incomplete() ? issue->path.c_str() : "");
+}
+inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &cache,
+                                               Folder remembered = nullptr) {
     std::vector<Diagnosis> result;
     cache.begin();
+    std::set<std::wstring> visited;
     std::function<void(Folder, unsigned)> walk = [&](Folder root, unsigned depth) {
+        if (!visited.insert(std::wstring(root.Path())).second)
+            return;
         try {
             if (root.TryGetItemAsync(L"setup-source.txt").get() &&
                 !root.TryGetItemAsync(L"setup-complete.txt").get())
                 return;
             auto p = storage_probe(root);
-            bool nus = p.file("title.tmd").has_value();
+            bool nus = p.file("title.tmd").has_value() && looks_nus(p, winrt::to_string(root.Name()));
             bool unpacked = looks_unpacked(p, winrt::to_string(root.Name()));
-            if (nus || unpacked)
-                result.push_back(
-                    diagnose(p, winrt::to_string(root.Path()), nus ? Format::nus : Format::folder));
+            auto path = winrt::to_string(root.Path());
+            if (nus || unpacked || game_folder(root)) {
+                auto d = diagnose(p, path, nus ? Format::nus : Format::folder);
+                if (nus || unpacked || !d.incomplete()) {
+                    log_diagnosis(d);
+                    result.push_back(std::move(d));
+                } else
+                    LOG("Setup candidate %s: ignored", path.c_str());
+            } else
+                LOG("Setup candidate %s: ignored", path.c_str());
             for (auto file : root.GetFilesAsync().get())
                 if (auto format = file_format(winrt::to_string(file.FileType()))) {
                     auto properties = file.GetBasicPropertiesAsync().get();
                     if (auto d = cache.get(p, winrt::to_string(root.Path()), *format,
                                            winrt::to_string(file.Name()), properties.Size(),
-                                           properties.DateModified().time_since_epoch().count()))
+                                           properties.DateModified().time_since_epoch().count())) {
+                        log_diagnosis(*d);
                         result.push_back(std::move(*d));
+                    } else
+                        LOG("Setup candidate %s/%s: ignored", path.c_str(),
+                            winrt::to_string(file.Name()).c_str());
                 }
             if (!nus && depth < 3)
                 for (auto folder : root.GetFoldersAsync().get()) {
@@ -309,6 +378,7 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
                         walk(folder, depth + 1);
                 }
         } catch (...) { /* A hot-unplug is retried on the next scan. */
+            LOG("Setup candidate %s: ignored (unavailable)", winrt::to_string(root.Path()).c_str());
         }
     };
     try {
@@ -316,11 +386,11 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
         walk(game, 0);
     } catch (...) {
     }
-    try {
-        for (auto drive : winrt::Windows::Storage::KnownFolders::RemovableDevices().GetFoldersAsync().get())
-            walk(drive, 0);
-    } catch (...) {
-    }
+    if (!remembered)
+        remembered = remembered_game();
+    if (remembered)
+        walk(remembered, 0);
+    search_removable([&](Folder root, Folder, unsigned depth) { walk(root, depth); });
     cache.end();
     return result;
 }

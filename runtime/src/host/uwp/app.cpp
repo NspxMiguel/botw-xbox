@@ -29,6 +29,7 @@
 #include <future>
 #include <memory>
 #include <thread>
+#include <tuple>
 #include <vector>
 #include <windows.h>
 #include <winrt/Windows.ApplicationModel.Activation.h>
@@ -685,18 +686,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             co_return setup_action;
         co_return quit ? -2 : home.selected;
     }
-    IAsyncAction setup_work(std::function<void()> work) {
+    IAsyncAction setup_work(std::function<void()> work, bool quiet = false) {
         auto lifetime = get_strong();
         auto dispatcher = host_window.Dispatcher();
-        setup_busy = true;
+        setup_busy = !quiet;
         setup_progress.cancel = false;
         setup_progress.done = 0;
         setup_progress.total = 0;
         setup_error.clear();
-        home.selected = -1;
-        if (!home.diagnostics_mode)
-            home.rows.clear();
-        home.loading_text = setup_label(uwp::Text::setup_cancel);
+        if (!quiet) {
+            home.selected = -1;
+            if (!home.diagnostics_mode)
+                home.rows.clear();
+            home.loading_text = setup_label(uwp::Text::setup_cancel);
+        }
         std::string error;
         co_await resume_background();
         try {
@@ -785,42 +788,72 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 setup_page(Text::setup_insert,
                            setup_label(state.drive_removed ? Text::drive_removed : Text::setup_search));
                 std::vector<uwp::setup::Item> items;
+                bool first_scan = true;
                 while (state.step == Step::detect && !quit) {
                     std::vector<uwp::setup::Diagnosis> diagnoses;
-                    co_await setup_work([&] {
-                        items = uwp::setup::scan(local);
-                        diagnoses = uwp::setup::scan_diagnostics(local, diagnostic_cache);
-                        for (auto &item : items) {
-                            if (item.format != uwp::setup::Format::folder || item.layers.empty())
-                                continue;
-                            std::vector<uwp::setup::Probe> layers;
-                            for (auto &layer : item.layers) {
-                                if (layer.prefix == "dlc/")
+                    co_await setup_work(
+                        [&] {
+                            items = uwp::setup::scan(local);
+                            diagnoses = uwp::setup::scan_diagnostics(local, diagnostic_cache);
+                            for (auto &item : items) {
+                                if (item.format != uwp::setup::Format::folder || item.layers.empty())
                                     continue;
-                                layers.push_back(uwp::setup::storage_probe(layer.folder));
-                                auto path = to_string(layer.folder.Path());
-                                std::erase_if(diagnoses, [&](auto &d) {
-                                    return d.folder == path && d.format == uwp::setup::Format::folder;
-                                });
+                                std::vector<uwp::setup::Probe> layers;
+                                for (auto &layer : item.layers) {
+                                    if (layer.prefix == "dlc/")
+                                        continue;
+                                    layers.push_back(uwp::setup::storage_probe(layer.folder));
+                                    auto path = to_string(layer.folder.Path());
+                                    std::erase_if(diagnoses, [&](auto &d) {
+                                        return d.folder == path && d.format == uwp::setup::Format::folder;
+                                    });
+                                }
+                                diagnoses.push_back(
+                                    uwp::setup::diagnose(uwp::setup::layered_probe(std::move(layers)),
+                                                         to_string(item.folder.Path()), item.format));
+                                uwp::setup::log_diagnosis(diagnoses.back());
                             }
-                            diagnoses.push_back(
-                                uwp::setup::diagnose(uwp::setup::layered_probe(std::move(layers)),
-                                                     to_string(item.folder.Path()), item.format));
-                        }
+                        },
+                        true);
+                    std::sort(items.begin(), items.end(), [](auto &a, auto &b) {
+                        auto key = [](auto &item) {
+                            return std::wstring(item.folder.Path()) + L"/" + item.name;
+                        };
+                        return key(a) < key(b);
                     });
-                    home.rows.clear();
-                    home.issue_kinds.clear();
-                    home.issue_notes.clear();
-                    std::vector<int> item_rows;
+                    std::sort(diagnoses.begin(), diagnoses.end(), [](auto &a, auto &b) {
+                        return std::tie(a.folder, a.format, a.source) <
+                               std::tie(b.folder, b.format, b.source);
+                    });
+                    std::vector<int> valid_items;
+                    for (size_t i = 0; i < items.size(); ++i) {
+                        auto &item = items[i];
+                        if (uwp::setup::usable_source(diagnoses, to_string(item.folder.Path()), item.format,
+                                                      item.file ? to_string(item.file.Name()) : ""))
+                            valid_items.push_back(int(i));
+                    }
+                    if (valid_items.size() == 1) {
+                        selected = items[size_t(valid_items.front())];
+                        home.diagnostics_mode = false;
+                        state.found();
+                        break;
+                    }
+                    std::vector<std::wstring> rows, notes;
+                    std::vector<int> kinds, item_rows;
                     auto row = [&](std::wstring path, std::wstring note, int kind = -1, int item = -1) {
-                        home.rows.push_back(std::move(path));
-                        home.issue_notes.push_back(std::move(note));
-                        home.issue_kinds.push_back(kind);
+                        rows.push_back(std::move(path));
+                        notes.push_back(std::move(note));
+                        kinds.push_back(kind);
                         item_rows.push_back(item);
                     };
                     bool partial = false, keys_only = true;
+                    if (valid_items.empty()) {
+                        row(setup_label(Text::select_game_folder), setup_label(Text::game_not_found), -1, -2);
+                        row(setup_label(Text::scan_again), L"", -1, -3);
+                        row(setup_label(Text::back), L"", -1, -4);
+                    }
                     for (auto &d : diagnoses)
-                        if (d.incomplete()) {
+                        if (valid_items.empty() && d.incomplete()) {
                             partial = true;
                             keys_only &= std::all_of(d.issues.begin(), d.issues.end(), [](auto &issue) {
                                 return issue.kind == uwp::setup::IssueKind::keys;
@@ -834,57 +867,77 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                 row(setup_label(Text::keys_missing), setup_label(Text::own_keys));
                             else
                                 row(setup_label(Text::copy_missing) + std::wstring(to_hstring(d.folder)) +
-                                        setup_label(Text::copy_missing_end), L"");
+                                        setup_label(Text::copy_missing_end),
+                                    L"");
                         }
-                    for (size_t i = 0; i < items.size(); ++i) {
-                        auto &item = items[i];
-                        if (item.file && !std::any_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
-                                return d.folder == to_string(item.folder.Path()) && d.format == item.format &&
-                                       d.source == to_string(item.file.Name());
-                            }))
-                            continue;
-                        bool bad = std::any_of(diagnoses.begin(), diagnoses.end(), [&](auto &d) {
-                            if (!d.incomplete() || d.folder != to_string(item.folder.Path()))
-                                return false;
-                            return d.format == item.format &&
-                                   (!item.file || d.source == to_string(item.file.Name()));
-                        });
-                        if (!bad)
-                            row(item.name, setup_label(Text::setup_next), -1, int(i));
-                    }
-                    if (diagnoses.empty() || accepted_forms) {
+                    for (auto i : valid_items)
+                        row(items[size_t(i)].name, std::wstring(items[size_t(i)].folder.Path()), -1, i);
+                    if (valid_items.empty() && accepted_forms) {
                         for (auto key : {Text::accepted_folder, Text::accepted_disc, Text::accepted_nus,
                                          Text::accepted_wua, Text::accepted_archive})
                             row(setup_label(key), L"");
                     }
-                    home.diagnostics_mode = partial || diagnoses.empty() || accepted_forms;
-                    home.heading =
+                    bool diagnostics_mode = partial || (valid_items.empty() && accepted_forms);
+                    auto heading =
                         setup_label(partial ? (keys_only ? Text::keys_missing : Text::files_missing)
-                                    : diagnoses.empty() || accepted_forms ? Text::accepted_forms
-                                                                          : Text::setup_insert);
-                    home.detail.clear();
+                                            : Text::setup_insert);
+                    auto detail = valid_items.empty() ? setup_label(Text::game_not_found) : L"";
+                    // Keep focus, scroll and pending input intact across identical scan snapshots.
+                    if (first_scan || rows != home.rows || notes != home.issue_notes ||
+                        kinds != home.issue_kinds || heading != home.heading || detail != home.detail ||
+                        diagnostics_mode != home.diagnostics_mode) {
+                        home.rows = std::move(rows);
+                        home.issue_notes = std::move(notes);
+                        home.issue_kinds = std::move(kinds);
+                        home.heading = std::move(heading);
+                        home.detail = std::move(detail);
+                        home.diagnostics_mode = diagnostics_mode;
+                        home.selected = -1;
+                        home.focus = std::clamp(home.focus, 0, std::max(0, int(home.rows.size()) - 1));
+                        first_scan = false;
+                    }
                     home.loading_text = setup_label(Text::diagnostic_hints);
-                    home.selected = -1;
-                    home.focus = std::clamp(home.focus, 0, std::max(0, int(home.rows.size()) - 1));
                     auto until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
                     while (!quit && home.selected < 0 && !setup_action &&
                            std::chrono::steady_clock::now() < until) {
                         co_await resume_after(std::chrono::milliseconds(16));
                         co_await resume_foreground(dispatcher);
                     }
-                    if (setup_action == -2) {
+                    int action = home.selected >= 0 && size_t(home.selected) < item_rows.size()
+                                     ? item_rows[size_t(home.selected)]
+                                     : -1;
+                    if (setup_action == -2 || action == -4) {
                         if (storage_only)
                             co_return;
                         state.back();
                         break;
                     }
-                    if (setup_action == -5) {
+                    if (setup_action == -5 || action == -3) {
                         setup_action = 0;
+                        home.selected = -1;
                         continue;
                     }
-                    if (home.selected >= 0 && size_t(home.selected) < item_rows.size() &&
-                        item_rows[size_t(home.selected)] >= 0) {
-                        selected = items[size_t(item_rows[size_t(home.selected)])];
+                    if (action == -2) {
+                        // Pick on the UI apartment, then use the brokered grant in the same scan.
+                        StorageFolder picked{nullptr};
+                        try {
+                            Pickers::FolderPicker picker;
+                            picker.SuggestedStartLocation(Pickers::PickerLocationId::ComputerFolder);
+                            picker.FileTypeFilter().Append(L"*");
+                            picked = co_await picker.PickSingleFolderAsync();
+                            if (picked) {
+                                AccessCache::StorageApplicationPermissions::FutureAccessList().AddOrReplace(
+                                    L"game-folder", picked);
+                                LOG("Setup picked folder: %s", to_string(picked.Path()).c_str());
+                            }
+                        } catch (hresult_error const &e) {
+                            LOG("Setup folder picker failed: 0x%08x", unsigned(e.code().value));
+                        }
+                        home.selected = -1;
+                        continue;
+                    }
+                    if (action >= 0) {
+                        selected = items[size_t(action)];
                         home.diagnostics_mode = false;
                         state.found();
                     }

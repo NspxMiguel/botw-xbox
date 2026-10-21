@@ -17,8 +17,10 @@ Only this directory and the marked W3 blocks in the root CMakeLists.txt are chan
   settings/resume pages, fps/volume/button-layout settings and a mods folder. UI strings use the
   English/Portuguese table, selected by the system language. No CSS layer.
 - LocalSettings preferences plus `setup_done.txt`, `usb_mode.txt` and a relative `game_source.txt` in
-  LocalState. Removable discovery enumerates through two folder levels on every scan, never storing
-  drive letters. No game picker or persisted game picker grant is used. Scanning, extraction,
+  LocalState. Removable discovery enumerates through three folder levels and explicitly probes common game
+  roots, never storing drive letters. A system folder picker persists a FutureAccessList grant
+  as a fallback. Complete sources take priority, and a single valid source advances automatically.
+  Identical scan results preserve focus and scroll; drive/candidate verdicts are flushed to runtime.log. Scanning, extraction,
   verification and RPX loading run off the UI thread. Missing sources return to setup detection.
 - Manifest, original geometric package icons and Visual Studio deployment properties. The manifest
   Publisher is a development placeholder: packaging must use the owner's package identity/certificate.
