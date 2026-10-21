@@ -10,6 +10,7 @@
 #include "art_view.h"
 #include "audio.h"
 #include "controller.h"
+#include "first_frame.h"
 #include "host.h"
 #include "launcher.h"
 #include "mod_network.h"
@@ -112,6 +113,69 @@ std::optional<uwp::ArtImage> read_art(StorageFolder const &meta, wchar_t const *
     }
 }
 
+template <class Operation> auto art_wait(Operation operation) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    while (operation.Status() == AsyncStatus::Started) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            operation.Cancel();
+            throw hresult_canceled();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return operation.get();
+}
+std::optional<uwp::ArtImage> download_disc(StorageFolder const &local, StorageFolder const &game) {
+    try {
+        auto meta = child(game, L"meta");
+        auto identity = uwp::disc_identity(uwp::setup::read_text(meta, L"meta.xml"));
+        if (!identity)
+            return {};
+        auto cache = local.CreateFolderAsync(L"art", CreationCollisionOption::OpenIfExists).get();
+        if (uwp::setup::read_text(cache, L"disc-id.txt") == identity->id) {
+            if (auto image = read_art(cache, L"disc.png", true))
+                return image;
+        }
+        using namespace winrt::Windows::Web::Http;
+        using namespace winrt::Windows::Storage::Streams;
+        HttpClient client;
+        for (auto kind : {"discM", "disc"}) {
+            try {
+                auto url = "https://art.gametdb.com/wiiu/" + std::string(kind) + "/" + identity->region +
+                           "/" + identity->id + ".png";
+                auto response = art_wait(
+                    client.GetAsync(Uri(to_hstring(url)), HttpCompletionOption::ResponseHeadersRead));
+                if (response.StatusCode() != HttpStatusCode::Ok ||
+                    response.RequestMessage().RequestUri().SchemeName() != L"https")
+                    continue;
+                auto stream = art_wait(response.Content().ReadAsInputStreamAsync());
+                std::vector<uint8_t> bytes;
+                for (;;) {
+                    auto buffer =
+                        art_wait(stream.ReadAsync(Buffer(65536), 65536, InputStreamOptions::Partial));
+                    if (!buffer.Length())
+                        break;
+                    if (bytes.size() + buffer.Length() > uwp::art_byte_limit)
+                        throw hresult_invalid_argument();
+                    std::vector<uint8_t> chunk(buffer.Length());
+                    DataReader::FromBuffer(buffer).ReadBytes(chunk);
+                    bytes.insert(bytes.end(), chunk.begin(), chunk.end());
+                }
+                auto image = uwp::decode_art_png(bytes);
+                if (!image)
+                    continue;
+                auto file =
+                    cache.CreateFileAsync(L"disc.png", CreationCollisionOption::ReplaceExisting).get();
+                FileIO::WriteBytesAsync(file, bytes).get();
+                uwp::setup::write_text(cache, L"disc-id.txt", identity->id);
+                return image;
+            } catch (...) {
+            }
+        }
+    } catch (...) {
+    }
+    return {};
+}
+
 struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool pt = false, menu_open = false, running = false, boot_attempted = false;
     bool failed = false, foreground = true, suspended = false, opening = false;
@@ -184,10 +248,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     resize_home();
             });
         key_down = window.KeyDown([this](auto const &, KeyEventArgs const &e) {
-            if ((!home.shown && !transfer_active && !text_entry && !browser_open) || home.loading)
+            if ((!home.shown && !transfer_active && !text_entry && !browser_open) || home.loading ||
+                home.flip_time >= 0)
                 return;
             using winrt::Windows::System::VirtualKey;
             auto key = e.VirtualKey();
+            if (key == VirtualKey::Enter || key == VirtualKey::Escape || key == VirtualKey::Space)
+                ui_feedback();
             if (setup_active) {
                 e.Handled(true);
                 // Real pads use the repeat/edge sampler below; virtual keys also support remote input.
@@ -283,7 +350,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 home.selected = home.focus;
         });
         pointer_pressed = window.PointerPressed([this](auto const &, PointerEventArgs const &e) {
-            if (!home.shown || home.loading || setup_busy)
+            if (!home.shown || home.loading || home.flip_time >= 0 || setup_busy)
                 return;
             auto point = e.CurrentPoint().Position();
             auto bounds = host_window.Bounds();
@@ -449,12 +516,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
         }
         if (decision.game) {
-            auto custom = child(local, L"art");
-            auto custom_disc = read_art(custom, L"disc.png", true);
-            if (!custom_disc)
-                custom_disc = read_art(custom, L"cover.png", true);
-            if (custom_disc)
-                loaded_art.icon = std::move(custom_disc);
+            if (auto downloaded = download_disc(local, active_folder))
+                loaded_art.icon = std::move(downloaded);
         }
         co_await resume_foreground(dispatcher);
         art = std::move(loaded_art);
@@ -480,6 +543,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         auto row_enabled = home.row_enabled;
         bool mods_mode = home.mods_mode;
         bool setup_mode = home.setup_mode;
+        bool silver_setup = home.silver_setup, missing_game = home.missing_game;
+        double flip_time = home.flip_time;
         auto modules = home.qr_modules;
         float progress = home.progress;
         bool shown = home.shown, loading = home.loading;
@@ -493,6 +558,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             home.row_enabled = std::move(row_enabled);
             home.mods_mode = mods_mode;
             home.setup_mode = setup_mode;
+            home.silver_setup = silver_setup;
+            home.missing_game = missing_game;
+            home.flip_time = flip_time;
             home.qr_modules = std::move(modules);
             home.progress = progress;
             home.shown = shown;
@@ -504,6 +572,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     void show_home() {
         home.open(static_cast<::IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
+        home.missing_game = !selected_game;
         home.heading = label(uwp::Text::title).c_str();
         home.loading_text = label(uwp::Text::loading).c_str();
         home_buttons = ~uint32_t(0); // Require release before accepting a controller action.
@@ -1641,6 +1710,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     IAsyncAction launch(uwp::Candidate candidate) {
         if (!running) {
             if (!boot_attempted) {
+                if (!home.ready()) {
+                    try {
+                        show_home();
+                    } catch (std::exception const &) {
+                        home.close();
+                    }
+                }
+                home.shown = home.ready();
+                home.loading = true;
+                loading_since = std::chrono::steady_clock::now();
+                uwp::play_drive_spinup(preferences.volume / 100.f);
+            }
+            if (!boot_attempted) {
                 auto dispatcher = host_window.Dispatcher();
                 bool available = false, valid_hash = false;
                 co_await resume_background();
@@ -1655,6 +1737,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 }
                 co_await resume_foreground(dispatcher);
                 if (!available || !valid_hash) {
+                    uwp::stop_drive();
+                    home.loading = false;
                     co_await run_setup(false, true);
                     co_return;
                 }
@@ -1664,17 +1748,6 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 co_return;
             }
             boot_attempted = true;
-            if (!home.ready()) {
-                try {
-                    show_home();
-                } catch (std::exception const &) {
-                    home.close();
-                }
-            }
-            home.shown = home.ready();
-            home.loading = true;
-            loading_since = std::chrono::steady_clock::now();
-            uwp::play_drive_spinup(preferences.volume / 100.f);
             auto dispatcher = host_window.Dispatcher();
             auto user = to_string(local.Path());
             co_await resume_background();
@@ -1685,9 +1758,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             co_await resume_foreground(dispatcher);
             if (!loaded) {
+                uwp::stop_drive();
                 home.close();
                 failed = true;
                 co_return;
+            }
+            // Complete the press, spin and fade even when preparation finishes quickly.
+            while (!quit &&
+                   std::chrono::duration<double>(std::chrono::steady_clock::now() - loading_since).count() <
+                       3.65) {
+                co_await resume_after(std::chrono::milliseconds(16));
+                co_await resume_foreground(dispatcher);
             }
             home.close(); // Release the CoreWindow swapchain before the game renderer takes ownership.
             uwp::start_runtime(uwp::core_window(), pixel_width, pixel_height);
@@ -1710,10 +1791,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         } guard{menu_open};
         neutral();
         uwp::pause_audio(true);
-        if (!running && (!preferences.setup_complete || !selected_game)) {
-            co_await run_setup(false, preferences.setup_complete);
+        if (!running && selected_game && !preferences.setup_complete) {
+            co_await run_setup();
             allow_auto = false;
         }
+        if (!preferences.setup_complete)
+            allow_auto = false;
         for (;;) {
             auto decision = uwp::decide(candidates, preferences, !allow_auto);
             if (selected_game)
@@ -1746,7 +1829,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 co_return;
             if (choice == 0) {
                 if (decision.select_game) {
-                    co_await select_folder();
+                    home.shown = true;
+                    home.flip_time = 0;
+                    auto dispatcher = host_window.Dispatcher();
+                    auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(3500);
+                    while (!quit && std::chrono::steady_clock::now() < until) {
+                        co_await resume_after(std::chrono::milliseconds(16));
+                        co_await resume_foreground(dispatcher);
+                    }
+                    home.silver_setup = true;
+                    home.flip_time = -1;
+                    co_await run_setup(false, preferences.setup_complete);
                     co_await scan();
                 } else {
                     co_await launch(*decision.game);
@@ -1793,20 +1886,48 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             failed = true;
             OutputDebugStringW(e.message().c_str());
         } catch (std::exception const &) {
+            uwp::stop_drive();
             failed = true;
             OutputDebugStringW(L"BotW: host operation failed.\n");
         }
     }
+    int feedback_focus = -1;
+    std::chrono::steady_clock::time_point ui_rumble_until{};
+    void ui_feedback() {
+        uwp::play_ui_tick();
+        if (pad && rumble_enabled) {
+            pad.Vibration(GamepadVibration{.08, .08, 0, 0});
+            ui_rumble_until = std::chrono::steady_clock::now() + std::chrono::milliseconds(40);
+        }
+    }
     void poll() {
+        uwp::update_launcher_audio();
+        if (pad && ui_rumble_until.time_since_epoch().count() &&
+            std::chrono::steady_clock::now() >= ui_rumble_until) {
+            pad.Vibration(GamepadVibration{});
+            ui_rumble_until = {};
+        }
+        if (home.shown && !home.loading) {
+            if ((feedback_focus >= 0 && feedback_focus != home.focus))
+                ui_feedback();
+            feedback_focus = home.focus;
+        } else {
+            feedback_focus = -1;
+        }
+        home.stick_x = home.stick_y = 0;
         auto pads = Gamepad::Gamepads();
         Gamepad current = pads.Size() ? pads.GetAt(0) : nullptr;
         if (current != pad) {
             neutral();
             pad = current;
         }
-        if ((home.shown || transfer_active || text_entry || browser_open) && !home.loading && pad &&
-            visible) {
+        if ((home.shown || transfer_active || text_entry || browser_open) && !home.loading &&
+            home.flip_time < 0 && pad && visible) {
             auto reading = pad.GetCurrentReading();
+            if (home.focus == 0 && !home.setup_mode && !home.mods_mode) {
+                home.stick_x = std::abs(reading.RightThumbstickX) > .12 ? float(reading.RightThumbstickX) : 0;
+                home.stick_y = std::abs(reading.RightThumbstickY) > .12 ? float(reading.RightThumbstickY) : 0;
+            }
             auto buttons = static_cast<uint32_t>(reading.Buttons);
             if (setup_active) {
                 if (reading.LeftThumbstickX < -.5)
@@ -1825,6 +1946,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 }
             } else {
                 auto pressed = buttons & ~home_buttons;
+                if (pressed & (uwp::a | uwp::b))
+                    ui_feedback();
                 if (setup_active) {
                     double now =
                         std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
@@ -1944,7 +2067,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 home.close();
                 failed = true;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            if (!home.shown || !visible)
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
         }
     }
 };

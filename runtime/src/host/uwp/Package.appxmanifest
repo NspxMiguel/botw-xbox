@@ -164,6 +164,6 @@
       </Extensions>
     </Application>
   </Applications>
-  <!-- broadFileSystemAccess is unsupported on Xbox; no network or microphone access is needed. -->
+  <!-- broadFileSystemAccess is unsupported on Xbox; internetClient is used for optional GameTDB art and mod downloads. -->
   <Capabilities><Capability Name="internetClient" /><uap:Capability Name="removableStorage" /></Capabilities>
 </Package>
