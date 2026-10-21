@@ -252,7 +252,11 @@ if(BOTW_PLATFORM STREQUAL "uwp")
                         /DELAYLOAD:api-ms-win-gaming-deviceinformation-l1-1-0.dll
                         /DELAYLOAD:api-ms-win-core-memory-l1-1-6.dll /DELAYLOAD:api-ms-win-core-psapi-l1-1-0.dll /DELAYLOAD:libcrypto-3-x64.dll)
     # The Store lib folder (lib/x64/store) lacks delayimp.lib; MSVC keeps it in lib/x64.
-    if(DEFINED ENV{VCToolsInstallDir} AND EXISTS "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
+    # cl.exe lives in <MSVC>/bin/Hostx64/x64; VCToolsInstallDir is unset when the VS generator configures.
+    get_filename_component(BOTW_DELAYIMP "${CMAKE_CXX_COMPILER}/../../../../lib/x64/delayimp.lib" ABSOLUTE)
+    if(EXISTS "${BOTW_DELAYIMP}")
+      target_link_libraries(BotWRecomp PRIVATE "${BOTW_DELAYIMP}")
+    elseif(DEFINED ENV{VCToolsInstallDir} AND EXISTS "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
       target_link_libraries(BotWRecomp PRIVATE "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
     else()
       target_link_libraries(BotWRecomp PRIVATE delayimp)
