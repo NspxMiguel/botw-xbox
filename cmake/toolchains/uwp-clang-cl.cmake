@@ -21,7 +21,8 @@ foreach(_part ucrt um shared winrt cppwinrt)
 endforeach()
 # The 14.44 STL imports the C environment functions unconditionally.
 # Expose CRT declarations while preserving UWP Windows API partition guards.
-set(CMAKE_C_FLAGS_INIT "${_uwp_includes} /DWINAPI_FAMILY=WINAPI_FAMILY_APP /D_UNICODE /DUNICODE /D_CRT_USE_WINAPI_FAMILY_DESKTOP_APP")
+# Xbox Series CPUs are Zen 2: AVX2 is always present (Cemu has AVX2 fast paths).
+set(CMAKE_C_FLAGS_INIT "${_uwp_includes} /arch:AVX2 /DWINAPI_FAMILY=WINAPI_FAMILY_APP /D_UNICODE /DUNICODE /D_CRT_USE_WINAPI_FAMILY_DESKTOP_APP")
 set(CMAKE_CXX_FLAGS_INIT "${CMAKE_C_FLAGS_INIT} /EHsc")
 set(_uwp_libpaths "")
 foreach(_dir crt/lib/x86_64/store crt/lib/x86_64 sdk/lib/um/x86_64 sdk/lib/ucrt/x86_64)

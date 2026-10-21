@@ -11,10 +11,10 @@
 #include <atomic>
 #include <cstdlib>
 #include <memory>
+#include <string>
+#include <windows.h> // must precede the *api.h headers: it defines the target architecture
 #include <memoryapi.h>
 #include <processthreadsapi.h>
-#include <string>
-#include <windows.h>
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 #define BOTW_HAS_VEH 1
 #else

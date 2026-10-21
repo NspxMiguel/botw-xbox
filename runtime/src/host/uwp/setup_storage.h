@@ -5,7 +5,20 @@
 #include <atomic>
 #include <fstream>
 #include <memory>
-#include <windowsstoragecom.h>
+#include <windows.h>
+// windowsstoragecom.h drags in desktop-only shell headers under the app partition, so declare the one
+// app-callable interface used here (values and layout from the 10.0.26100 SDK header).
+enum HANDLE_OPTIONS : unsigned { HO_NONE = 0 };
+enum HANDLE_ACCESS_OPTIONS : unsigned { HAO_READ = 0x120089 };
+enum HANDLE_SHARING_OPTIONS : unsigned { HSO_SHARE_READ = 0x1 };
+enum HANDLE_CREATION_OPTIONS : unsigned { HCO_OPEN_EXISTING = 0x3 };
+struct IOplockBreakingHandler;
+struct __declspec(uuid("DF19938F-5462-48A0-BE65-D2A3271A08D6")) IStorageFolderHandleAccess : ::IUnknown {
+    virtual HRESULT __stdcall Create(LPCWSTR fileName, HANDLE_CREATION_OPTIONS creationOptions,
+                                     HANDLE_ACCESS_OPTIONS accessOptions, HANDLE_SHARING_OPTIONS sharingOptions,
+                                     HANDLE_OPTIONS options, IOplockBreakingHandler *oplockBreakingHandler,
+                                     HANDLE *interopHandle) = 0;
+};
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Storage.FileProperties.h>
 #include <winrt/Windows.Storage.Streams.h>
