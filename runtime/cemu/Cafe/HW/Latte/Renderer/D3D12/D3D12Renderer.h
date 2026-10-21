@@ -26,6 +26,7 @@ struct D3D12PipelineInfo;
 class D3D12ImGuiRenderer;
 class D3D12FrameInterpolator;
 class D3D12Fsr;
+class D3D12Ffx;
 class D3D12SimSeriesS;
 class LatteQueryObjectD3D12;
 struct LatteDecompilerShader;
@@ -276,6 +277,23 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void WriteCBV(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_GPU_VIRTUAL_ADDRESS address, uint32 size);
 	void InvalidateDrawState(); // forces all cached command list state to be re-applied
 
+	D3D12SwapChain *GetMainSwapChain()
+	{
+		return m_swapChainMain.get();
+	}
+	D3D12Ffx *GetFfx()
+	{
+		return m_ffx.get();
+	}
+	LatteTextureD3D12 *GetSceneDepth()
+	{
+		return m_sceneDepth;
+	}
+	ID3D12CommandQueue *GetQueue()
+	{
+		return m_queue.Get();
+	}
+
   private:
 	struct DrawState;
 	struct StageBindings;
@@ -403,6 +421,9 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	std::unique_ptr<D3D12SwapChain> m_swapChainMain;
 	std::unique_ptr<D3D12SwapChain> m_swapChainPad;
 	std::unique_ptr<D3D12Fsr> m_fsr;
+	std::unique_ptr<D3D12Ffx> m_ffx;
+	LatteTextureD3D12 *m_sceneDepth = nullptr;
+	std::unordered_map<LatteTextureD3D12 *, uint32> m_sceneDepthUses;
 	bool m_fsrFailed = false;
 	bool m_fsrResizePending = false;
 	uint32 m_fsrInputWidth = 0, m_fsrInputHeight = 0, m_fsrOutputWidth = 0, m_fsrOutputHeight = 0;

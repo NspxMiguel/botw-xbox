@@ -241,17 +241,21 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         });
         size = window.SizeChanged([this](auto const &, auto const &) {
             update_size();
-            if (running)
-                latte::resize_window(pixel_width, pixel_height);
-            else
+            if (running) {
+                int output_width = pixel_width.load(), output_height = pixel_height.load();
+                uwp::refresh_output_mode(output_width, output_height);
+                latte::resize_window(output_width, output_height);
+            } else
                 resize_home();
         });
         dpi = winrt::Windows::Graphics::Display::DisplayInformation::GetForCurrentView().DpiChanged(
             [this](auto const &, auto const &) {
                 update_size();
-                if (running)
-                    latte::resize_window(pixel_width, pixel_height);
-                else
+                if (running) {
+                    int output_width = pixel_width.load(), output_height = pixel_height.load();
+                    uwp::refresh_output_mode(output_width, output_height);
+                    latte::resize_window(output_width, output_height);
+                } else
                     resize_home();
             });
         key_down = window.KeyDown([this](auto const &, KeyEventArgs const &e) {

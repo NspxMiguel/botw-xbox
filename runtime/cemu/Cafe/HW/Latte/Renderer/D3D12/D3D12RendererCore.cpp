@@ -473,7 +473,19 @@ void D3D12Renderer::draw_applyRenderTargets()
 		TransitionTexture(view->GetBaseTexture(), view->firstMip, 1, view->firstSlice, view->numSlice, D3D12_RESOURCE_STATE_RENDER_TARGET);
 	}
 	if (LatteTextureViewD3D12 *depthView = fbo->GetDepthView())
-		TransitionTexture(depthView->GetBaseTexture(), depthView->firstMip, 1, depthView->firstSlice, depthView->numSlice, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+	{
+		auto *depth = depthView->GetBaseTexture();
+		TransitionTexture(depth, depthView->firstMip, 1, depthView->firstSlice, depthView->numSlice, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+		// ponytail: full-size scene attachment heuristic, not recovered game-camera metadata.
+		// Shadow maps and smaller auxiliary passes must not replace the scene depth.
+		if (m_fsrInputWidth && depth->GetDesc().Width == m_fsrInputWidth && depth->GetDesc().Height == m_fsrInputHeight &&
+			depthView->firstMip == 0 && depthView->firstSlice == 0 && fbo->GetColorView(0))
+		{
+			const auto uses = ++m_sceneDepthUses[depth];
+			if (!m_sceneDepth || uses > m_sceneDepthUses[m_sceneDepth])
+				m_sceneDepth = depth;
+		}
+	}
 	if (!m_state.renderTargetsDirty)
 		return;
 	D3D12_CPU_DESCRIPTOR_HANDLE dsv = fbo->GetDSV();

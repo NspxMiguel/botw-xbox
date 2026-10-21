@@ -19,3 +19,6 @@ set_tests_properties(sim_series_s_invalid PROPERTIES ENVIRONMENT "BOTW_SIM_SERIE
 add_executable(fsr_test fsr_test.cc)
 target_compile_options(fsr_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME fsr_test COMMAND fsr_test)
+add_executable(fsr3_policy_test fsr3_policy_test.cc)
+target_compile_options(fsr3_policy_test PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME fsr3_policy_test COMMAND fsr3_policy_test)

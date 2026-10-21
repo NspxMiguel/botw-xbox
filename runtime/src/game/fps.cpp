@@ -13,9 +13,10 @@
 #include <algorithm>
 #include <cstring>
 
-#include "hooks.h"
+#include "../fsr3_policy.h"
 #include "../sim_series_s.h"
 #include "../thread.h"
+#include "hooks.h"
 
 namespace {
 constexpr int kAvgFrames = 8;
@@ -38,6 +39,8 @@ void data_patches() {
 // lwz r0, 904(r31): frame interval in vblanks, used for the GX2SetGPUFence value
 BOTW_HOOK(0x031faae8) {
     if (fps60()) c->r[0] = g_cap30 ? 2 : 1;
+    fsr3::guest_clock_fps.store(fps60() && !g_cap30 ? 60 : 30,
+                                std::memory_order_relaxed);
 }
 
 // The framework's waitForVBlank (0x031facc4) loops { GX2WaitForVsync; GX2GetSwapStatus } until every

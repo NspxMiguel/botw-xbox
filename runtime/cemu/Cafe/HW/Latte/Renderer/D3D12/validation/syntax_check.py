@@ -28,6 +28,14 @@ def main():
     )
     parser.add_argument("--log", type=Path, default=Path("/tmp/botw-w2-syntax.log"))
     parser.add_argument("--uwp", action="store_true")
+    parser.add_argument(
+        "--ffx-sdk", type=Path, help="External Kits/FidelityFX directory"
+    )
+    parser.add_argument(
+        "--generated-include",
+        type=Path,
+        help="Build directory containing fsr1_source.h",
+    )
     args = parser.parse_args()
     backend = Path(__file__).resolve().parents[1]
     repo = next(p for p in backend.parents if (p / "runtime/cemu").is_dir())
@@ -50,7 +58,16 @@ def main():
         "-DEMULATOR_HASH=a53cf0e",
     ]
     if args.uwp:
-        flags += ["-DCEMU_UWP", "-DWINAPI_FAMILY=WINAPI_FAMILY_APP"]
+        flags += [
+            "-DCEMU_UWP",
+            "-DWINAPI_FAMILY=WINAPI_FAMILY_APP",
+            "-D_CRT_USE_WINAPI_FAMILY_DESKTOP_APP",
+        ]
+    if args.ffx_sdk:
+        flags += ["-DBOTW_HAS_FFX=1"]
+        for part in ["api", "upscalers", "framegeneration"]:
+            flags += ["-I" + str(args.ffx_sdk / part / "include")]
+    flags += ["-I" + str(args.generated_include or repo / "build/fsr")]
     sources = sorted(backend.glob("*.cpp"))
     sources += sorted((backend / "compat").rglob("*.cpp"))
     sources += [
@@ -75,14 +92,12 @@ def main():
         else:
             parser.error("SPIRV-Cross headers not found in --spirv-cross-include")
         if args.xwin_root:
-            for name in [
-                "crt/include",
-                "sdk/include/ucrt",
-                "sdk/include/um",
-                "sdk/include/shared",
-                "sdk/include/winrt",
-            ]:
-                flags += ["-isystem", str(args.xwin_root / name)]
+            flags += ["-isystem", str(args.xwin_root / "crt/include")]
+            sdk_include = args.xwin_root / "sdk/include"
+            if not (sdk_include / "um").is_dir():
+                sdk_include = sorted(sdk_include.glob("10.*"))[-1]
+            for name in ["ucrt", "um", "shared", "winrt"]:
+                flags += ["-isystem", str(sdk_include / name)]
             pch = cemu / "Common/precompiled.h"
             mode = "Microsoft SDK/STL (no PCH substitutions)"
         else:
