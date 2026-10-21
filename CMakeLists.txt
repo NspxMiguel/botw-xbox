@@ -237,6 +237,10 @@ if(BOTW_PLATFORM STREQUAL "uwp")
   target_sources(BotWRecomp PRIVATE ${W3_UWP_PACKAGE}/Package.appxmanifest ${W3_UWP_ASSETS})
   set_source_files_properties(${W3_UWP_ASSETS} PROPERTIES
     VS_DEPLOYMENT_CONTENT TRUE VS_DEPLOYMENT_LOCATION "Assets")
+  set(W12_DRIVE_SOUND ${W3_UWP_PACKAGE}/Assets/sfx/drive.wav)
+  target_sources(BotWRecomp PRIVATE ${W12_DRIVE_SOUND})
+  set_source_files_properties(${W12_DRIVE_SOUND} PROPERTIES
+    VS_DEPLOYMENT_CONTENT TRUE VS_DEPLOYMENT_LOCATION "Assets/sfx")
   if(MSVC)
     target_compile_options(BotWRecomp PRIVATE /await:strict /permissive- /utf-8)
     target_link_options(BotWRecomp PRIVATE /SUBSYSTEM:WINDOWS /APPCONTAINER)
@@ -295,6 +299,10 @@ if(BOTW_PLATFORM STREQUAL "uwp")
   install(
     FILES ${W3_UWP_ASSETS}
     DESTINATION Assets
+    COMPONENT Runtime)
+  install(
+    FILES ${W12_DRIVE_SOUND}
+    DESTINATION Assets/sfx
     COMPONENT Runtime)
   install(
     FILES $<TARGET_RUNTIME_DLLS:BotWRecomp>

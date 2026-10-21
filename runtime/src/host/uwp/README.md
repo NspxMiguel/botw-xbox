@@ -123,8 +123,8 @@ full Apple/game build was performed. Full builds need generated guest code, abse
 The pre-boot home screen reads `meta/bootTvTex.tga`, `meta/iconTex.tga` and
 `meta/bootDrcTex.tga` from the **same detected game folder** selected by the launcher.
 Reads use its brokered `StorageFolder`, including the remembered picker grant;
-art loading does not rely on CRT access to an external path. Artwork is never
-bundled, downloaded, copied into the repository or written to a cache. Each read
+art loading does not rely on CRT access to an external path. Artwork is never bundled or copied into the repository. The launcher optionally
+downloads disc art from GameTDB into a per-title LocalState cache. Each read
 and decoded image is limited to 16 MiB. Missing, inaccessible or malformed images
 are ignored independently; without a valid game/meta the home stays true black
 with the title and a folder-selection action. DRC art is decoded and retained for
@@ -138,51 +138,37 @@ its WCAG contrast on black reaches 4.5:1. Without a saturated hue it uses white.
 The focused pill uses black text on this accent. Keyboard arrows/Tab/Enter,
 pointer and controller D-pad/A navigate the disc and two icon actions. The disc
 is the only play target: center (640, 360), radius 150 in a 1280×720 logical
-surface. Settings and Mods are 48px circles at (1224, 56) and (1224, 120),
-with a 32px edge margin. Up/Right from the disc focuses Settings, Down focuses
-Mods, and Down/Left from Mods returns to the disc. Up from Settings stays there;
-Menu opens Settings. Hover, taps, Enter and Space use the same targets. Only
-the bottom-left title and missing-game/failure messages accompany home art.
+surface. Settings and Mods are 48px circles at (56, 56) and (56, 120).
+Up/Left from the disc focuses Settings; Down from Settings focuses Mods;
+Down/Right from Mods returns to the disc. Menu opens Settings.
 
-Optional personal disc art lives in **LocalState/art/**, beside LocalState/game
-and LocalState/mods. Create `art/disc.png` or `art/cover.png` there; priority is a
-valid `disc.png`, then a valid `cover.png`, then the dump's `iconTex.tga`. WIC
-decodes only PNG containers, with the same memory bounds. Overrides are read only
-when a valid game is detected. Restart the launcher to reload personal artwork.
-The disc is a circular centered crop with a transparent center hole and subtle
-rings. During runtime preparation its angular velocity follows smoothstep from
-zero to 2.5 revolutions/s over 1.2s, then stays constant. `disc_angle` integrates
-velocity without wrapping, keeping position and velocity continuous. Only the
-Direct2D drawing angle wraps. Windows `UISettings.AnimationsEnabled` is checked
-each frame; disabled animations replace rotation with a slow accent-ring pulse.
-Failed loads and leaving the home stop animation.
+`meta/meta.xml` product and company codes form the six-character GameTDB ID.
+Regions E/P/J map to US/EN/JA. HTTPS requests try `wiiu/discM`, then `wiiu/disc`;
+PNG decoding and downloads are bounded to 16 MiB. Successful downloads are cached
+as `LocalState/art/disc.png` with `disc-id.txt` preventing stale cross-title art.
+Missing metadata, network failure or bad PNGs retain the dump's `iconTex.tga`.
 
-The launch cue is synthesized by portable `make_drive_spinup`: 1.6s of mono
-48kHz float PCM, a 70–380Hz motor with harmonics, low-pass noise, three short
-seek transients and amplitude fades. A separate XAudio2 engine/voice plays it
-once at the saved user volume, independently of the paused game mixer. Buffer
-storage outlives playback and is released after DestroyVoice on shutdown.
+The Direct2D 1.1 device context draws a transparent-holed disc plane through the
+3D perspective effect. Right-stick pitch/yaw use damped springs (10 rad/s,
+0.45 damping ratio), capped at 22 degrees. A cos^16 specular band follows tilt;
+the focus ring breathes over 2.4 seconds with a pre-blurred procedural halo.
+Icon focus scales spring toward 1.18, with a 50 ms tick and a low 40 ms rumble.
 
-The home owns a Direct2D/D3D11 CoreWindow swapchain **only before guest boot**;
-it releases all graphics resources before handing the window to W2. While a
-live guest retains its swapchain, View+Menu continues to use the existing native
-MessageDialog overlay for Resume/settings/mods. Showing the art home over an
-already-running guest requires a renderer-owned shared presentation surface,
-which is outside this directory's ownership. Graphics/device failures fall back
-to the system dialog. The new header-only graphics code uses MSVC library
-pragmas for d3d11, d2d1, dwrite and windowscodecs; non-MSVC Windows builds must
-link those libraries explicitly.
-
-`uwp_art_tests` uses exclusively synthetic byte arrays (no fixture images):
-24/32-bit raw and RLE TGAs, all four origins, image IDs, alpha/unused attributes,
-row-crossing packets, truncated prefixes, corrupt/oversize headers and packet
-overflow, synthetic TV/icon dimensions, dominant hue selection, a 4,096-color
-contrast sweep and loading/reduced-motion behavior. `check-syntax.sh` also checks
-the new graphics/PNG headers and art tests with the real MinGW Windows headers.
-The existing SDK limitation still applies: **app.cpp has not been compiled
-against real C++/WinRT projections on this Mac**. Windows/Xbox validation must
-check brokered meta reads, optional PNG decoding, resize/DPI/device loss,
-controller/keyboard/pointer focus, reduced-motion toggling and renderer handoff.
+A starts the press and drive cue immediately, accelerates rotation to 2.2 rev/s,
+adds camera depth, and fades the scene over one second. Loading uses only the
+66px metallic gold triforce centered at (1200, 640): gradient faces, bevel edges,
+a three-second diagonal sweep, 1.85-second brightness pulse and Gaussian glow.
+The missing-game disc has faint grooves and a path-drawn question hook whose dot
+is its transparent hole. A flips it through 180 degrees over two seconds and
+zooms to silver over 3.5 seconds, blending into the manual setup background.
+The setup uses dark text, white pills and a dark focused pill.
+Windows `UISettings.AnimationsEnabled` disables tilt, spin and focus popping.
+Portable physics, material masks, geometry, metadata and audio loop/fade behavior
+are covered by `tests/polish_tests.cc`. The launcher releases its CoreWindow swapchain before starting the D3D12
+renderer; a running game still uses the system menu overlay. `check-syntax.sh`
+checks app.cpp and launcher.cpp with clang-cl /Zs and the xwin SDK when installed.
+Device appearance, 60 fps timing and WinRT
+network/audio/controller behavior still require an Xbox run.
 
 ## USB mod import
 
@@ -199,9 +185,8 @@ translation/voice imports on Xbox with the real SDK and storage permissions.
 
 The portable catalog tests exercise saved selection against the real VFS reader.
 The existing syntax script compiles the updated Direct2D screen through
-`art_view_syntax.cc`. Its existing limitation remains: app.cpp's C++/WinRT import
-and coroutine code requires the Microsoft SDK and was reviewed, not compiled or
-run on this Mac. On Xbox, verify empty/long lists, locked packs, USB disconnect,
+`art_view_syntax.cc`. The xwin clang-cl gate now syntax-checks app.cpp and its C++/WinRT import
+and coroutine code; execution still requires Windows/Xbox. On Xbox, verify empty/long lists, locked packs, USB disconnect,
 name collisions, permission/space failures, controller release gating, and the
 live-guest dialog fallback. No artwork assets are added by this feature.
 
@@ -239,7 +224,7 @@ No network, game data or media fixtures are required. `check-syntax.sh` checks
 portable/Direct2D/audio code on the Mac and explicitly reports the SDK gate for
 app.cpp/mod_network.h. From a VS developer shell it also invokes cl.exe /Zs on
 app.cpp and its WinRT headers. Set UWP_REQUIRE_SDK=1 to make a missing SDK fail.
-This Mac cannot validate WinRT projections: Xbox/native-keyboard behavior,
+The xwin SDK gate checks WinRT syntax on this Mac. Xbox/native-keyboard behavior,
 HTTP/cancellation/MD5 and the native-dialog fallback require the Windows SDK
 build and on-device checks. A portable or MinGW pass does not verify those APIs.
 
@@ -286,3 +271,7 @@ mod_network.h** without Microsoft SDK/C++/WinRT; its cl.exe path includes them. 
 not establish Xbox broker permissions, hardware UX, hot-plug timing or a successful Windows package.
 On-device validation must cover those paths, actual dump content extensions, low/unknown disk space,
 long copies, cancellation, resumed extraction, wrong keys/version, and the renderer handoff.
+
+### Drive recording
+
+`Assets/sfx/drive.wav`: [Disc Drive Open & Spinning](https://freesound.org/people/sammerz_/sounds/843008/) by sammerz_, Freesound 843008, CC0. Converted to 48 kHz mono PCM16 and trimmed by 350 ms. Playback crossfades the final 100 ms into the steady region starting at original 9 s; it loops until the renderer's first successful present, then fades out over 250 ms. `drive_sound.h` supplies the synthesized fallback if the package asset cannot be decoded. No game assets are bundled.

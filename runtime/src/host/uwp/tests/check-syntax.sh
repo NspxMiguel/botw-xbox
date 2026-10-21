@@ -18,7 +18,7 @@ if command -v cl.exe >/dev/null 2>&1; then
     "$host_native/launcher.cpp" "$host_native/runtime.cpp" "$host_native/settings.cpp" \
     "$host_native/tests/art_view_syntax.cc" "$host_native/tests/art_tests.cc" \
     "$host_native/tests/tests.cc" "$host_native/tests/drive_sound_test.cc" \
-    "$host_native/tests/setup_tests.cc"
+    "$host_native/tests/setup_tests.cc" "$host_native/tests/polish_tests.cc"
   echo "PASS: all host sources and tests, including app.cpp/mod_network.h, with Microsoft SDK/C++/WinRT"
   exit 0
 fi
@@ -43,10 +43,38 @@ cp "$mac_sdk/usr/include/zlib.h" "$mac_sdk/usr/include/zconf.h" "$syntax_headers
   "$host_dir/controller.cpp" "$host_dir/launcher.cpp" \
   "$host_dir/tests/art_tests.cc" "$host_dir/tests/art_view_syntax.cc" \
   "$host_dir/tests/tests.cc" "$host_dir/tests/drive_sound_test.cc" \
-  "$host_dir/tests/setup_tests.cc"
+  "$host_dir/tests/setup_tests.cc" "$host_dir/tests/polish_tests.cc"
 "$mingw_root/bin/x86_64-w64-mingw32-g++" -std=c++20 -DBOTW_PLATFORM_UWP=1 \
   -Wall -Wextra -Werror -fsyntax-only "$host_dir/audio.cpp"
 
-echo "SKIP: app.cpp, setup_storage.h and mod_network.h require Microsoft SDK/C++/WinRT (not installed on this Mac)"
-if [ "${UWP_REQUIRE_SDK:-0}" = 1 ]; then exit 1; fi
-echo "PASS: portable host, art, audio, strings, setup/formats/crypto/QR, drive synthesis and Direct2D/WIC syntax"
+# Microsoft SDK/C++/WinRT syntax gate on macOS when xwin is installed.
+xwin_sdk="$HOME/.local/share/nxbox/xwin/sdk"
+clang_cl=/opt/homebrew/opt/llvm/bin/clang-cl
+if [ -x "$clang_cl" ] && [ -d "$xwin_sdk/crt/include" ]; then
+  # SDK 26100 exposes shell RPC declarations to APP but hides their parameter types.
+  # These forwards repair that SDK-only defect; no WinRT or host API is stubbed.
+  cat >"$syntax_headers/sdk-forward.h" <<'SDK'
+#include <windows.h>
+typedef struct _CMINVOKECOMMANDINFO CMINVOKECOMMANDINFO;
+typedef struct _CMINVOKECOMMANDINFOEX_REMOTE CMINVOKECOMMANDINFOEX_REMOTE;
+typedef DWORD SHGDNF;
+SDK
+  "$clang_cl" /nologo /Zs /std:c++20 /EHsc /permissive- /utf-8 \
+    /DBOTW_PLATFORM_UWP=1 /DNOMINMAX /DWIN32_LEAN_AND_MEAN \
+    /DWINAPI_FAMILY=WINAPI_FAMILY_APP /D_CRT_USE_WINAPI_FAMILY_DESKTOP_APP \
+    /DUNICODE /D_UNICODE /FI"$syntax_headers/sdk-forward.h" \
+    /imsvc"$xwin_sdk/crt/include" \
+    /imsvc"$xwin_sdk/sdk/include/10.0.26100/ucrt" \
+    /imsvc"$xwin_sdk/sdk/include/10.0.26100/um" \
+    /imsvc"$xwin_sdk/sdk/include/10.0.26100/shared" \
+    /imsvc"$xwin_sdk/sdk/include/10.0.26100/winrt" \
+    /imsvc"$xwin_sdk/sdk/include/10.0.26100/cppwinrt" \
+    /I"$repo_dir/runtime/include" /I"$host_dir/compat" \
+    /I"$syntax_headers" /I/opt/homebrew/include \
+    -- "$host_dir/app.cpp" "$host_dir/launcher.cpp"
+  echo "PASS: clang-cl /Zs app.cpp and launcher.cpp with Microsoft SDK/C++/WinRT (APP partition)"
+else
+  echo "SKIP: app.cpp requires Microsoft SDK/C++/WinRT"
+  if [ "${UWP_REQUIRE_SDK:-0}" = 1 ]; then exit 1; fi
+fi
+echo "PASS: portable host, art, audio, strings, setup/formats/crypto/QR, polish and Direct2D/WIC syntax"

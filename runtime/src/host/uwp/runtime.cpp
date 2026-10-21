@@ -8,6 +8,7 @@
 #include "../../os.h"
 #include "../../packs/host_install.h"
 #include "../../settings.h"
+#include "first_frame.h"
 #if defined(_WIN32)
 #include <winrt/Windows.Graphics.Display.Core.h>
 #include <winrt/Windows.Graphics.Display.h>
@@ -92,6 +93,7 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
     return true;
 }
 void start_runtime(void *window, int width, int height) {
+    first_frame_presented.store(false, std::memory_order_release);
     output_pixels(width, height);
     g_render_scale = std::clamp(std::min(width / 1280.f, height / 720.f), 1.f, max_render_scale());
     LOG("output %dx%d, render scale %.2f", width, height, g_render_scale);

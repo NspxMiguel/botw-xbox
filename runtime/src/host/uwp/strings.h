@@ -175,17 +175,17 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"More settings", L"Mais ajustes"},
          {L"Welcome", L"Boas-vindas"},
          {L"Play your own Wii U copy of Breath of the Wild on Xbox.\nYou need your own Wii U dump of Breath "
-          L"of the Wild 1.6.0 (v208).",
+          L"of the Wild 1.5.0 (v208).",
           L"Jogue sua cópia de Breath of the Wild do Wii U no Xbox.\nVocê precisa do seu próprio dump do Wii "
-          L"U de Breath of the Wild 1.6.0 (v208)."},
+          L"U de Breath of the Wild 1.5.0 (v208)."},
          {L"How to get your game files", L"Como obter os arquivos do jogo"},
          {L"On your Wii U, follow wiiu.hacks.guide to set up Aroma.\nThen install Dumpling and open it from "
           L"the Wii U menu.",
           L"No seu Wii U, siga wiiu.hacks.guide para configurar o Aroma.\nDepois instale o Dumpling e abra "
           L"pelo menu do Wii U."},
-         {L"In Dumpling, choose Dump a game → Breath of the Wild.\nSelect Game, Update (1.6.0 / v208) and "
+         {L"In Dumpling, choose Dump a game → Breath of the Wild.\nSelect Game, Update (1.5.0 / v208) and "
           L"DLC, if you own it.",
-          L"No Dumpling, escolha Dump a game → Breath of the Wild.\nMarque Game, Update (1.6.0 / v208) e "
+          L"No Dumpling, escolha Dump a game → Breath of the Wild.\nMarque Game, Update (1.5.0 / v208) e "
           L"DLC, se você tiver."},
          {L"Copy the base game, then copy the update over it, replacing files.\nKeep the DLC content/ as "
           L"aoc/, beside code/, content/ and meta/.",
@@ -203,9 +203,9 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"The USB drive was removed. Reconnect it to continue.",
           L"O USB foi removido. Conecte novamente para continuar."},
          {L"Checking your game", L"Conferindo seu jogo"},
-         {L"This executable is not version 1.6.0 (v208).\nUpdate the game on your Wii U, dump the update "
+         {L"This executable is not version 1.5.0 (v208).\nUpdate the game on your Wii U, dump the update "
           L"again and merge it over the base game.",
-          L"Este executável não é da versão 1.6.0 (v208).\nAtualize o jogo no Wii U, faça o dump da "
+          L"Este executável não é da versão 1.5.0 (v208).\nAtualize o jogo no Wii U, faça o dump da "
           L"atualização e copie por cima do jogo base."},
          {L"Where would you like to play?", L"Onde você quer jogar?"},
          {L"Play from the USB drive", L"Jogar pelo USB"},

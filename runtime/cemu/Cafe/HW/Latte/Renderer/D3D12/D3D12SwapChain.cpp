@@ -1,3 +1,6 @@
+#if defined(BOTWRECOMP) && defined(_WIN32)
+#include "../../../../../../src/host/uwp/first_frame.h"
+#endif
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -135,6 +138,10 @@ bool D3D12SwapChain::Present(uint32 syncInterval)
 		flags |= DXGI_PRESENT_ALLOW_TEARING;
 	const auto start = std::chrono::steady_clock::now();
 	HRESULT hr = m_swapChain->Present(syncInterval, flags);
+#if defined(BOTWRECOMP) && defined(_WIN32)
+	if (hr == S_OK)
+		uwp::signal_first_frame();
+#endif
 	const double blockedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 	m_presentStats.presents++;
 	m_presentStats.blockedMs += blockedMs;
