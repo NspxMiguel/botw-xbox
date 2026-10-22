@@ -222,12 +222,34 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     std::vector<mods::store::Card> store_available;
     uint32_t home_buttons = ~uint32_t(0);
     std::chrono::steady_clock::time_point loading_since{};
-    event_token key_down{}, pointer_pressed{};
+    event_token key_down{}, key_up{}, pointer_pressed{};
+    // Gamepad buttons that arrive as virtual keys (Device Portal remote input, remote play) instead of a Gamepad.
+    std::atomic<uint32_t> virtual_buttons{0};
     StorageFolder local{nullptr}, selected_game{nullptr}, screenshots{nullptr};
     std::vector<uwp::Candidate> candidates;
     Gamepad pad{nullptr};
+    bool virtual_was_held = false;
     std::chrono::steady_clock::time_point next_rumble{};
     event_token activating{}, suspending{}, resuming{}, closed{}, visibility{}, activated{}, size{}, dpi{};
+
+    static uint32_t virtual_button(winrt::Windows::System::VirtualKey key) {
+        using winrt::Windows::System::VirtualKey;
+        switch (key) {
+        case VirtualKey::GamepadA: return uwp::a;
+        case VirtualKey::GamepadB: return uwp::b;
+        case VirtualKey::GamepadX: return uwp::x;
+        case VirtualKey::GamepadY: return uwp::y;
+        case VirtualKey::GamepadDPadUp: return uwp::up;
+        case VirtualKey::GamepadDPadDown: return uwp::down;
+        case VirtualKey::GamepadDPadLeft: return uwp::left;
+        case VirtualKey::GamepadDPadRight: return uwp::right;
+        case VirtualKey::GamepadMenu: return uwp::menu;
+        case VirtualKey::GamepadView: return uwp::view;
+        case VirtualKey::GamepadLeftShoulder: return uwp::lb;
+        case VirtualKey::GamepadRightShoulder: return uwp::rb;
+        default: return 0;
+        }
+    }
 
     IFrameworkView CreateView() { return *this; }
     void Initialize(CoreApplicationView const &view) {
@@ -276,7 +298,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 } else
                     resize_home();
             });
+        key_up = window.KeyUp([this](auto const &, KeyEventArgs const &e) {
+            virtual_buttons &= ~virtual_button(e.VirtualKey());
+        });
         key_down = window.KeyDown([this](auto const &, KeyEventArgs const &e) {
+            virtual_buttons |= virtual_button(e.VirtualKey());
             if ((!home.shown && !transfer_active && !text_entry && !browser_open) || home.loading ||
                 home.flip_time >= 0)
                 return;
@@ -442,6 +468,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         CoreApplication::Resuming(resuming);
         CoreApplication::MainView().Activated(activating);
         host_window.KeyDown(key_down);
+        host_window.KeyUp(key_up);
         host_window.PointerPressed(pointer_pressed);
         host_window.PointerMoved(pointer_moved);
         host_window.CharacterReceived(character_received);
@@ -2527,8 +2554,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             neutral();
             uwp::pause_audio(!visible.load());
         }
-        if (!running || menu_open || !visible)
+        if (!running || menu_open || !visible) {
+            virtual_buttons = 0; // a key-up lost while hidden must not leave a button held
             return;
+        }
         GamepadReading r{};
         double seconds =
             std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -2575,9 +2604,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             return;
         }
-        if (quick_was_open || !pad)
+        uint32_t virtual_held = virtual_buttons;
+        if (quick_was_open || (!pad && !virtual_held && !virtual_was_held))
             return;
-        r = pad.GetCurrentReading();
+        virtual_was_held = virtual_held != 0;
+        if (pad)
+            r = pad.GetCurrentReading();
+        r.Buttons = GamepadButtons(uint32_t(r.Buttons) | virtual_held);
         if (quick_chord.update(uint32_t(r.Buttons), seconds)) {
             neutral();
             menu_visible = true;
@@ -2614,7 +2647,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (now >= next_rumble) {
             next_rumble = now + std::chrono::microseconds(16667);
             double motor = input::rumble_step() && rumble_enabled ? 0.375 : 0;
-            pad.Vibration(GamepadVibration{motor, motor, 0, 0});
+            if (pad)
+                pad.Vibration(GamepadVibration{motor, motor, 0, 0});
         }
     }
     void Run() {
