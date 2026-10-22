@@ -60,8 +60,9 @@ try {
     & $signTool sign /fd SHA256 /s My /sha1 $certificate.Thumbprint $package
     if ($LASTEXITCODE -ne 0) { throw 'Test certificate package signing failed' }
 
-    # Trust only inside this disposable runner to verify the signed package.
-    $trustedCertificate = Import-Certificate -FilePath $publicCertificate -CertStoreLocation 'Cert:\CurrentUser\Root'
+    # Trust only inside this disposable runner to verify the signed package. CurrentUser\Root
+    # shows a confirmation dialog that hangs a headless runner; LocalMachine\Root does not.
+    $trustedCertificate = Import-Certificate -FilePath $publicCertificate -CertStoreLocation 'Cert:\LocalMachine\Root'
     & $signTool verify /pa /v $package
     if ($LASTEXITCODE -ne 0) { throw 'Signed Appx verification failed' }
 
@@ -82,7 +83,7 @@ try {
 }
 finally {
     if ($trustedCertificate) {
-        Remove-Item "Cert:\CurrentUser\Root\$($trustedCertificate.Thumbprint)" -Force
+        Remove-Item "Cert:\LocalMachine\Root\$($trustedCertificate.Thumbprint)" -Force
     }
     if ($certificate) {
         Remove-Item "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey -Force
