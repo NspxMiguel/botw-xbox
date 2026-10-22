@@ -53,7 +53,7 @@ class ArtView {
     Ptr<IDWriteFactory> fonts;
     Ptr<IDWriteTextFormat> title_font, body_font, mono_font, store_title_font, store_card_font,
         store_body_font, store_meta_font, credit_font;
-    Ptr<ID2D1Bitmap> hero, disc;
+    Ptr<ID2D1Bitmap> hero, disc, plateau, shrine;
     Ptr<ID2D1PathGeometry> disc_mask;
     Ptr<ID2D1Layer> disc_layer;
     Ptr<ID2D1SolidColorBrush> brush;
@@ -85,6 +85,13 @@ class ArtView {
     }
 
   public:
+    Wallpaper wallpaper = Wallpaper::light;
+    void set_wallpapers(const std::optional<ArtImage> &meadow, const std::optional<ArtImage> &temple) {
+        if (meadow)
+            plateau = bitmap(*meadow);
+        if (temple)
+            shrine = bitmap(*temple);
+    }
     StoreView store;
     std::map<std::string, Ptr<ID2D1Bitmap>> thumbnails;
     void store_image(const std::string &url, const ArtImage &image) {
@@ -234,9 +241,10 @@ class ArtView {
                                       DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.f, L"",
                                       &credit_font));
         check(credit_font->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING));
-        // Three stops; the upper half stays untouched and the footer closes to near-black.
-        D2D1_GRADIENT_STOP stops[] = {
-            {.5f, art_style::black(0)}, {.82f, art_style::black(.82f)}, {1, art_style::black(.98f)}};
+        // Bound the brightest image pixel for readable light ink, then darken toward the footer.
+        D2D1_GRADIENT_STOP stops[] = {{0, art_style::black(art_style::wallpaper_top)},
+                                      {.48f, art_style::black(art_style::wallpaper_middle)},
+                                      {1, art_style::black(art_style::wallpaper_bottom)}};
         Ptr<ID2D1GradientStopCollection> collection;
         check(target->CreateGradientStopCollection(stops, 3, &collection));
         check(target->CreateLinearGradientBrush(
@@ -704,12 +712,22 @@ class ArtView {
             finish_frame();
             return;
         }
-        if (!setup_mode && !hero) // every menu shares the light silver look; only loading is black
+        auto background = wallpaper == Wallpaper::from_game ? hero.Get()
+                          : wallpaper == Wallpaper::plateau ? plateau.Get()
+                          : wallpaper == Wallpaper::shrine  ? shrine.Get()
+                                                            : nullptr;
+        const bool light = background == nullptr;
+        auto ink = [&](float alpha = 1) { return light ? black(alpha) : white(alpha); };
+        if (background) {
+            auto size = background->GetSize();
+            float scale = std::max(width / size.width, height / size.height);
+            float x = (width - size.width * scale) / 2, y = (height - size.height * scale) / 2;
+            target->DrawBitmap(background, D2D1::RectF(x, y, width - x, height - y));
+            target->FillRectangle(D2D1::RectF(0, 0, width, height), scrim.Get());
+        } else
             target->DrawBitmap(silver_bg.Get(), D2D1::RectF(0, 0, width, height));
         if (setup_mode) {
-            if (silver_setup)
-                target->DrawBitmap(silver_bg.Get(), D2D1::RectF(0, 0, width, height));
-            brush->SetColor(silver_setup ? black(.92f) : white());
+            brush->SetColor(ink(.92f));
             text(heading, D2D1::RectF(margin, 48, width - margin, 100), true);
             if (diagnostics_mode) {
                 auto first = first_row();
@@ -746,14 +764,14 @@ class ArtView {
                         target->FillEllipse(D2D1::Ellipse(D2D1::Point2F(margin + 43, y + 20), 3, 3),
                                             brush.Get());
                     }
-                    brush->SetColor(black(.92f));
+                    brush->SetColor(int(i) == focus ? black(.92f) : ink(.92f));
                     target->DrawText(rows[i].c_str(), UINT32(rows[i].size()), mono_font.Get(),
                                      D2D1::RectF(margin + 56, y + 5, width - margin - 12, y + 37),
                                      brush.Get(), D2D1_DRAW_TEXT_OPTIONS_CLIP);
                     if (i < issue_notes.size())
                         text(issue_notes[i], D2D1::RectF(margin + 56, y + 32, width - margin - 12, y + 66));
                 }
-                brush->SetColor(black(.8f));
+                brush->SetColor(ink(.8f));
                 text(loading_text, D2D1::RectF(margin, 648, width - margin, 704));
                 finish_frame();
                 return;
@@ -788,26 +806,24 @@ class ArtView {
             for (size_t i = first; i < rows.size() && i < first + 3; ++i) {
                 float top = 440 + float(i - first) * 64;
                 bool focused = int(i) == focus && enabled(i);
-                if (focused || silver_setup) {
-                    brush->SetColor(silver_setup ? (focused ? black(.92f) : white(.94f))
-                                                 : D2D1::ColorF(accent.r, accent.g, accent.b));
+                if (focused || light) {
+                    brush->SetColor(light ? (focused ? black(.92f) : white(.94f)) : white());
                     target->FillRoundedRectangle(
                         D2D1::RoundedRect(D2D1::RectF(margin, top, width - margin, top + button_h),
                                           button_h / 2, button_h / 2),
                         brush.Get());
                 }
-                brush->SetColor(silver_setup ? (focused ? white() : black(enabled(i) ? .92f : .4f))
-                                             : (focused ? black() : white(enabled(i) ? 1.f : .4f)));
+                brush->SetColor(light ? (focused ? white() : black(enabled(i) ? .92f : .4f))
+                                      : (focused ? black() : white(enabled(i) ? 1.f : .4f)));
                 text(rows[i], D2D1::RectF(margin + 24, top + 17, width - margin - 24, top + button_h));
             }
-            brush->SetColor(silver_setup ? black(.72f) : white(.72f));
+            brush->SetColor(light ? black(.72f) : white(.72f));
             text(loading_text, D2D1::RectF(margin, 648, width - margin, 704));
             finish_frame();
             return;
         }
         if (mods_mode) {
-            target->DrawBitmap(silver_bg.Get(), D2D1::RectF(0, 0, width, height));
-            brush->SetColor(black(.92f));
+            brush->SetColor(ink(.92f));
             text(heading, D2D1::RectF(margin, 48, width - margin, 96), true);
             text(detail, D2D1::RectF(margin, 104, width - margin, 152));
             auto first = first_row();
@@ -820,21 +836,13 @@ class ArtView {
                     target->FillRoundedRectangle(D2D1::RoundedRect(rect, button_h / 2, button_h / 2),
                                                  brush.Get());
                 }
-                brush->SetColor(focused ? white() : black(enabled(i) ? .92f : .4f));
+                brush->SetColor(focused ? white() : ink(enabled(i) ? .92f : .4f));
                 text(rows[i], D2D1::RectF(margin + 24, top + 17, width - margin - 24, top + button_h));
             }
-            brush->SetColor(black(.72f));
+            brush->SetColor(ink(.72f));
             text(loading_text, D2D1::RectF(margin, 632, width - margin, 700));
             finish_frame();
             return;
-        }
-        if (hero) {
-            // Centered aspect-fill; never stretch the player's art.
-            auto size = hero->GetSize();
-            float scale = std::max(width / size.width, height / size.height);
-            float x = (width - size.width * scale) / 2, y = (height - size.height * scale) / 2;
-            target->DrawBitmap(hero.Get(), D2D1::RectF(x, y, width - x, height - y));
-            target->FillRectangle(D2D1::RectF(0, 0, width, height), scrim.Get());
         }
         const auto center = D2D1::Point2F(640, 360);
         // Record the entire face (including its hole, light and focus ring) in a plane.
@@ -921,8 +929,9 @@ class ArtView {
             // Color follows the same spring as the icon, so focus never snaps.
             float mix = reduced_motion ? (focus == i ? 1.f : 0.f)
                                        : float(std::clamp(icon_pop[i - 1].value / .18, 0., 1.));
-            auto background = D2D1::ColorF(mix, mix, mix, .9f + .1f * mix);
-            auto foreground = D2D1::ColorF(1 - mix, 1 - mix, 1 - mix);
+            float tone = light ? 1 - mix : mix;
+            auto background = D2D1::ColorF(tone, tone, tone, .9f + .1f * mix);
+            auto foreground = D2D1::ColorF(1 - tone, 1 - tone, 1 - tone);
             brush->SetColor(background);
             target->FillEllipse(D2D1::Ellipse(c, 24, 24), brush.Get());
             brush->SetColor(foreground);
@@ -954,10 +963,10 @@ class ArtView {
         target->PopLayer();
         float label = float(1 - ease(std::max(0., flip_time) / 2));
         // Home shows no title; a faint credit sits in the bottom-right safe area.
-        brush->SetColor(hero ? white(.6f * label) : black(.6f * label));
+        brush->SetColor(ink((light ? .6f : .72f) * label));
         target->DrawText(L"nspxmiguel", 10, credit_font.Get(),
                          D2D1::RectF(width - margin - 240, 680, width - margin, 700), brush.Get());
-        brush->SetColor(hero ? white(label) : black(.92f * label));
+        brush->SetColor(ink(.92f * label));
         // First run shows only the "?" disc; failure messages may still accompany the title.
         if (!loading && !missing_game)
             text(detail, D2D1::RectF(margin, 674, 1150, 720));

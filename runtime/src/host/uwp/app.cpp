@@ -100,7 +100,8 @@ uwp::Candidate inspect(StorageFolder const &root, uwp::Source source) {
     return candidate;
 }
 
-std::optional<uwp::ArtImage> read_art(StorageFolder const &meta, wchar_t const *name, bool png = false) {
+std::optional<uwp::ArtImage> read_art(StorageFolder const &meta, wchar_t const *name, bool png = false,
+                                      bool wallpaper = false) {
     if (!meta)
         return std::nullopt;
     try {
@@ -114,7 +115,7 @@ std::optional<uwp::ArtImage> read_art(StorageFolder const &meta, wchar_t const *
             return std::nullopt;
         std::vector<uint8_t> bytes(static_cast<size_t>(size));
         reader.ReadBytes(bytes);
-        return png ? uwp::decode_art_png(bytes) : uwp::decode_tga(bytes);
+        return png ? uwp::decode_art_png(bytes, false, wallpaper) : uwp::decode_tga(bytes);
     } catch (hresult_error const &) {
         return std::nullopt;
     }
@@ -193,6 +194,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool quick_was_open = false;
     float render_scale_choice = 0;
     uwp::GameArt art;
+    std::optional<uwp::ArtImage> plateau, shrine;
+    bool wallpapers_loaded = false;
+    int wallpaper = -1;
     uwp::ArtView home;
     bool mods_open = false, browser_open = false, text_entry = false, transfer_active = false;
     bool setup_active = false, setup_busy = false, setup_guide = false;
@@ -471,6 +475,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             auto value = values.TryLookup(key);
             return value ? unbox_value_or<int32_t>(value, fallback) : fallback;
         };
+        wallpaper = uwp::parse_wallpaper(number(L"wallpaper", -1));
         preferences.setup_complete = boolean(L"setupComplete", false);
         preferences.auto_launch = boolean(L"autoLaunch", false);
         preferences.fps = number(L"fps", 60) >= 60 ? 60 : 30;
@@ -488,6 +493,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         values.Insert(L"fps", box_value(preferences.fps));
         values.Insert(L"volume", box_value(preferences.volume));
         values.Insert(L"buttonLayout", box_value(preferences.layout));
+        if (wallpaper >= 0)
+            values.Insert(L"wallpaper", box_value(wallpaper));
         values.Insert(L"renderScalePercent", box_value(preferences.render_scale_percent));
         values.Insert(L"upscaler", box_value(preferences.upscaler));
         values.Insert(L"fsrQuality", box_value(preferences.fsr_quality));
@@ -533,6 +540,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
         } catch (hresult_error const &) { /* LocalState remains usable if removable access is denied. */
         }
+        if (!wallpapers_loaded) {
+            auto folder = child(winrt::Windows::ApplicationModel::Package::Current().InstalledLocation(),
+                                L"Assets\\wallpapers");
+            plateau = read_art(folder, L"meadow.jpg", true, true);
+            shrine = read_art(folder, L"shrine.jpg", true, true);
+            wallpapers_loaded = true;
+        }
         uwp::GameArt loaded_art;
         auto decision = uwp::decide(found, saved_preferences);
         if (!previous.empty())
@@ -577,6 +591,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     IAsyncOperation<int32_t> choose(hstring title, hstring body, std::vector<hstring> choices) {
         auto cancellation = co_await get_cancellation_token();
         cancellation.enable_propagation();
+        // MessageDialog accepts at most three commands; every page keeps a real Back action.
+        if (choices.size() > 3) {
+            auto page = co_await choose(title, body,
+                                        {choices.front(), label(uwp::Text::settings_more), choices.back()});
+            if (page == 0)
+                co_return 0;
+            if (page == 2)
+                co_return static_cast<int32_t>(choices.size() - 1);
+            std::vector<hstring> remaining(choices.begin() + 1, choices.end());
+            co_return 1 + co_await choose(title, body, std::move(remaining));
+        }
         MessageDialog dialog(body, title);
         for (size_t i = 0; i < choices.size(); ++i)
             dialog.Commands().Append(UICommand(choices[i], nullptr, box_value(static_cast<int32_t>(i))));
@@ -604,6 +629,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         int focus = home.focus;
         try {
             home.open(static_cast<::IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
+            home.set_wallpapers(plateau, shrine);
+            home.wallpaper = uwp::resolve_wallpaper(wallpaper, bool(art.tv));
             home.heading = std::move(heading);
             home.detail = std::move(detail);
             home.loading_text = std::move(loading_text);
@@ -628,6 +655,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     }
     void show_home() {
         home.open(static_cast<::IUnknown *>(uwp::core_window()), pixel_width, pixel_height, art);
+        home.set_wallpapers(plateau, shrine);
+        home.wallpaper = uwp::resolve_wallpaper(wallpaper, bool(art.tv));
         home.missing_game = !selected_game;
         home.heading = label(uwp::Text::title).c_str();
         home.loading_text = label(uwp::Text::loading).c_str();
@@ -1255,12 +1284,27 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
 
     IAsyncAction configure() {
         for (;;) {
-            auto choice = co_await choose(
-                label(uwp::Text::settings), label(uwp::Text::controls),
-                {label(uwp::Text::automatic), label(uwp::Text::settings_more), label(uwp::Text::back)});
-            if (choice == 2)
+            if (!running && !home.shown) {
+                show_home();
+                home.shown = true;
+            }
+            auto choice = co_await choose(label(uwp::Text::settings), label(uwp::Text::controls),
+                                          {label(uwp::Text::wallpaper), label(uwp::Text::automatic),
+                                           label(uwp::Text::settings_more), label(uwp::Text::back)});
+            if (choice == 3)
                 break;
             if (choice == 0) {
+                auto selected =
+                    co_await choose(label(uwp::Text::wallpaper), L"",
+                                    {label(uwp::Text::wallpaper_game), label(uwp::Text::wallpaper_plateau),
+                                     label(uwp::Text::wallpaper_shrine), label(uwp::Text::wallpaper_light),
+                                     label(uwp::Text::back)});
+                if (selected >= 0 && selected < 4) {
+                    constexpr int values[] = {3, 1, 2, 0};
+                    wallpaper = values[selected];
+                    home.wallpaper = uwp::resolve_wallpaper(wallpaper, bool(art.tv));
+                }
+            } else if (choice == 1) {
                 preferences.auto_launch =
                     (co_await choose(label(uwp::Text::automatic), L"",
                                      {label(uwp::Text::yes), label(uwp::Text::no)})) == 0;
@@ -1365,6 +1409,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             save_preferences();
         }
+        if (!running)
+            home.shown = false;
     }
     // Use brokered StorageFolder operations: picker paths alone do not grant CRT access.
     static size_t copy_mod_tree(StorageFolder const &source, StorageFolder const &destination) {

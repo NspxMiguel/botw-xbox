@@ -7,8 +7,9 @@
 #pragma comment(lib, "windowscodecs.lib")
 #endif
 namespace uwp {
-// WIC is used only for an optional player-provided PNG; dump artwork uses our TGA decoder.
-inline std::optional<ArtImage> decode_art_png(std::span<const uint8_t> bytes, bool store_media = false) {
+// WIC decodes player-provided PNGs and packaged JPEG wallpapers; dump art uses our TGA decoder.
+inline std::optional<ArtImage> decode_art_png(std::span<const uint8_t> bytes, bool store_media = false,
+                                              bool wallpaper = false) {
     using Microsoft::WRL::ComPtr;
     if (bytes.empty() || bytes.size() > art_byte_limit)
         return std::nullopt;
@@ -30,8 +31,8 @@ inline std::optional<ArtImage> decode_art_png(std::span<const uint8_t> bytes, bo
     GUID format{};
     if (FAILED(decoder->GetContainerFormat(&format)) ||
         (!IsEqualGUID(format, GUID_ContainerFormatPng) &&
-         !(store_media &&
-           (IsEqualGUID(format, GUID_ContainerFormatJpeg) || IsEqualGUID(format, GUID_ContainerFormatGif)))))
+         !((store_media || wallpaper) && IsEqualGUID(format, GUID_ContainerFormatJpeg)) &&
+         !(store_media && IsEqualGUID(format, GUID_ContainerFormatGif))))
         return std::nullopt;
     ComPtr<IWICBitmapFrameDecode> frame;
     if (FAILED(decoder->GetFrame(0, &frame)))

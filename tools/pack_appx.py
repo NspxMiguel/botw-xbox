@@ -14,7 +14,7 @@ from xml.sax.saxutils import quoteattr
 BLOCK = 65536
 TYPES = {
     "exe": "application/x-msdownload", "dll": "application/x-msdownload", "png": "image/png",
-    "wav": "audio/wav", "json": "application/json", "txt": "text/plain",
+    "jpg": "image/jpeg", "jpeg": "image/jpeg", "wav": "audio/wav", "json": "application/json", "txt": "text/plain",
 }
 
 

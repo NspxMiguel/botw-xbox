@@ -155,6 +155,16 @@ int main() {
             CHECK(r > 9.9f && r < 14.1f);
         }
     }
+    for (int value : {-100, -2, -1, 4, 99}) {
+        CHECK(parse_wallpaper(value) == -1);
+        CHECK(resolve_wallpaper(value, true) == Wallpaper::from_game);
+        CHECK(resolve_wallpaper(value, false) == Wallpaper::plateau);
+    }
+    for (int value = 0; value <= 3; ++value) {
+        CHECK(parse_wallpaper(value) == value);
+        CHECK(int(resolve_wallpaper(value, true)) == value);
+        CHECK(int(resolve_wallpaper(value, false)) == value);
+    }
     CHECK(home_focus(0, 0) == 1 && home_focus(0, 3) == 1 && home_focus(0, 1) == 0);
     CHECK(home_focus(1, 0) == 1 && home_focus(1, 2) == 2);
     CHECK(home_focus(2, 2) == 0 && home_focus(2, 1) == 0);

@@ -14,6 +14,7 @@ inline D2D1_COLOR_F white(float alpha = 1) { return D2D1::ColorF(1, 1, 1, alpha)
 inline D2D1_COLOR_F warning() { return D2D1::ColorF(.72f, .43f, .05f); }
 inline D2D1_COLOR_F missing() { return D2D1::ColorF(.72f, .08f, .08f); }
 inline D2D1_COLOR_F optional() { return D2D1::ColorF(.4f, .4f, .4f); }
+inline constexpr float wallpaper_top = .70f, wallpaper_middle = .76f, wallpaper_bottom = .94f;
 inline constexpr float quick_dim = .65f, quick_surface = .10f;
 } // namespace art_style
 } // namespace uwp

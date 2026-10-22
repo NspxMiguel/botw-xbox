@@ -9,6 +9,13 @@
 #include <vector>
 
 namespace uwp {
+enum class Wallpaper { light = 0, plateau = 1, shrine = 2, from_game = 3 };
+// Missing, mistyped and out-of-range settings keep the automatic choice.
+inline int parse_wallpaper(int value) { return value >= 0 && value <= 3 ? value : -1; }
+inline Wallpaper resolve_wallpaper(int value, bool game_art) {
+    value = parse_wallpaper(value);
+    return value < 0 ? (game_art ? Wallpaper::from_game : Wallpaper::plateau) : static_cast<Wallpaper>(value);
+}
 struct ArtImage {
     uint32_t width = 0, height = 0;
     // Straight RGBA, top left origin. No artwork is embedded in the executable.

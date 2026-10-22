@@ -244,6 +244,12 @@ if(BOTW_PLATFORM STREQUAL "uwp")
   target_sources(BotWRecomp PRIVATE ${W12_DRIVE_SOUND})
   set_source_files_properties(${W12_DRIVE_SOUND} PROPERTIES
     VS_DEPLOYMENT_CONTENT TRUE VS_DEPLOYMENT_LOCATION "Assets/sfx")
+  set(W3_UWP_WALLPAPERS
+    ${W3_UWP_PACKAGE}/Assets/wallpapers/meadow.jpg
+    ${W3_UWP_PACKAGE}/Assets/wallpapers/shrine.jpg)
+  target_sources(BotWRecomp PRIVATE ${W3_UWP_WALLPAPERS})
+  set_source_files_properties(${W3_UWP_WALLPAPERS} PROPERTIES
+    VS_DEPLOYMENT_CONTENT TRUE VS_DEPLOYMENT_LOCATION "Assets/wallpapers")
   if(MSVC)
     target_compile_options(BotWRecomp PRIVATE /await:strict /permissive- /utf-8)
     target_link_options(BotWRecomp PRIVATE /SUBSYSTEM:WINDOWS /APPCONTAINER)
@@ -328,6 +334,10 @@ if(BOTW_PLATFORM STREQUAL "uwp")
   install(
     FILES ${W12_DRIVE_SOUND}
     DESTINATION Assets/sfx
+    COMPONENT Runtime)
+  install(
+    FILES ${W3_UWP_WALLPAPERS}
+    DESTINATION Assets/wallpapers
     COMPONENT Runtime)
   install(
     FILES $<TARGET_RUNTIME_DLLS:BotWRecomp>
