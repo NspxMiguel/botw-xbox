@@ -712,7 +712,9 @@ class ArtView {
             finish_frame();
             return;
         }
-        auto background = wallpaper == Wallpaper::from_game ? hero.Get()
+        // Setup, diagnostics and mods keep the light silver look; wallpapers dress only the home.
+        auto background = setup_mode || silver_setup             ? nullptr
+                          : wallpaper == Wallpaper::from_game ? hero.Get()
                           : wallpaper == Wallpaper::plateau ? plateau.Get()
                           : wallpaper == Wallpaper::shrine  ? shrine.Get()
                                                             : nullptr;
