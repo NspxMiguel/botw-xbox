@@ -230,6 +230,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         activating = view.Activated([](auto const &, auto const &) { host_window.Activate(); });
         suspending = CoreApplication::Suspending([this](auto const &, SuspendingEventArgs const &) {
             suspended = true;
+            ApplicationData::Current().LocalSettings().Values().Remove(L"launchPending");
             neutral();
             active(false); // synchronous, bounded: no deferral needed for LocalSettings already persisted.
         });
@@ -2047,6 +2048,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             home.close(); // Release the CoreWindow swapchain before the game renderer takes ownership.
             LOG("launch: start_runtime %dx%d", int(pixel_width), int(pixel_height));
+            // Cleared on suspend. Still set at the next start means the game took the process down,
+            // so that start shows home instead of auto-launching into the same crash again.
+            ApplicationData::Current().LocalSettings().Values().Insert(L"launchPending", box_value(true));
             uwp::start_runtime(uwp::core_window(), pixel_width, pixel_height);
             running = true;
             LOG("launch: runtime started");
@@ -2289,6 +2293,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             if (destination == L"mods")
                 co_await manage_mods();
+            if (unbox_value_or<bool>(values.TryLookup(L"launchPending"), false)) {
+                values.Remove(L"launchPending");
+                if (startup)
+                    LOG("open_menu: the last launch ended without suspending; skipping auto-launch once");
+                startup = false;
+            }
             co_await menu(startup);
         } catch (hresult_error const &e) {
             failed = true;
