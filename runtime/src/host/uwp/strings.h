@@ -179,6 +179,8 @@ enum class Text {
     store_enable,
     store_disable,
     buttons_question,
+    autoboot_missing,
+    setup,
     count
 };
 inline std::wstring_view text(Text key, bool pt) {
@@ -430,7 +432,10 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Enable", L"Ativar"},
          {L"Disable", L"Desativar"},
          {L"Which buttons do you prefer?\nThe game's prompts follow your choice. You can change it later in Settings.",
-          L"Quais botões você prefere?\nOs avisos do jogo seguem a sua escolha. Dá pra mudar depois em Configurações."}}};
+          L"Quais botões você prefere?\nOs avisos do jogo seguem a sua escolha. Dá pra mudar depois em Configurações."},
+         {L"Automatic start is on, but the game was not found.\nConnect the USB drive with your game, or set it up again.",
+          L"O início automático está ligado, mas o jogo não foi encontrado.\nConecte o pendrive com o seu jogo ou configure de novo."},
+         {L"Set up", L"Configurar"}}};
     return table.at(static_cast<size_t>(key))[pt ? 1 : 0];
 }
 } // namespace uwp

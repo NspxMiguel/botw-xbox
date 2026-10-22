@@ -7,7 +7,9 @@ struct D3D12RuntimeSettings
 {
 	uint64_t adapterLuid = 0;
 	int vsync = 1;
-	int pipelineWait = 1;
+	// 0 smooth: a draw whose pipeline is still compiling pops in a few frames later instead of
+	// stalling the frame (balanced waited up to 2 s per new pipeline on the Xbox driver).
+	int pipelineWait = 0;
 	int shaderCompiler = 1; // DXC/DXIL by default; 0 selects upstream FXC.
 	bool frameInterpolation = false;
 };

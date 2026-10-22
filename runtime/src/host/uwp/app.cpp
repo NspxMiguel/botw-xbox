@@ -35,12 +35,15 @@
 #include <winrt/Windows.ApplicationModel.Activation.h>
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.ApplicationModel.h>
+#include <winrt/Windows.Data.Json.h>
+#include <winrt/Windows.Data.Xml.Dom.h>
 #include <winrt/Windows.Devices.Input.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Gaming.Input.h>
 #include <winrt/Windows.Globalization.h>
 #include <winrt/Windows.Graphics.Display.h>
 #include <winrt/Windows.Storage.AccessCache.h>
+#include <winrt/Windows.Storage.FileProperties.h>
 #include <winrt/Windows.Storage.Pickers.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include <winrt/Windows.Storage.h>
@@ -48,6 +51,7 @@
 #include <winrt/Windows.System.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.UI.Input.h>
+#include <winrt/Windows.UI.Notifications.h>
 #include <winrt/Windows.UI.Popups.h>
 #include <winrt/Windows.UI.Text.Core.h>
 #include <winrt/Windows.UI.ViewManagement.h>
@@ -232,6 +236,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     std::chrono::steady_clock::time_point next_rumble{};
     event_token activating{}, suspending{}, resuming{}, closed{}, visibility{}, activated{}, size{}, dpi{};
 
+    static constexpr uint32_t virtual_lt = 1u << 16, virtual_rt = 1u << 17, virtual_ls_up = 1u << 18,
+                              virtual_ls_down = 1u << 19, virtual_ls_left = 1u << 20, virtual_ls_right = 1u << 21,
+                              virtual_rs_up = 1u << 22, virtual_rs_down = 1u << 23, virtual_rs_left = 1u << 24,
+                              virtual_rs_right = 1u << 25, virtual_axes = 0x3ff0000;
     static uint32_t virtual_button(winrt::Windows::System::VirtualKey key) {
         using winrt::Windows::System::VirtualKey;
         switch (key) {
@@ -247,6 +255,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         case VirtualKey::GamepadView: return uwp::view;
         case VirtualKey::GamepadLeftShoulder: return uwp::lb;
         case VirtualKey::GamepadRightShoulder: return uwp::rb;
+        case VirtualKey::GamepadLeftThumbstickButton: return uwp::ls;
+        case VirtualKey::GamepadRightThumbstickButton: return uwp::rs;
+        // Bits above the GamepadButtons range carry stick directions and triggers.
+        case VirtualKey::GamepadLeftTrigger: return virtual_lt;
+        case VirtualKey::GamepadRightTrigger: return virtual_rt;
+        case VirtualKey::GamepadLeftThumbstickUp: return virtual_ls_up;
+        case VirtualKey::GamepadLeftThumbstickDown: return virtual_ls_down;
+        case VirtualKey::GamepadLeftThumbstickLeft: return virtual_ls_left;
+        case VirtualKey::GamepadLeftThumbstickRight: return virtual_ls_right;
+        case VirtualKey::GamepadRightThumbstickUp: return virtual_rs_up;
+        case VirtualKey::GamepadRightThumbstickDown: return virtual_rs_down;
+        case VirtualKey::GamepadRightThumbstickLeft: return virtual_rs_left;
+        case VirtualKey::GamepadRightThumbstickRight: return virtual_rs_right;
         default: return 0;
         }
     }
@@ -492,7 +513,124 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
     }
     hstring label(uwp::Text key) const { return hstring(uwp::text(key, pt)); }
-    void read_preferences() {
+    IAsyncAction import_helper_settings() {
+        // Called on a worker thread; all storage operations remain asynchronous.
+        try {
+            auto folder = ApplicationData::Current().LocalFolder();
+            auto item = co_await folder.TryGetItemAsync(L"helper.json");
+            if (!item)
+                co_return;
+            auto file = item.try_as<StorageFile>();
+            if (!file) {
+                LOG("helper: helper.json is not a file");
+                co_return;
+            }
+            std::vector<std::pair<hstring, IInspectable>> pending;
+            bool rejected = false;
+            try {
+                auto properties = co_await file.GetBasicPropertiesAsync();
+                if (properties.Size() > 65536)
+                    throw hresult_invalid_argument(L"helper.json exceeds 64 KiB");
+                auto text = co_await FileIO::ReadTextAsync(file);
+                auto object = winrt::Windows::Data::Json::JsonObject::Parse(text);
+                using winrt::Windows::Data::Json::JsonValueType;
+                if (object.HasKey(L"autoLaunch")) {
+                    auto value = object.GetNamedValue(L"autoLaunch");
+                    if (value.ValueType() != JsonValueType::Boolean)
+                        throw hresult_invalid_argument(L"autoLaunch must be boolean");
+                    pending.emplace_back(L"autoLaunch", box_value(value.GetBoolean()));
+                    // setupComplete is intentionally preserved: a helper cannot bypass setup.
+                }
+                auto number = [&](wchar_t const *key, int minimum, int maximum) {
+                    if (!object.HasKey(key))
+                        return;
+                    auto value = object.GetNamedValue(key);
+                    if (value.ValueType() != JsonValueType::Number)
+                        throw hresult_invalid_argument(L"helper setting must be numeric");
+                    auto raw = value.GetNumber();
+                    int result;
+                    if (std::wstring_view(key) == L"fps")
+                        result = raw >= 60 ? 60 : 30;
+                    else if (std::wstring_view(key) == L"buttonLayout")
+                        result = raw == 1 ? 1 : 0;
+                    else if (std::wstring_view(key) == L"wallpaper")
+                        result = raw >= 0 && raw <= 3 ? static_cast<int>(raw) : -1;
+                    else
+                        result = static_cast<int>(std::clamp(raw, double(minimum), double(maximum)));
+                    pending.emplace_back(key, box_value(int32_t(result)));
+                };
+                number(L"fps", 30, 60);
+                number(L"volume", 0, 100);
+                number(L"buttonLayout", 0, 1);
+                number(L"wallpaper", -1, 3);
+                number(L"renderScalePercent", 0, 300);
+                number(L"upscaler", 0, 3);
+                number(L"fsrQuality", 0, 4);
+                number(L"frameGeneration", 0, 2);
+            } catch (...) {
+                rejected = true;
+            }
+            if (rejected) {
+                LOG("helper: invalid helper.json; rejecting");
+                co_await file.RenameAsync(L"helper.rejected.json", NameCollisionOption::ReplaceExisting);
+                co_return;
+            }
+            auto values = ApplicationData::Current().LocalSettings().Values();
+            for (auto const &[key, value] : pending)
+                values.Insert(key, value);
+            co_await file.RenameAsync(L"helper.applied.json", NameCollisionOption::ReplaceExisting);
+            LOG("helper: applied %d settings", int(pending.size()));
+        } catch (...) {
+            LOG("helper: settings import failed; continuing startup");
+        }
+    }
+    IAsyncAction update_helper_tile() {
+        try {
+            auto folder = ApplicationData::Current().LocalFolder();
+            auto item = co_await folder.TryGetItemAsync(L"cover.png");
+            if (!item)
+                co_return;
+            auto cover = item.try_as<StorageFile>();
+            if (!cover)
+                co_return;
+            auto properties = co_await cover.GetBasicPropertiesAsync();
+            auto modified = int64_t(properties.DateModified().time_since_epoch().count());
+            auto wide_item = co_await folder.TryGetItemAsync(L"cover-wide.png");
+            auto wide = wide_item ? wide_item.try_as<StorageFile>() : nullptr;
+            int64_t wide_modified = 0;
+            if (wide) {
+                auto wide_properties = co_await wide.GetBasicPropertiesAsync();
+                wide_modified = int64_t(wide_properties.DateModified().time_since_epoch().count());
+            }
+            auto values = ApplicationData::Current().LocalSettings().Values();
+            if (unbox_value_or<int64_t>(values.TryLookup(L"helperCoverModified"), 0) == modified &&
+                unbox_value_or<int64_t>(values.TryLookup(L"helperWideCoverModified"), 0) == wide_modified)
+                co_return;
+            std::wstring xml =
+                L"<tile><visual>"
+                L"<binding template=\"TileMedium\"><image src=\"ms-appdata:///local/cover.png\" "
+                L"hint-removeMargin=\"true\"/></binding>"
+                L"<binding template=\"TileWide\"><image src=\"ms-appdata:///local/";
+            xml += wide ? L"cover-wide.png" : L"cover.png";
+            xml += L"\" hint-removeMargin=\"true\"/></binding>"
+                   L"<binding template=\"TileLarge\"><image src=\"ms-appdata:///local/cover.png\" "
+                   L"hint-removeMargin=\"true\"/></binding></visual></tile>";
+            winrt::Windows::Data::Xml::Dom::XmlDocument document;
+            document.LoadXml(xml);
+            using namespace winrt::Windows::UI::Notifications;
+            TileUpdateManager::CreateTileUpdaterForApplication().Update(TileNotification(document));
+            values.Insert(L"helperCoverModified", box_value(modified));
+            values.Insert(L"helperWideCoverModified", box_value(wide_modified));
+            LOG("helper: tile cover set");
+        } catch (...) {
+            LOG("helper: tile cover update failed; continuing startup");
+        }
+    }
+    IAsyncAction read_preferences() {
+        auto lifetime = get_strong();
+        auto dispatcher = host_window.Dispatcher();
+        co_await resume_background();
+        co_await import_helper_settings();
         auto values = ApplicationData::Current().LocalSettings().Values();
         auto boolean = [&](wchar_t const *key, bool fallback) {
             auto value = values.TryLookup(key);
@@ -512,6 +650,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         preferences.upscaler = std::clamp(number(L"upscaler", 0), 0, 3);
         preferences.fsr_quality = std::clamp(number(L"fsrQuality", 0), 0, 4);
         preferences.frame_generation = std::clamp(number(L"frameGeneration", 0), 0, 2);
+        co_await update_helper_tile();
+        co_await resume_foreground(dispatcher);
     }
     void save_preferences() {
         auto values = ApplicationData::Current().LocalSettings().Values();
@@ -2261,6 +2401,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         if (!preferences.setup_complete)
             allow_auto = false;
+        bool warned_missing = false;
         for (;;) {
             auto decision = uwp::decide(candidates, preferences, !allow_auto);
             if (selected_game)
@@ -2281,6 +2422,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             if (quit)
                 co_return;
+            // Automatic start with no game (USB drive unplugged, folder gone): say so, then go to setup.
+            if (allow_auto && !warned_missing && preferences.auto_launch && decision.select_game && !failed && !running) {
+                warned_missing = true;
+                LOG("menu: auto-launch found no game, opening setup");
+                co_await choose(label(uwp::Text::title), label(uwp::Text::autoboot_missing),
+                                {label(uwp::Text::setup)});
+                allow_auto = false;
+                home.silver_setup = true;
+                co_await run_setup(false, preferences.setup_complete);
+                co_await scan();
+                allow_auto = preferences.setup_complete;
+                continue;
+            }
             allow_auto = false;
             hstring body = failed ? label(boot_attempted && !running ? uwp::Text::restart : uwp::Text::error)
                            : decision.select_game ? label(uwp::Text::missing)
@@ -2340,7 +2494,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 auto languages = winrt::Windows::Globalization::ApplicationLanguages::Languages();
                 pt = languages.Size() && std::wstring_view(languages.GetAt(0)).starts_with(L"pt");
                 local = ApplicationData::Current().LocalFolder();
-                read_preferences();
+                co_await read_preferences();
                 auto values = ApplicationData::Current().LocalSettings().Values();
                 render_scale_choice = unbox_value_or<float>(values.TryLookup(L"renderScale"), 0.f);
                 uwp::set_runtime_render_scale(render_scale_choice);
@@ -2610,7 +2764,18 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         virtual_was_held = virtual_held != 0;
         if (pad)
             r = pad.GetCurrentReading();
-        r.Buttons = GamepadButtons(uint32_t(r.Buttons) | virtual_held);
+        r.Buttons = GamepadButtons(uint32_t(r.Buttons) | (virtual_held & ~virtual_axes));
+        auto axis = [&](uint32_t plus, uint32_t minus, double value) {
+            return virtual_held & plus ? 1.0 : virtual_held & minus ? -1.0 : value;
+        };
+        r.LeftThumbstickX = axis(virtual_ls_right, virtual_ls_left, r.LeftThumbstickX);
+        r.LeftThumbstickY = axis(virtual_ls_up, virtual_ls_down, r.LeftThumbstickY);
+        r.RightThumbstickX = axis(virtual_rs_right, virtual_rs_left, r.RightThumbstickX);
+        r.RightThumbstickY = axis(virtual_rs_up, virtual_rs_down, r.RightThumbstickY);
+        if (virtual_held & virtual_lt)
+            r.LeftTrigger = 1;
+        if (virtual_held & virtual_rt)
+            r.RightTrigger = 1;
         if (quick_chord.update(uint32_t(r.Buttons), seconds)) {
             neutral();
             menu_visible = true;
