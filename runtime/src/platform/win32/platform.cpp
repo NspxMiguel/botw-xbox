@@ -24,9 +24,11 @@ namespace platform {
 namespace {
 std::atomic<uintptr_t> guest_base{0};
 FaultHandler fault_handler = nullptr;
-#if BOTW_HAS_VEH
 PVOID exception_cookie = nullptr;
-#endif
+// True once a vectored handler commits guest pages on first touch. Without it
+// UWP must commit the whole 4 GiB guest space up front, which leaves Xbox
+// games (5 GiB limit, CPU and GPU together) too little for the renderer.
+std::atomic<bool> lazy_commit{false};
 LONG CALLBACK exception_handler(EXCEPTION_POINTERS *info) {
   const auto &record = *info->ExceptionRecord;
   if (record.ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
@@ -39,39 +41,65 @@ LONG CALLBACK exception_handler(EXCEPTION_POINTERS *info) {
   // writable here.
   uintptr_t commit_page =
       guest_commit_page(base, address, record.ExceptionInformation[0]);
-  if (BOTW_HAS_VEH && commit_page) {
+  if (lazy_commit.load() && commit_page) {
     MEMORY_BASIC_INFORMATION region{};
     if (VirtualQuery(reinterpret_cast<void *>(address), &region,
                      sizeof(region)) &&
         region.State == MEM_RESERVE) {
       void *page = reinterpret_cast<void *>(commit_page);
       if (VirtualAlloc2FromApp(GetCurrentProcess(), page, 0x10000, MEM_COMMIT,
-                               PAGE_READWRITE, nullptr, 0))
+                               PAGE_READWRITE, nullptr, 0)) {
+        static std::atomic<int> logged{0};
+        if (logged.fetch_add(1) < 64)
+          LOG("guest memory: committed %08llx on touch",
+              (unsigned long long)(commit_page - base));
         return EXCEPTION_CONTINUE_EXECUTION;
+      }
       // Commit exhaustion is not recoverable by the write watcher.
       return EXCEPTION_CONTINUE_SEARCH;
     }
   }
-  if (fault_handler &&
+  // Write watching exists only with the SDK's own VEH. On UWP the handler is
+  // there just to commit pages, and other faults go to the code's own SEH.
+  if (BOTW_HAS_VEH && fault_handler &&
       fault_handler(reinterpret_cast<void *>(address), info->ContextRecord,
                     record.ExceptionInformation[0] == 1))
     return EXCEPTION_CONTINUE_EXECUTION;
   return EXCEPTION_CONTINUE_SEARCH;
 }
-bool ensure_exceptions() {
+// The APP partition of the SDK hides AddVectoredExceptionHandler, but the
+// system exports it. Find kernelbase through the address of one of its imports.
+PVOID add_vectored_handler(PVECTORED_EXCEPTION_HANDLER handler) {
 #if BOTW_HAS_VEH
-  if (!exception_cookie)
-    exception_cookie = AddVectoredExceptionHandler(1, exception_handler);
-  return exception_cookie != nullptr;
+  return AddVectoredExceptionHandler(1, handler);
 #else
-  // VEH is Desktop/System/Games, not APP, in the Microsoft SDK. A UWP top-level
-  // filter is diagnostic only; guest memory must be committed before execution.
-  SetUnhandledExceptionFilter([](EXCEPTION_POINTERS *info) -> LONG {
-    exception_handler(info);
-    return EXCEPTION_CONTINUE_SEARCH;
-  });
-  return true;
+  using Add = PVOID(WINAPI *)(ULONG, PVECTORED_EXCEPTION_HANDLER);
+  MEMORY_BASIC_INFORMATION module{};
+  if (!VirtualQuery(reinterpret_cast<void *>(&GetSystemInfo), &module,
+                    sizeof(module)))
+    return nullptr;
+  auto base = static_cast<HMODULE>(module.AllocationBase);
+  auto add = reinterpret_cast<Add>(
+      GetProcAddress(base, "AddVectoredExceptionHandler"));
+  return add ? add(1, handler) : nullptr;
 #endif
+}
+bool ensure_exceptions() {
+  if (!exception_cookie)
+    exception_cookie = add_vectored_handler(exception_handler);
+  lazy_commit = exception_cookie != nullptr;
+#if !BOTW_HAS_VEH
+  LOG("guest memory: %s", lazy_commit.load() ? "committed on first touch"
+                                            : "committed up front");
+  if (!lazy_commit.load())
+    // A top-level filter is diagnostic only; guest memory must be committed
+    // before execution.
+    SetUnhandledExceptionFilter([](EXCEPTION_POINTERS *info) -> LONG {
+      exception_handler(info);
+      return EXCEPTION_CONTINUE_SEARCH;
+    });
+#endif
+  return true;
 }
 std::wstring wide(const char *text) {
   int size =
@@ -101,14 +129,26 @@ void *reserve_guest() {
     return nullptr;
   void *p = VirtualAlloc2FromApp(GetCurrentProcess(), nullptr, kGuestSize,
                                  MEM_RESERVE, PAGE_NOACCESS, nullptr, 0);
-#if !BOTW_HAS_VEH
-  if (p && !VirtualAllocFromApp(static_cast<char *>(p) + kNullGuard,
+  if (p && !lazy_commit.load() && !VirtualAllocFromApp(static_cast<char *>(p) + kNullGuard,
                                 kGuestSize - kNullGuard, MEM_COMMIT,
                                 PAGE_READWRITE)) {
     VirtualFree(p, 0, MEM_RELEASE);
     return nullptr;
   }
-#endif
+  // With lazy commit, still commit the regions the Wii U really uses (code and
+  // MEM2 below 0x50000000, everything from 0xA0000000 up) so system
+  // calls such as file reads, which cannot raise the commit fault, always land
+  // in committed memory. The unused 1.25 GiB between stays reserved.
+  if (p && lazy_commit.load()) {
+    auto base = static_cast<char *>(p);
+    if (!VirtualAllocFromApp(base + kNullGuard, 0x50000000 - kNullGuard,
+                             MEM_COMMIT, PAGE_READWRITE) ||
+        !VirtualAllocFromApp(base + 0xA0000000ull, kGuestSize - 0xA0000000ull,
+                             MEM_COMMIT, PAGE_READWRITE)) {
+      VirtualFree(p, 0, MEM_RELEASE);
+      return nullptr;
+    }
+  }
   if (p)
     guest_base = reinterpret_cast<uintptr_t>(p);
   return p;

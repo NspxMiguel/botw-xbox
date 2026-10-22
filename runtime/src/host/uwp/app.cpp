@@ -2715,7 +2715,14 @@ void set_gyro(bool) {} // Xbox controllers have no motion sensor.
 void set_rumble(bool on) { rumble_enabled = on; }
 void set_layout(int value) { layout = value == 1 ? 1 : 0; }
 void set_script(const std::string &) {}
-void on_frame(uint64_t) {}
+void on_frame(uint64_t frame) {
+    // The app type (App or Game) in Dev Home sets this limit; log it so OOM crashes can be read against it.
+    if (frame % 300 == 1) {
+        using winrt::Windows::System::MemoryManager;
+        LOG("memory: %llu of %llu MB", (unsigned long long)(MemoryManager::AppMemoryUsage() >> 20),
+            (unsigned long long)(MemoryManager::AppMemoryUsageLimit() >> 20));
+    }
+}
 bool quit_requested() { return quit; }
 SDL_Window *g_win_ptr() { return nullptr; }
 } // namespace window
