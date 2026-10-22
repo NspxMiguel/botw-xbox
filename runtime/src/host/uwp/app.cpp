@@ -319,6 +319,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 } else
                     resize_home();
             });
+        // On Xbox an unhandled B is the system Back and sends the app home; B is a game button here.
+        winrt::Windows::UI::Core::SystemNavigationManager::GetForCurrentView().BackRequested(
+            [](auto const &, winrt::Windows::UI::Core::BackRequestedEventArgs const &e) { e.Handled(true); });
         key_up = window.KeyUp([this](auto const &, KeyEventArgs const &e) {
             virtual_buttons &= ~virtual_button(e.VirtualKey());
         });
@@ -2581,8 +2584,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             pad = current;
         }
         if ((home.shown || transfer_active || text_entry || browser_open) && !home.loading &&
-            home.flip_time < 0 && pad && visible) {
-            auto reading = pad.GetCurrentReading();
+            home.flip_time < 0 && (pad || virtual_buttons) && visible) {
+            // Device Portal remote input arrives as virtual keys, with or without a pad.
+            GamepadReading reading{};
+            if (pad)
+                reading = pad.GetCurrentReading();
+            reading.Buttons = GamepadButtons(uint32_t(reading.Buttons) | (virtual_buttons & ~virtual_axes));
             if (home.focus == 0 && !home.setup_mode && !home.mods_mode) {
                 home.stick_x = std::abs(reading.RightThumbstickX) > .12 ? float(reading.RightThumbstickX) : 0;
                 home.stick_y = std::abs(reading.RightThumbstickY) > .12 ? float(reading.RightThumbstickY) : 0;
