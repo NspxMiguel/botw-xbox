@@ -10,6 +10,9 @@
 #ifdef ENABLE_D3D12
 
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
+#ifdef BOTW_PLATFORM_UWP
+#include "../../../../../../src/host/uwp/host.h"
+#endif
 
 #include <dxgi1_5.h>
 #include <chrono>
@@ -137,6 +140,9 @@ void D3D12SwapChain::CreateBufferViews()
 
 void D3D12SwapChain::ReleaseBufferViews()
 {
+#ifdef BOTW_PLATFORM_UWP
+	uwp::release_presentation_resources(m_swapChain.Get());
+#endif
 	for (auto &b : m_buffers)
 	{
 		if (b.rtv.ptr)

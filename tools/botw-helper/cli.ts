@@ -40,8 +40,8 @@ export function validateConfig(value: unknown): void {
     throw new Error("Invalid config object");
   const config = value as Record<string, unknown>;
   for (const [key, item] of Object.entries(config)) {
-    if (key === "autoLaunch") {
-      if (typeof item !== "boolean") throw new Error("Invalid autoLaunch");
+    if (key === "autoLaunch" || key === "debugHud") {
+      if (typeof item !== "boolean") throw new Error(`Invalid ${key}`);
     } else {
       const range = ranges[key];
       if (

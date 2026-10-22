@@ -19,6 +19,7 @@
 #include "mod_network.h"
 #include "qr.h"
 #include "quick_view.h"
+#include "recorder.h"
 #include "runtime.h"
 #include "setup_storage.h"
 #include "strings.h"
@@ -66,6 +67,11 @@ using namespace winrt::Windows::UI::Core;
 using namespace winrt::Windows::UI::Popups;
 
 namespace {
+fire_and_forget finish_recording(SuspendingDeferral deferral) {
+    co_await resume_background();
+    uwp::wait_for_recording();
+    deferral.Complete();
+}
 CoreWindow host_window{nullptr};
 std::atomic<int> pixel_width{1280}, pixel_height{720}, layout{0};
 std::atomic<bool> visible{false}, drc{false}, rumble_enabled{true}, quit{false}, menu_visible{false};
@@ -229,6 +235,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     event_token key_down{}, key_up{}, pointer_pressed{};
     // Gamepad buttons that arrive as virtual keys (Device Portal remote input, remote play) instead of a Gamepad.
     std::atomic<uint32_t> virtual_buttons{0};
+    std::atomic<uint32_t> virtual_taps{0}; // key-downs not yet seen by the home poll (remote taps are shorter than a frame)
     StorageFolder local{nullptr}, selected_game{nullptr}, screenshots{nullptr};
     std::vector<uwp::Candidate> candidates;
     Gamepad pad{nullptr};
@@ -275,11 +282,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     IFrameworkView CreateView() { return *this; }
     void Initialize(CoreApplicationView const &view) {
         activating = view.Activated([](auto const &, auto const &) { host_window.Activate(); });
-        suspending = CoreApplication::Suspending([this](auto const &, SuspendingEventArgs const &) {
+        suspending = CoreApplication::Suspending([this](auto const &, SuspendingEventArgs const &args) {
             suspended = true;
+            uwp::stop_recording();
+            finish_recording(args.SuspendingOperation().GetDeferral());
             ApplicationData::Current().LocalSettings().Values().Remove(L"launchPending");
             neutral();
-            active(false); // synchronous, bounded: no deferral needed for LocalSettings already persisted.
+            active(false); // LocalSettings persistence and the visibility callback remain synchronous.
         });
         resuming = CoreApplication::Resuming([this](auto const &, auto const &) {
             suspended = false;
@@ -327,6 +336,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         });
         key_down = window.KeyDown([this](auto const &, KeyEventArgs const &e) {
             virtual_buttons |= virtual_button(e.VirtualKey());
+            virtual_taps |= virtual_button(e.VirtualKey());
             if ((!home.shown && !transfer_active && !text_entry && !browser_open) || home.loading ||
                 home.flip_time >= 0)
                 return;
@@ -543,6 +553,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         throw hresult_invalid_argument(L"autoLaunch must be boolean");
                     pending.emplace_back(L"autoLaunch", box_value(value.GetBoolean()));
                     // setupComplete is intentionally preserved: a helper cannot bypass setup.
+                }
+                if (object.HasKey(L"debugHud")) {
+                    auto value = object.GetNamedValue(L"debugHud");
+                    if (value.ValueType() != JsonValueType::Boolean)
+                        throw hresult_invalid_argument(L"debugHud must be boolean");
+                    pending.emplace_back(L"debugHud", box_value(value.GetBoolean()));
                 }
                 auto number = [&](wchar_t const *key, int minimum, int maximum) {
                     if (!object.HasKey(key))
@@ -2247,6 +2263,20 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             } catch (...) {
                 LOG("launch: prepare_runtime threw an unknown exception");
             }
+            if (loaded) {
+                try {
+                    uwp::debug_hud.start();
+                } catch (...) {
+                    uwp::debug_hud.enabled = false;
+                    LOG("debug HUD: initialization failed; disabled for this session");
+                }
+                try {
+                    uwp::capture_detail::recorder.start();
+                } catch (...) {
+                    uwp::stop_recording();
+                    LOG("recorder: initialization failed; disabled for this session");
+                }
+            }
             co_await resume_foreground(dispatcher);
             LOG("launch: prepare_runtime result=%d", int(loaded));
             if (!loaded) {
@@ -2584,12 +2614,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             pad = current;
         }
         if ((home.shown || transfer_active || text_entry || browser_open) && !home.loading &&
-            home.flip_time < 0 && (pad || virtual_buttons) && visible) {
+            home.flip_time < 0 && visible) {
             // Device Portal remote input arrives as virtual keys, with or without a pad.
             GamepadReading reading{};
             if (pad)
                 reading = pad.GetCurrentReading();
-            reading.Buttons = GamepadButtons(uint32_t(reading.Buttons) | (virtual_buttons & ~virtual_axes));
+            reading.Buttons =
+                GamepadButtons(uint32_t(reading.Buttons) | ((virtual_buttons | virtual_taps.exchange(0)) & ~virtual_axes));
             if (home.focus == 0 && !home.setup_mode && !home.mods_mode) {
                 home.stick_x = std::abs(reading.RightThumbstickX) > .12 ? float(reading.RightThumbstickX) : 0;
                 home.stick_y = std::abs(reading.RightThumbstickY) > .12 ? float(reading.RightThumbstickY) : 0;
@@ -2717,6 +2748,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         }
         if (!running || menu_open || !visible) {
             virtual_buttons = 0; // a key-up lost while hidden must not leave a button held
+            virtual_taps = 0;
             return;
         }
         GamepadReading r{};
@@ -2765,7 +2797,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             return;
         }
-        uint32_t virtual_held = virtual_buttons;
+        uint32_t virtual_held = virtual_buttons | virtual_taps.exchange(0); // in game, taps must not reach the home menu later
         if (quick_was_open || (!pad && !virtual_held && !virtual_was_held))
             return;
         virtual_was_held = virtual_held != 0;
@@ -2864,6 +2896,20 @@ namespace uwp {
 void *core_window() { return host_window ? get_abi(host_window) : nullptr; }
 bool gamepad_screen_requested() { return drc; }
 bool presentation_allowed() { return visible; }
+void present_overlays(void *device, void *queue, void *chain) {
+    try {
+        draw_debug_hud(device, queue, chain);
+    } catch (...) {
+        debug_hud.enabled = false;
+        LOG("debug HUD: drawing failed; disabled for this session");
+    }
+    try {
+        record_frame(device, queue, chain);
+    } catch (...) {
+        stop_recording();
+        LOG("recorder: capture failed; disabled for this session");
+    }
+}
 void present_quick_menu(void *device, void *queue, void *chain) {
     try {
         draw_quick_menu(device, queue, chain);
@@ -2873,6 +2919,7 @@ void present_quick_menu(void *device, void *queue, void *chain) {
         OutputDebugStringW(L"BotW: quick menu graphics failed.\n");
     }
 }
+void release_presentation_resources(void *chain) { release_capture_graphics(chain); }
 void set_visibility_callback(VisibilityCallback callback) { visibility_callback = callback; }
 } // namespace uwp
 namespace window {
@@ -2888,6 +2935,7 @@ void set_rumble(bool on) { rumble_enabled = on; }
 void set_layout(int value) { layout = value == 1 ? 1 : 0; }
 void set_script(const std::string &) {}
 void on_frame(uint64_t frame) {
+    uwp::debug_game_flips.store(frame, std::memory_order_relaxed);
     // The app type (App or Game) in Dev Home sets this limit; log it so OOM crashes can be read against it.
     if (frame % 300 == 1) {
         using winrt::Windows::System::MemoryManager;
@@ -2916,6 +2964,8 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     });
     LOG("BotW Xbox Recomp starting");
     CoreApplication::Run(make<App>());
+    uwp::stop_recording();
+    uwp::wait_for_recording();
     return 0;
 }
 #endif

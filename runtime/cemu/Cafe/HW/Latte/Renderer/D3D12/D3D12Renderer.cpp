@@ -1000,6 +1000,8 @@ void D3D12Renderer::PresentSwapChain(bool mainWindow)
 	TransitionResource(swapChain->GetCurrentBackbuffer(), swapChain->GetCurrentBackbufferState(), D3D12_RESOURCE_STATE_PRESENT);
 	SubmitCommandList(false);
 #if defined(BOTW_PLATFORM_UWP)
+	if (mainWindow && !uwp::quick_menu.requested.load())
+		uwp::present_overlays(m_device.Get(), m_queue.Get(), swapChain->GetSwapChain()); // debug HUD, recorder
 	if (mainWindow && uwp::quick_menu.requested.load())
 	{
 		// The quick menu presents synchronously while guest execution is paused.

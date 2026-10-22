@@ -6,6 +6,9 @@ namespace uwp {
 // Valid from SetWindow through Uninitialize. Renderer must AddRef if retaining it.
 void *core_window();
 void present_quick_menu(void *device, void *queue, void *swapchain);
+void present_overlays(void *device, void *queue, void *swapchain); // every frame: debug HUD, recorder
+// Renderer thread, before backbuffer references are released or ResizeBuffers is called.
+void release_presentation_resources(void *swapchain);
 bool gamepad_screen_requested(); // W2: choose DRC scanout instead of TV when true.
 bool presentation_allowed();     // W2: skip presentation while suspended/invisible.
 // W1/W2 may install a nonblocking lifecycle callback before CoreApplication::Run.
