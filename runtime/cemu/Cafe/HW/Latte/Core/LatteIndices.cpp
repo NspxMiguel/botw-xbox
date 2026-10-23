@@ -6,12 +6,19 @@
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Common/cpu_features.h"
+#include "Cafe/HW/Latte/Core/LatteIndexConversion.h"
 
-#if defined(ARCH_X86_64) && defined(__GNUC__)
+#if defined(ARCH_X86_64)
 #include <immintrin.h>
 #elif defined(__aarch64__)
 #include <arm_neon.h>
 #endif
+
+namespace
+{
+constexpr size_t kPersistentEntries = 256;
+constexpr size_t kIndexWays = 4;
+} // namespace
 
 struct
 {
@@ -25,13 +32,15 @@ struct
 		LatteDrawCache::ContentSnapshot content;
 		// output
 		uint32 indexMax;
+		uint32 rawIndexMax;
+		uint32 restartIndex;
 		Renderer::INDEX_TYPE renderIndexType;
 		uint32 outputCount;
 		Renderer::IndexAllocation indexAllocation;
 	};
-	// D3D12: direct-mapped small entries (at most 4 MiB of CPU shadows), plus
-	// eight transient LRU entries for larger inputs and the other backends.
-	std::array<CacheEntry, 72> entry;
+	// Four-way sets prevent alternating draws from evicting each other. Bounded
+	// at 16 MiB of input and 24 MiB of output payload (excluding allocator capacity).
+	std::array<CacheEntry, kPersistentEntries + 8> entry;
 	uint64 currentUsageCounter{0};
 }LatteIndexCache{};
 
@@ -41,7 +50,7 @@ void LatteIndices_invalidate(const void* memPtr, uint32 size)
 	{
 		if (entry.lastPtr && LatteDrawCache::RangesOverlap((uintptr_t)entry.lastPtr, entry.inputSize, (uintptr_t)memPtr, size))
 		{
-			if(entry.lastPtr != nullptr)
+			if (entry.lastPtr)
 				g_renderer->indexData_releaseIndexMemory(entry.indexAllocation);
 			entry.lastPtr = nullptr;
 		}
@@ -57,7 +66,7 @@ void LatteIndices_invalidateOnWait()
 		LatteIndices_invalidateAll();
 		return;
 	}
-	for (size_t i = 64; i < LatteIndexCache.entry.size(); ++i)
+	for (size_t i = kPersistentEntries; i < LatteIndexCache.entry.size(); ++i)
 	{
 		auto &entry = LatteIndexCache.entry[i];
 		if (entry.lastPtr)
@@ -73,7 +82,7 @@ void LatteIndices_invalidateAll(Renderer *renderer)
 		renderer = g_renderer.get();
 	for(auto& entry : LatteIndexCache.entry)
 	{
-		if (entry.lastPtr != nullptr)
+		if (entry.lastPtr)
 			renderer->indexData_releaseIndexMemory(entry.indexAllocation);
 		entry.content.Clear();
 		entry.lastPtr = nullptr;
@@ -163,19 +172,10 @@ uint32 LatteIndices_calculateIndexOutputSize(LattePrimitiveMode primitiveMode, L
 	return 0;
 }
 
-template<typename T>
-void LatteIndices_convertBE(const void* indexDataInput, void* indexDataOutput, uint32 count, uint32& indexMax)
+template <typename T>
+void LatteIndices_convertBE(const void *input, void *output, uint32 count, uint32 &indexMax)
 {
-	const betype<T>* src = (betype<T>*)indexDataInput;
-	T* dst = (T*)indexDataOutput;
-	for (uint32 i = 0; i < count; i++)
-	{
-		T v = *src;
-		*dst = v;
-		indexMax = std::max(indexMax, (uint32)v);
-		dst++;
-		src++;
-	}
+	LatteIndexConversion::CopyBigEndian<T>(input, output, count, indexMax);
 }
 
 template<typename T>
@@ -193,38 +193,16 @@ void LatteIndices_convertLE(const void* indexDataInput, void* indexDataOutput, u
 	}
 }
 
-template<typename T>
-void LatteIndices_unpackQuadsAndConvert(const void* indexDataInput, void* indexDataOutput, uint32 count, uint32& indexMax)
+template <typename T>
+void LatteIndices_unpackQuadsAndConvert(const void *input, void *output, uint32 count, uint32 &indexMax)
 {
-	sint32 numQuads = count / 4;
-	const betype<T>* src = (betype<T>*)indexDataInput;
-	T* dst = (T*)indexDataOutput;
-	for (sint32 i = 0; i < numQuads; i++)
-	{
-		T idx0 = src[0];
-		T idx1 = src[1];
-		T idx2 = src[2];
-		T idx3 = src[3];
-		indexMax = std::max(indexMax, (uint32)idx0);
-		indexMax = std::max(indexMax, (uint32)idx1);
-		indexMax = std::max(indexMax, (uint32)idx2);
-		indexMax = std::max(indexMax, (uint32)idx3);
-		dst[0] = idx0;
-		dst[1] = idx1;
-		dst[2] = idx2;
-		dst[3] = idx0;
-		dst[4] = idx2;
-		dst[5] = idx3;
-		src += 4;
-		dst += 6;
-	}
+	LatteIndexConversion::ExpandBigEndian<T, false>(input, output, count, indexMax);
 }
 
 template<typename T>
 void LatteIndices_generateAutoQuadIndices(const void* indexDataInput, void* indexDataOutput, uint32 count, uint32& indexMax)
 {
 	sint32 numQuads = count / 4;
-	const betype<T>* src = (betype<T>*)indexDataInput;
 	T* dst = (T*)indexDataOutput;
 	for (sint32 i = 0; i < numQuads; i++)
 	{
@@ -238,58 +216,30 @@ void LatteIndices_generateAutoQuadIndices(const void* indexDataInput, void* inde
 		dst[3] = idx0;
 		dst[4] = idx2;
 		dst[5] = idx3;
-		src += 4;
 		dst += 6;
 	}
 	indexMax = std::max(count, 1u) - 1;
 }
 
-template<typename T>
-void LatteIndices_unpackQuadStripAndConvert(const void* indexDataInput, void* indexDataOutput, uint32 count, uint32& indexMax)
+template <typename T>
+void LatteIndices_unpackQuadStripAndConvert(const void *input, void *output, uint32 count, uint32 &indexMax)
 {
-	if (count <= 3)
-		return;
-	sint32 numQuads = (count - 2) / 2;
-	const betype<T>* src = (betype<T>*)indexDataInput;
-	T* dst = (T*)indexDataOutput;
-	for (sint32 i = 0; i < numQuads; i++)
-	{
-		T idx0 = src[0];
-		T idx1 = src[1];
-		T idx2 = src[2];
-		T idx3 = src[3];
-		indexMax = std::max(indexMax, (uint32)idx0);
-		indexMax = std::max(indexMax, (uint32)idx1);
-		indexMax = std::max(indexMax, (uint32)idx2);
-		indexMax = std::max(indexMax, (uint32)idx3);
-		dst[0] = idx0;
-		dst[1] = idx1;
-		dst[2] = idx2;
-		dst[3] = idx2;
-		dst[4] = idx1;
-		dst[5] = idx3;
-		src += 2;
-		dst += 6;
-	}
+	LatteIndexConversion::ExpandBigEndian<T, true>(input, output, count, indexMax);
 }
 
-template<typename T>
-void LatteIndices_unpackLineLoopAndConvert(const void* indexDataInput, void* indexDataOutput, uint32 count, uint32& indexMax)
+template <typename T>
+void LatteIndices_unpackLineLoopAndConvert(const void *input, void *output, uint32 count, uint32 &indexMax)
 {
-	if (count <= 0)
+	if (!count)
 		return;
-	const betype<T>* src = (betype<T>*)indexDataInput;
-	T firstIndex = *src;
-	T* dst = (T*)indexDataOutput;
-	for (sint32 i = 0; i < (sint32)count; i++)
-	{
-		T idx = *src;
-		indexMax = std::max(indexMax, (uint32)idx);
-		*dst = idx;
-		src++;
-		dst++;
-	}
-	*dst = firstIndex;
+	LatteIndexConversion::CopyBigEndian<T>(input, output, count, indexMax);
+	// Read from guest memory, never from write-combined upload memory.
+	T first;
+	const auto *source = static_cast<const uint8 *>(input);
+	first = 0;
+	for (size_t byte = 0; byte < sizeof(T); ++byte)
+		first = T((first << 8) | source[byte]);
+	std::memcpy(static_cast<uint8 *>(output) + count * sizeof(T), &first, sizeof(T));
 }
 
 template<typename T>
@@ -355,7 +305,6 @@ void LatteIndices_unpackTriangleFanAndConvert(const void* indexDataInput, void* 
 template<typename T>
 void LatteIndices_generateAutoTriangleFanIndices(const void* indexDataInput, void* indexDataOutput, uint32 count, uint32& indexMax)
 {
-	const betype<T>* src = (betype<T>*)indexDataInput;
 	T* dst = (T*)indexDataOutput;
 	for (sint32 i = 0; i < count; i++)
 	{
@@ -392,7 +341,7 @@ void LatteIndices_fastConvertU16_AVX2(const void* indexDataInput, void* indexDat
 			_mm_prefetch((const char*)indicesU16BE, _MM_HINT_T0);
 			// endian swap
 			mIndexData = _mm256_shuffle_epi8(mIndexData, mShuffle16Swap);
-			_mm256_store_si256((__m256i*)indexOutput, mIndexData);
+			_mm256_storeu_si256((__m256i *)indexOutput, mIndexData);
 			mMax = _mm256_max_epu16(mIndexData, mMax);
 			indexOutput += 16;
 		} while (--count16);
@@ -446,7 +395,7 @@ void LatteIndices_fastConvertU16_SSE41(const void* indexDataInput, void* indexDa
 			mRawIndices++;
 			mTemp = _mm_shuffle_epi8(mTemp, shufmask);
 			mMax = _mm_max_epu16(mMax, mTemp);
-			_mm_store_si128(mOutputIndices, mTemp);
+			_mm_storeu_si128(mOutputIndices, mTemp);
 			mOutputIndices++;
 		}
 
@@ -500,7 +449,7 @@ void LatteIndices_fastConvertU32_AVX2(const void* indexDataInput, void* indexDat
 			_mm_prefetch((const char*)indicesU32BE, _MM_HINT_T0);
 			// endian swap
 			mIndexData = _mm256_shuffle_epi8(mIndexData, mShuffle32Swap);
-			_mm256_store_si256((__m256i*)indexOutput, mIndexData);
+			_mm256_storeu_si256((__m256i *)indexOutput, mIndexData);
 			mMax = _mm256_max_epu32(mIndexData, mMax);
 			indexOutput += 8;
 		} while (--count8);
@@ -549,7 +498,7 @@ void LatteIndices_fastConvertU16_NEON(const void* indexDataInput, void* indexDat
 		{
 			mTemp = vld1q_u16((uint16*)mRawIndices);
 			mRawIndices++;
-			mTemp = vrev16q_u8(mTemp);
+			mTemp = vreinterpretq_u16_u8(vrev16q_u8(vreinterpretq_u8_u16(mTemp)));
 			mMax = vmaxq_u16(mMax, mTemp);
 			vst1q_u16((uint16*)mOutputIndices, mTemp);
 			mOutputIndices++;
@@ -595,7 +544,7 @@ void LatteIndices_fastConvertU32_NEON(const void* indexDataInput, void* indexDat
 		{
 			mTemp = vld1q_u32((uint32*)mRawIndices);
 			mRawIndices++;
-			mTemp = vrev32q_u8(mTemp);
+			mTemp = vreinterpretq_u32_u8(vrev32q_u8(vreinterpretq_u8_u32(mTemp)));
 			mMax = vmaxq_u32(mMax, mTemp);
 			vst1q_u32((uint32*)mOutputIndices, mTemp);
 			mOutputIndices++;
@@ -623,22 +572,26 @@ void LatteIndices_fastConvertU32_NEON(const void* indexDataInput, void* indexDat
 
 #endif
 
-template<typename T>
-void _LatteIndices_alternativeCalculateIndexMax(const void* indexData, uint32 count, uint32 primitiveRestartIndex, uint32& indexMax)
+template <typename T, bool BigEndian = true>
+void _LatteIndices_alternativeCalculateIndexMax(const void *indexData, uint32 count, uint32 primitiveRestartIndex, uint32 &indexMax)
 {
 	cemu_assert_debug(count != 0);
-	const betype<T>* idxPtrT = (betype<T>*)indexData;
-	T _indexMax = *idxPtrT;
+	const auto *idxPtrT = static_cast<const uint8 *>(indexData);
+	T _indexMax = 0;
 	cemu_assert_debug(primitiveRestartIndex <= std::numeric_limits<T>::max());
 	T restartIndexT = (T)primitiveRestartIndex;
 	while (count)
 	{
-		T idx = *idxPtrT;
+		T idx;
+		if constexpr (BigEndian)
+			idx = *reinterpret_cast<const betype<T> *>(idxPtrT);
+		else
+			std::memcpy(&idx, idxPtrT, sizeof(T));
 		if (idx != restartIndexT)
 		{
 			_indexMax = std::max(_indexMax, idx);
 		}
-		idxPtrT++;
+		idxPtrT += sizeof(T);
 		count--;
 	}
 	indexMax = _indexMax;
@@ -663,10 +616,11 @@ void LatteIndices_alternativeCalculateIndexMax(const void* indexData, LatteIndex
 	{
 		_LatteIndices_alternativeCalculateIndexMax<uint32>(indexData, count, primitiveRestartIndex, indexMax);
 	}
-	else
-	{
-		cemu_assert_debug(false);
-	}
+	else if (indexType == LatteIndexType::U16_LE)
+		_LatteIndices_alternativeCalculateIndexMax<uint16, false>(indexData, count, primitiveRestartIndex, indexMax);
+	else if (indexType == LatteIndexType::U32_LE)
+		_LatteIndices_alternativeCalculateIndexMax<uint32, false>(indexData, count, primitiveRestartIndex, indexMax);
+	// AUTO indices have no guest memory or primitive-restart token.
 }
 
 void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32 count, LattePrimitiveMode primitiveMode, uint32& indexMax, Renderer::INDEX_TYPE& renderIndexType, uint32& outputCount, Renderer::IndexAllocation& indexAllocation)
@@ -692,15 +646,16 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		return;
 	}
 	const bool persistent = validateContent && inputSize <= 64 * 1024 && indexOutputSize <= 96 * 1024;
-	const LatteDrawCache::IndexKey key{(uintptr_t)indexData, count, (uint32)indexType, (uint32)primitiveMode, primitiveRestartIndex};
-	auto begin = LatteIndexCache.entry.begin() + 64;
+	// AUTO has no input bytes: its output is independent of the guest pointer.
+	const LatteDrawCache::IndexKey key{indexType == LatteIndexType::AUTO ? 0 : (uintptr_t)indexData, count, (uint32)indexType, (uint32)primitiveMode, 0};
+	auto begin = LatteIndexCache.entry.begin() + kPersistentEntries;
 	auto end = LatteIndexCache.entry.end();
 	if (persistent)
 	{
-		// Address/count/mode/type/restart are compared below; collisions only replace entries.
-		const size_t slot = key.Slot(64);
+		// Compare the complete key and all content bytes inside a four-way set.
+		const size_t slot = key.Slot(kPersistentEntries / kIndexWays) * kIndexWays;
 		begin = LatteIndexCache.entry.begin() + slot;
-		end = begin + 1;
+		end = begin + kIndexWays;
 	}
 	auto cacheEntry = std::find_if(begin, end, [&](const auto &entry) {
 		return entry.lastPtr && entry.key == key && (!validateContent || entry.content.Matches(indexData, inputSize));
@@ -708,6 +663,15 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	if (cacheEntry != end)
 	{
 		LatteProfiler::Add(LatteProfiler::Counter::IndexHits);
+		// Restart changes the vertex bound, never the converted index bytes.
+		// Recompute metadata without converting/uploading the same stream again.
+		if (cacheEntry->restartIndex != primitiveRestartIndex)
+		{
+			cacheEntry->indexMax = cacheEntry->rawIndexMax;
+			if (primitiveRestartIndex == cacheEntry->rawIndexMax && indexType != LatteIndexType::AUTO)
+				LatteIndices_alternativeCalculateIndexMax(indexData, indexType, count, cacheEntry->indexMax);
+			cacheEntry->restartIndex = primitiveRestartIndex;
+		}
 		indexMax = cacheEntry->indexMax;
 		renderIndexType = cacheEntry->renderIndexType;
 		outputCount = cacheEntry->outputCount;
@@ -716,13 +680,19 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		return;
 	}
 	LatteProfiler::Add(LatteProfiler::Counter::IndexMisses);
+	if (!persistent)
+		LatteProfiler::Add(LatteProfiler::Counter::IndexTransientMisses);
+	else if (std::any_of(begin, end, [&](const auto &entry) { return entry.lastPtr && entry.key == key; }))
+		LatteProfiler::Add(LatteProfiler::Counter::IndexContentMisses);
+	else if (std::all_of(begin, end, [](const auto &entry) { return entry.lastPtr; }))
+		LatteProfiler::Add(LatteProfiler::Counter::IndexSetEvictions);
 
 	outputCount = 0;
 	if (indexType == LatteIndexType::AUTO)
 		renderIndexType = Renderer::INDEX_TYPE::NONE;
 	else if (indexType == LatteIndexType::U16_BE || indexType == LatteIndexType::U16_LE)
 		renderIndexType = Renderer::INDEX_TYPE::U16;
-	else if (indexType == LatteIndexType::U32_BE)
+	else if (indexType == LatteIndexType::U32_BE || indexType == LatteIndexType::U32_LE)
 		renderIndexType = Renderer::INDEX_TYPE::U32;
 	else
 		cemu_assert_debug(false);
@@ -875,27 +845,34 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	}
 	// the above algorithms use a fast approach to get indexMax which does not filter out indices matching primitiveRestartIndex
 	// here we use a fallback in case the determined index equals the primitive restart index
-	if (primitiveRestartIndex == indexMax)
+	const uint32 rawIndexMax = indexMax;
+	if (primitiveRestartIndex == indexMax && indexType != LatteIndexType::AUTO)
 	{
 		// recalculate index range but filter out primitive restart index
 		LatteIndices_alternativeCalculateIndexMax(indexData, indexType, count, indexMax);
 	}
 	g_renderer->indexData_uploadIndexMemory(indexAllocation);
 	performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += indexOutputSize;
-	// get least recently used cache entry
-	auto lruEntry = std::min_element(begin, end, [](const auto &a, const auto &b) {
-		return a.lastUsed < b.lastUsed;
-	});
+	// Content mutations replace their own key rather than consuming another way.
+	auto lruEntry = std::find_if(begin, end, [&](const auto &entry) { return entry.lastPtr && entry.key == key; });
+	if (lruEntry == end)
+		lruEntry = std::find_if(begin, end, [](const auto &entry) { return !entry.lastPtr; });
+	if (lruEntry == end)
+		lruEntry = std::min_element(begin, end, [](const auto &a, const auto &b) { if (!a.lastPtr || !b.lastPtr)
+			return !a.lastPtr && b.lastPtr;
+		return a.lastUsed < b.lastUsed; });
 	// invalidate previous allocation
-	if(lruEntry->lastPtr != nullptr)
+	if (lruEntry->lastPtr)
 		g_renderer->indexData_releaseIndexMemory(lruEntry->indexAllocation);
 	// update cache
 	if (validateContent)
 		lruEntry->content.Assign(indexData, inputSize);
 	lruEntry->inputSize = inputSize;
 	lruEntry->key = key;
-	lruEntry->lastPtr = indexData;
+	lruEntry->lastPtr = indexType == LatteIndexType::AUTO ? reinterpret_cast<const void *>(uintptr_t(1)) : indexData;
 	lruEntry->indexMax = indexMax;
+	lruEntry->rawIndexMax = rawIndexMax;
+	lruEntry->restartIndex = primitiveRestartIndex;
 	lruEntry->renderIndexType = renderIndexType;
 	lruEntry->outputCount = outputCount;
 	lruEntry->indexAllocation = indexAllocation;

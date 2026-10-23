@@ -7,9 +7,12 @@
 
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12StageTable.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Memory.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12DescriptorHeaps.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Format.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureD3D12.h"
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "util/math/vector2.h"
 
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
@@ -38,21 +41,6 @@ namespace WindowSystem
 struct WindowHandleInfo;
 }
 
-// content of one per-stage CBV/SRV/UAV descriptor table, indexed by shader register
-struct D3D12StageTableDesc
-{
-	D3D12_GPU_VIRTUAL_ADDRESS cbvAddress[D3D12Const::kMaxCBVsPerStage]{};
-	uint32 cbvSize[D3D12Const::kMaxCBVsPerStage]{};
-	D3D12_CPU_DESCRIPTOR_HANDLE srv[D3D12Const::kMaxSRVsPerStage]{};
-	ID3D12Resource *uavResource = nullptr;
-	uint32 uavSize = 0;
-	bool operator==(const D3D12StageTableDesc &other) const
-	{
-		return std::memcmp(cbvAddress, other.cbvAddress, sizeof(cbvAddress)) == 0 &&
-			   std::memcmp(cbvSize, other.cbvSize, sizeof(cbvSize)) == 0 &&
-			   std::memcmp(srv, other.srv, sizeof(srv)) == 0 && uavResource == other.uavResource && uavSize == other.uavSize;
-	}
-};
 
 class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 {
@@ -258,9 +246,36 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void NotifyFBORelease(CachedFBOD3D12 *fbo);
 
 	// state tracking. Barriers are batched and flushed before the next command that needs them
-	void TransitionTexture(LatteTextureD3D12 *texture, uint32 firstMip, uint32 mipCount, uint32 firstSlice, uint32 sliceCount, D3D12_RESOURCE_STATES newState);
+	void TransitionTexture(LatteTextureD3D12 *texture, uint32 firstMip, uint32 mipCount, uint32 firstSlice, uint32 sliceCount, D3D12_RESOURCE_STATES newState)
+	{
+		if (!texture->GetResource())
+			return;
+		constexpr auto writeStates = D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RESOLVE_DEST;
+		// This must run even on hits: copied slice SRVs track content, not barriers.
+		if (newState & writeStates)
+			texture->MarkContentWritten();
+		if (texture->Is3DTexture())
+		{
+			firstSlice = 0;
+			sliceCount = 1;
+		}
+		const LatteTextureD3D12::TransitionKey key{firstMip, mipCount, firstSlice, sliceCount, (uint32)newState};
+		if (texture->ReuseTransition(key))
+		{
+			LatteProfiler::Add(LatteProfiler::Counter::TransitionHits);
+			return;
+		}
+		TransitionTextureSlow(texture, firstMip, mipCount, firstSlice, sliceCount, newState);
+	}
+	void TransitionTextureSlow(LatteTextureD3D12 *texture, uint32 firstMip, uint32 mipCount, uint32 firstSlice, uint32 sliceCount, D3D12_RESOURCE_STATES newState);
 	void TransitionTextureAll(LatteTextureD3D12 *texture, D3D12_RESOURCE_STATES newState);
-	void TransitionResource(ID3D12Resource *resource, D3D12_RESOURCE_STATES &trackedState, D3D12_RESOURCE_STATES newState);
+	void TransitionResource(ID3D12Resource *resource, D3D12_RESOURCE_STATES &trackedState, D3D12_RESOURCE_STATES newState)
+	{
+		if (trackedState == newState)
+			return;
+		m_pendingBarriers.push_back(D3D12_TransitionBarrier(resource, trackedState, newState));
+		trackedState = newState;
+	}
 	void UAVBarrier(ID3D12Resource *resource);
 	void FlushBarriers();
 
@@ -476,6 +491,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	struct DrawState
 	{
 		bool skipDrawSequence = false;
+		bool streamoutEnabled = false;
 		CachedFBOD3D12 *activeFBO = nullptr;
 		bool renderTargetsDirty = true;
 		LatteTextureViewD3D12 *boundTexture[LATTE_CEMU_GS_TEX_UNIT_BASE + LATTE_NUM_MAX_TEX_UNITS]{};
@@ -514,24 +530,22 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		uint64 submission = ~0ull;
 	};
 	UniformCacheEntry m_uniformCache[3];
-	struct ViewTableCacheEntry
-	{
-		std::array<uint64, D3D12Const::kMaxCBVsPerStage * 2 + D3D12Const::kMaxSRVsPerStage + 2> key{};
-		uint64 generation = 0;
-		uint64 sourceGeneration = 0;
-		D3D12_GPU_DESCRIPTOR_HANDLE table{};
-	};
-	std::array<ViewTableCacheEntry, 128> m_viewTableCache{};
 	LatteDrawCache::ExactCache<D3D12StageTableDesc, D3D12_GPU_DESCRIPTOR_HANDLE> m_lastViewTable[4];
 	struct CBVCacheEntry
 	{
 		D3D12_CPU_DESCRIPTOR_HANDLE descriptor{};
 		D3D12_GPU_VIRTUAL_ADDRESS address = 0;
 		uint32 size = 0;
-		uint64 submission = ~0ull;
 	};
 	// One staging slot per register avoids source aliasing during the bulk copy. The last bank is for internal passes.
 	CBVCacheEntry m_cbvCache[(uint32)D3D12Const::Stage::Count + 1][D3D12Const::kMaxCBVsPerStage];
+	struct UAVCacheEntry
+	{
+		D3D12_CPU_DESCRIPTOR_HANDLE descriptor{};
+		ID3D12Resource *resource = nullptr;
+		uint32 size = 0;
+	};
+	UAVCacheEntry m_stageUAVCache[(uint32)D3D12Const::Stage::Count + 1];
 	struct SamplerTableCacheEntry
 	{
 		D3D12_SAMPLER_DESC samplers[D3D12Const::kMaxSamplersPerStage]{};

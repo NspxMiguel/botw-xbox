@@ -85,10 +85,16 @@ class LatteTextureD3D12 : public LatteTexture
 	void SetSubresourceState(uint32 subresource, D3D12_RESOURCE_STATES state)
 	{
 		m_lastTransition.Clear();
+		++m_stateVersion;
 		m_states[subresource] = state;
 	}
 	bool AllSubresourcesInState(D3D12_RESOURCE_STATES state) const;
 	void SetAllSubresourceStates(D3D12_RESOURCE_STATES state);
+
+	uint64 GetStateVersion() const
+	{
+		return m_stateVersion;
+	}
 
 	using TransitionKey = std::array<uint32_t, 5>;
 	bool ReuseTransition(const TransitionKey &key) const
@@ -109,6 +115,7 @@ class LatteTextureD3D12 : public LatteTexture
   private:
 	LatteDrawCache::ExactCache<TransitionKey, bool> m_lastTransition;
 	uint64 m_contentVersion = 1;
+	uint64 m_stateVersion = 1;
 	D3D12Renderer *m_renderer;
 	ComPtr<ID3D12Resource> m_resource;
 	D3D12_RESOURCE_DESC m_desc{};

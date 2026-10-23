@@ -131,6 +131,8 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 	if (!s_state.enabled || !frames || seconds <= 0.0)
 		return;
 	Checkpoint(now);
+	if (s_state.detailEnabled)
+		CheckpointDetails(now);
 	constexpr size_t count = static_cast<size_t>(Slot::Count);
 	constexpr std::array<const char *, count> names{
 		"draw-other", "shader-pipeline", "texture-bind", "texture-load", "buffer-sync", "indices",
@@ -173,5 +175,13 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				perFrame(Counter::DynamicStateHits), perFrame(Counter::DynamicStateMisses),
 				perFrame(Counter::TransitionHits), perFrame(Counter::TransitionMisses), perFrame(Counter::IndexHits), perFrame(Counter::IndexMisses),
 				perFrame(Counter::FramebufferHits), perFrame(Counter::FramebufferMisses), perFrame(Counter::PipelineStateHits), perFrame(Counter::Submissions), perFrame(Counter::EmptySubmissions));
+	if (s_state.detailEnabled)
+	{
+		const auto detail = [&](Detail slot) { return s_state.detailNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };
+		cemuLog_log(LogType::Force, "Latte detail (inclusive ms/frame): sequence {:.3f}, shader-resolve {:.3f}, packet-decode {:.3f}, streamout {:.3f}, bindings-prepare {:.3f}",
+					detail(Detail::Sequence), detail(Detail::ShaderResolve), detail(Detail::PacketDecode), detail(Detail::Streamout), detail(Detail::BindingsPrepare));
+	}
+	cemuLog_log(LogType::Force, "Latte index misses/frame: content {:.1f}, set-eviction {:.1f}, transient {:.1f}",
+				perFrame(Counter::IndexContentMisses), perFrame(Counter::IndexSetEvictions), perFrame(Counter::IndexTransientMisses));
 	Reset(now);
 }

@@ -129,3 +129,12 @@ void LatteShaderCache_writeSeparablePixelShader(uint64 shaderBaseHash, uint64 sh
 
 // todo - refactor this
 sint32 LatteDecompiler_getTextureSamplerBaseIndex(LatteConst::ShaderType shaderType);
+
+struct LatteActiveShaders
+{
+	LatteFetchShader *fetch;
+	LatteDecompilerShader *vertex;
+	LatteDecompilerShader *pixel;
+	LatteDecompilerShader *geometry;
+};
+LatteActiveShaders LatteSHRC_GetActiveShaders();

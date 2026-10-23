@@ -5,7 +5,7 @@
 
 #pragma once
 
-#include "Cafe/HW/Latte/Core/LatteTexture.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureD3D12.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 
 #include <unordered_map>
@@ -22,6 +22,16 @@ class LatteTextureViewD3D12 : public LatteTextureView
 	LatteTextureD3D12 *GetBaseTexture() const
 	{
 		return m_baseTexture;
+	}
+
+	bool ReuseShaderReadTransition() const
+	{
+		return m_shaderReadState.Matches(m_baseTexture->GetStateVersion());
+	}
+	void RememberShaderReadTransition()
+	{
+		if (m_baseTexture->GetResource())
+			m_shaderReadState.Remember(m_baseTexture->GetStateVersion());
 	}
 
 	// staging (non shader-visible) SRV for the given GPU7 sampler swizzle (SQ_TEX_RESOURCE_WORD4)
@@ -66,6 +76,7 @@ class LatteTextureViewD3D12 : public LatteTextureView
 	D3D12_RESOURCE_STATES m_sliceCopyState = D3D12_RESOURCE_STATE_COPY_DEST;
 	uint64 m_sliceCopyVersion = 0;
 
+	LatteDrawCache::VersionMemo m_shaderReadState;
 	D3D12Renderer *m_renderer;
 	LatteTextureD3D12 *m_baseTexture;
 	DXGI_FORMAT m_srvFormat;

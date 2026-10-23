@@ -133,3 +133,17 @@ struct TestPerformanceMonitor
 	uint32 cycleIndex = 0;
 };
 inline TestPerformanceMonitor performanceMonitor;
+
+#if defined(ARCH_X86_64)
+#define ATTRIBUTE_AVX2 __attribute__((target("avx2")))
+#define ATTRIBUTE_SSE41 __attribute__((target("ssse3,sse4.1")))
+inline struct TestCPUFeatures
+{
+	struct
+	{
+		bool avx2 = true;
+		bool ssse3 = true;
+		bool sse4_1 = true;
+	} x86;
+} g_CPUFeatures;
+#endif

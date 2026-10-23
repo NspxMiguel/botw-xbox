@@ -112,16 +112,19 @@ descriptor contents remain usable within their allocation epoch; root arguments
 are still rebound by the existing native binding state. Pipeline lookup state is
 cleared by `D3D12PipelineCache::Clear`.
 
-D3D12 converted indices use 64 direct-mapped persistent slots with exact
-`(address, count, type, primitive mode, restart index)` keys and full CPU shadows.
-Retained inputs are at most 64 KiB and converted output at most 96 KiB per slot
-(4 MiB of input shadows and 6 MiB of live output payload at capacity, excluding
-allocator granularity). Full byte comparison detects middle-only changes; a
-first/last-byte hash would not meet that requirement. Eight transient LRU slots
-handle larger inputs; they and legacy-backend entries are released on guest
-waits. Explicit overlap invalidation releases any intersecting input range.
-Renderer destruction releases persistent allocations through the owning renderer,
-including when the global renderer pointer has already been reset.
+D3D12 converted indices now use 64 four-way sets (256 persistent entries).
+The conversion identity is `(address, count, type, primitive mode)` plus all
+input bytes, with AUTO addresses canonicalized to zero. Restart is cached bound
+metadata: changing it reuses the converted allocation and recalculates the
+maximum when necessary. Input shadows are never replaced by a partial hash.
+Persistent inputs are at most 64 KiB and output at most 96 KiB per entry
+(16 MiB input and 24 MiB output payload at capacity, excluding vector spare
+capacity and GPU allocator granularity). Eight transient LRU entries retain the
+wait boundary for larger inputs and other backends. Explicit overlap invalidation
+releases intersecting guest ranges; AUTO has no input range. Renderer destruction
+releases allocations through the owning renderer even after the global pointer
+is reset. Content changes replace their own way; otherwise prefer an empty way,
+then the least recently used one.
 
 Host checks for the new helpers and the production index-cache/conversion code
 with a minimal renderer stand-in (no GPU):
@@ -140,3 +143,65 @@ renderer cleanup and the legacy wait boundary. Sanitizers check CPU bounds and
 allocation cleanup; native GPU fence behavior still requires device validation.
 See [latte-perf2.md](latte-perf2.md) for the change report and unmeasured savings
 estimates, and [latte-pipelining.md](latte-pipelining.md) for the thread-split design.
+
+## Round-3 diagnostics and validation
+
+The main exclusive-slot log format is unchanged. A separate line reports:
+
+```text
+Latte index misses/frame: content {:.1f}, set-eviction {:.1f}, transient {:.1f}
+```
+
+`content` means a complete key was present but its full byte comparison failed.
+`set-eviction` means a new persistent key replaced a full four-way set.
+`transient` counts conversions outside the persistent size limits. These are
+exclusive miss reasons; the remainder of `index-miss/frame` consists of fills
+into empty/invalidated ways. They do not by themselves prove which reason caused
+the historical 37.7% miss rate. Restart-only changes now count as index hits.
+
+Set `CEMU_LATTE_PROFILE_DETAIL=1` before command-thread startup for temporary
+sub-step diagnostics, reported on the same source-frame window:
+
+```text
+Latte detail (inclusive ms/frame): sequence {:.3f}, shader-resolve {:.3f}, packet-decode {:.3f}, streamout {:.3f}, bindings-prepare {:.3f}
+```
+
+These intervals are **inclusive**, separate from coverage and the exclusive
+slots. `sequence` includes sequence setup/present servicing and nests
+`shader-resolve`; shader resolution is already charged to `shader-pipeline` in
+the exclusive log. `packet-decode` covers the three per-draw base/instance
+register loads. `streamout` covers active prepare/finish calls;
+`bindings-prepare` covers stage binding preparation and sampler acquisition,
+including nested texture/descriptor work. Do not sum these with the main slots
+or subtract them directly from `draw-state`. They distinguish setup, decoding,
+shader/fetch resolution and orchestration in the next device capture. Default
+off means no additional clock reads. Same-detail nesting counts once, and
+window checkpoint/reset preserves active diagnostic scopes.
+
+Texture views now remember the base resource's state version after a completed
+shader-read transition. Any subresource/all-state/allocation mutation advances
+that version; hits compare one version in the view. The resource-level exact
+range shortcut remains for other requests. Write-content versions advance even
+on transition hits, and barriers remain before their dependent draw/copy.
+
+Stage table misses go directly from the previous-value check to the linear ring,
+without a secondary hash cache. SRV/sampler sources remain persistent; CBVs are
+rewritten only on address/size change, UAV sources on resource/size change or
+buffer recreation. Each changed stage uses one bulk `CopyDescriptors`. Table
+reuse still checks view-ring and staging-source generations. Internal native
+state invalidation still forces root argument rebinding.
+
+Run all round-3 host checks with:
+
+```sh
+tools/tests/run_latte_perf3_tests.sh
+```
+
+The runner compiles production conversion/cache code, uses ASan/UBSan (fatal
+UBSan), and checks native and x86 AVX2 implementations on this Mac. It includes
+exact scalar-output parity over widths, primitive modes, tails and unaligned
+spans; content mutation, restart-only bound changes, four-way LRU, waits,
+canonical AUTO keys, overlap/release; real stage-table equality/epochs; view
+versions; profiler detail nesting/window resets; descriptor heap retirement.
+See [latte-perf3.md](latte-perf3.md) for estimates and device-validation limits,
+and [latte-bindless.md](latte-bindless.md) for the design-only SM 6.6 assessment.

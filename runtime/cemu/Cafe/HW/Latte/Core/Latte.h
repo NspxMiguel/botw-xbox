@@ -155,6 +155,7 @@ void LatteQuery_CancelActiveGPU7Queries();
 
 void LatteStreamout_InitCache();
 sint32 LatteStreamout_GetRingBufferSize();
+void LatteStreamout_Disable();
 void LatteStreamout_PrepareDrawcall(uint32 count, uint32 instanceCount);
 void LatteStreamout_FinishDrawcall(bool useDirectMemoryMode);
 

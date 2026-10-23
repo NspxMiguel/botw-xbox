@@ -18,11 +18,15 @@ using uint32 = uint32_t;
 using uint64 = uint64_t;
 using SIZE_T = size_t;
 using UINT64 = uint64_t;
+using D3D12_GPU_VIRTUAL_ADDRESS = uint64_t;
+struct ID3D12Resource;
 using UINT = unsigned;
 using HRESULT = int;
 namespace D3D12Const
 {
 constexpr uint32 kMaxSamplersPerStage = 18;
+constexpr uint32 kMaxCBVsPerStage = 17;
+constexpr uint32 kMaxSRVsPerStage = 18;
 }
 struct D3D12_CPU_DESCRIPTOR_HANDLE
 {

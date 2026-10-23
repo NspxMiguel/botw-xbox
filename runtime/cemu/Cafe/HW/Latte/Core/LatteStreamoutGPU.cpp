@@ -43,6 +43,11 @@ void LatteStreamout_InitCache()
 }
 
 bool _transformFeedbackIsActive = false;
+
+void LatteStreamout_Disable()
+{
+	_transformFeedbackIsActive = false;
+}
 struct
 {
 	uint32 vertexCount;

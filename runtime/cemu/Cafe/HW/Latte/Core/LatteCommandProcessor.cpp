@@ -69,9 +69,13 @@ public:
 	void executeDraw(uint32 count, bool isAutoIndex, MPTR physIndices)
 	{
 		LatteProfiler::Add(LatteProfiler::Counter::Draws);
-		uint32 baseVertex = LatteGPUState.contextRegister[mmSQ_VTX_BASE_VTX_LOC];
-		uint32 baseInstance = LatteGPUState.contextRegister[mmSQ_VTX_START_INST_LOC];
-		uint32 numInstances = LatteGPUState.contextNew.VGT_DMA_NUM_INSTANCES.get_NUM_INSTANCES();
+		uint32 baseVertex, baseInstance, numInstances;
+		{
+			LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::PacketDecode);
+			baseVertex = LatteGPUState.contextRegister[mmSQ_VTX_BASE_VTX_LOC];
+			baseInstance = LatteGPUState.contextRegister[mmSQ_VTX_START_INST_LOC];
+			numInstances = LatteGPUState.contextNew.VGT_DMA_NUM_INSTANCES.get_NUM_INSTANCES();
+		}
 
 		if (!isAutoIndex)
 		{

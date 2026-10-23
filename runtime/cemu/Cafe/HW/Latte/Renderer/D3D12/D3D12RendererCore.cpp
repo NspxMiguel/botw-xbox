@@ -46,13 +46,20 @@ static_assert(sizeof(dxil_spirv_vertex_runtime_data) <= D3D12Const::kRuntimeData
 
 void D3D12Renderer::draw_beginSequence()
 {
+	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Sequence);
 	ServicePendingPresent(false); // frame interpolation without vsync: the previous real frame may be due
 	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	// BotWRecomp: Cemu frontend cache trimming is not present in this runtime.
 	m_state.skipDrawSequence = false;
 	const bool streamoutEnable = LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] != 0;
+	m_state.streamoutEnabled = streamoutEnable;
+	if (!streamoutEnable)
+		LatteStreamout_Disable();
 
-	LatteSHRC_UpdateActiveShaders();
+	{
+		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::ShaderResolve);
+		LatteSHRC_UpdateActiveShaders();
+	}
 	if (LatteGPUState.activeShaderHasError)
 	{
 		cemuLog_logDebugOnce(LogType::Force, "Skipping drawcalls due to shader error");
@@ -352,30 +359,8 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 		LatteProfiler::Add(LatteProfiler::Counter::DescriptorFastHits);
 		return *table;
 	}
-	decltype(ViewTableCacheEntry::key) key{};
-	uint32 keyIndex = 0;
-	for (uint32 i = 0; i < kMaxCBVsPerStage; ++i)
-	{
-		key[keyIndex++] = tableDesc.cbvAddress[i];
-		key[keyIndex++] = tableDesc.cbvSize[i];
-	}
-	for (const auto srv : tableDesc.srv)
-		key[keyIndex++] = srv.ptr;
-	key[keyIndex++] = (uintptr_t)tableDesc.uavResource;
-	key[keyIndex++] = tableDesc.uavSize;
-	uint64 hash = 0xcbf29ce484222325ull;
-	for (const auto word : key)
-		hash = (hash ^ word) * 0x100000001B3ull;
-	// Fold high bits too: descriptor and CBV addresses are aligned.
-	hash ^= (hash >> 32) ^ (hash >> 16);
-	auto &cached = m_viewTableCache[hash % m_viewTableCache.size()];
-	if (cached.generation == m_gpuViewHeap->GetGeneration() &&
-		cached.sourceGeneration == m_stagingViewHeap->GetGeneration() && cached.key == key)
-	{
-		LatteProfiler::Add(LatteProfiler::Counter::DescriptorHits);
-		last.Store(tableDesc, cached.table, generation, sourceGeneration);
-		return cached.table;
-	}
+	// Most non-adjacent tables differ in their transient uniform CBV.
+	// Go straight to the linear ring: no expanded key, hash or secondary lookup.
 	LatteProfiler::Add(LatteProfiler::Counter::DescriptorMisses);
 
 	auto table = m_gpuViewHeap->AllocateTable(kStageTableSize);
@@ -391,36 +376,38 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 		}
 		if (!cbv.descriptor.ptr)
 			cbv.descriptor = m_stagingViewHeap->Allocate();
-		if (cbv.submission != m_lastSubmittedFenceValue || cbv.address != tableDesc.cbvAddress[i] || cbv.size != tableDesc.cbvSize[i])
+		if (cbv.address != tableDesc.cbvAddress[i] || cbv.size != tableDesc.cbvSize[i])
 		{
 			WriteCBV(cbv.descriptor, tableDesc.cbvAddress[i], tableDesc.cbvSize[i]);
 			cbv.address = tableDesc.cbvAddress[i];
 			cbv.size = tableDesc.cbvSize[i];
-			cbv.submission = m_lastSubmittedFenceValue;
 		}
 		sources[kStageTableOffsetCBV + i] = cbv.descriptor;
 	}
 	for (uint32 i = 0; i < kMaxSRVsPerStage; ++i)
 		sources[kStageTableOffsetSRV + i] = tableDesc.srv[i].ptr ? tableDesc.srv[i] : m_nullSRV2D;
+	auto &uav = m_stageUAVCache[(uint32)stage];
 	sources[kStageTableOffsetUAV] = m_nullUAV;
-	const UINT tableSize = kStageTableSize;
-	m_device->CopyDescriptors(1, &table.cpu, &tableSize, kStageTableSize, sources, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	D3D12_CPU_DESCRIPTOR_HANDLE uavDst = m_gpuViewHeap->OffsetCPU(table.cpu, kStageTableOffsetUAV);
 	if (tableDesc.uavResource)
 	{
-		D3D12_UNORDERED_ACCESS_VIEW_DESC uav{};
-		uav.Format = DXGI_FORMAT_R32_TYPELESS;
-		uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-		uav.Buffer.FirstElement = 0;
-		uav.Buffer.NumElements = tableDesc.uavSize / 4;
-		uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
-		m_device->CreateUnorderedAccessView(tableDesc.uavResource, nullptr, &uav, uavDst);
+		if (!uav.descriptor.ptr)
+			uav.descriptor = m_stagingViewHeap->Allocate();
+		if (uav.resource != tableDesc.uavResource || uav.size != tableDesc.uavSize)
+		{
+			D3D12_UNORDERED_ACCESS_VIEW_DESC desc{};
+			desc.Format = DXGI_FORMAT_R32_TYPELESS;
+			desc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+			desc.Buffer.NumElements = tableDesc.uavSize / 4;
+			desc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+			m_device->CreateUnorderedAccessView(tableDesc.uavResource, nullptr, &desc, uav.descriptor);
+			uav.resource = tableDesc.uavResource;
+			uav.size = tableDesc.uavSize;
+		}
+		sources[kStageTableOffsetUAV] = uav.descriptor;
 	}
-	cached.key = key;
-	cached.generation = m_gpuViewHeap->GetGeneration();
-	cached.sourceGeneration = m_stagingViewHeap->GetGeneration();
-	cached.table = table.gpu;
-	last.Store(tableDesc, table.gpu, cached.generation, cached.sourceGeneration);
+	const UINT tableSize = kStageTableSize;
+	m_device->CopyDescriptors(1, &table.cpu, &tableSize, kStageTableSize, sources, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	last.Store(tableDesc, table.gpu, m_gpuViewHeap->GetGeneration(), m_stagingViewHeap->GetGeneration());
 	return table.gpu;
 }
 
@@ -459,7 +446,13 @@ void D3D12Renderer::draw_transitionInputTextures(LatteDecompilerShader *shader)
 		LatteTextureViewD3D12 *view = _GetBoundTextureForShader(m_state.boundTexture, shader, relativeTextureUnit, regIndex);
 		if (!view)
 			continue;
+		if (view->ReuseShaderReadTransition())
+		{
+			LatteProfiler::Add(LatteProfiler::Counter::TransitionHits);
+			continue;
+		}
 		TransitionTexture(view->GetBaseTexture(), view->firstMip, view->numMip, view->firstSlice, view->numSlice, LatteTextureD3D12::kShaderReadState);
+		view->RememberShaderReadTransition();
 	}
 }
 
@@ -636,12 +629,13 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 	}
 
 	m_state.verticesPerInstance = count;
-	LatteStreamout_PrepareDrawcall(count, instanceCount);
+	if (m_state.streamoutEnabled)
+	{
+		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Streamout);
+		LatteStreamout_PrepareDrawcall(count, instanceCount);
+	}
 
-	LatteFetchShader *fetchShader = LatteSHRC_GetActiveFetchShader();
-	LatteDecompilerShader *vertexShader = LatteSHRC_GetActiveVertexShader();
-	LatteDecompilerShader *pixelShader = LatteSHRC_GetActivePixelShader();
-	LatteDecompilerShader *geometryShader = LatteSHRC_GetActiveGeometryShader();
+	auto [fetchShader, vertexShader, pixelShader, geometryShader] = LatteSHRC_GetActiveShaders();
 	if (!vertexShader || !fetchShader)
 		return;
 
@@ -669,12 +663,15 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 	// discard any command list state recorded for this draw
 	PreparedStageBindings stageBindings[3];
 	uint32 stageBindingCount = 0;
-	draw_buildStageBindings(vertexShader, static_cast<RendererShaderD3D12 *>(vertexShader->shader), stageBindings[stageBindingCount++]);
-	if (pixelShader)
-		draw_buildStageBindings(pixelShader, static_cast<RendererShaderD3D12 *>(pixelShader->shader), stageBindings[stageBindingCount++]);
-	if (geometryShader)
-		draw_buildStageBindings(geometryShader, static_cast<RendererShaderD3D12 *>(geometryShader->shader), stageBindings[stageBindingCount++]);
-	draw_acquireSamplerTables(stageBindings, stageBindingCount);
+	{
+		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::BindingsPrepare);
+		draw_buildStageBindings(vertexShader, static_cast<RendererShaderD3D12 *>(vertexShader->shader), stageBindings[stageBindingCount++]);
+		if (pixelShader)
+			draw_buildStageBindings(pixelShader, static_cast<RendererShaderD3D12 *>(pixelShader->shader), stageBindings[stageBindingCount++]);
+		if (geometryShader)
+			draw_buildStageBindings(geometryShader, static_cast<RendererShaderD3D12 *>(geometryShader->shader), stageBindings[stageBindingCount++]);
+		draw_acquireSamplerTables(stageBindings, stageBindingCount);
+	}
 	// Heap exhaustion can submit and retire upload allocations. Prepare transient uniforms afterwards.
 	{
 		LatteProfiler::Scope profileScope(LatteProfiler::Slot::Uniforms);
@@ -848,7 +845,11 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 
 	if (usesStreamout)
 		UAVBarrier(m_xfbRingBuffer.Get());
-	LatteStreamout_FinishDrawcall(false);
+	if (m_state.streamoutEnabled)
+	{
+		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Streamout);
+		LatteStreamout_FinishDrawcall(false);
+	}
 	m_drawsInCommandList++;
 	m_statDrawsPerFrame++;
 	m_hasRecordedWork = true;

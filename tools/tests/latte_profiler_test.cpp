@@ -67,6 +67,29 @@ int main()
 	assert(s_state.drawDepth == 0);
 	assert(s_state.drawTotalNs == TotalExclusiveTime());
 
+	// Diagnostic sub-slots do not affect exclusive accounting. A reset inside
+	// a live sub-slot rebases it, and same-detail nesting counts only once.
+	s_state.detailEnabled = true;
+	const auto exclusiveBeforeDetail = TotalExclusiveTime();
+	{
+		DetailScope outer(Detail::Sequence);
+		{
+			DetailScope inner(Detail::Sequence);
+			assert(s_state.detailDepth[size_t(Detail::Sequence)] == 2);
+		}
+		const auto now = Clock::now();
+		CheckpointDetails(now);
+		assert(s_state.detailDepth[size_t(Detail::Sequence)] == 1);
+		assert(s_state.detailStart[size_t(Detail::Sequence)] == now);
+		Reset(now);
+		assert(s_state.detailNs[size_t(Detail::Sequence)] == 0);
+		assert(s_state.detailStart[size_t(Detail::Sequence)] == now);
+	}
+	assert(s_state.detailDepth[size_t(Detail::Sequence)] == 0);
+	assert(s_state.detailNs[size_t(Detail::Sequence)] >= 0);
+	assert(TotalExclusiveTime() == 0);
+	(void)exclusiveBeforeDetail;
+
 	s_state.enabled = false;
 	Add(Counter::DescriptorHits);
 	assert(s_state.counters[static_cast<size_t>(Counter::DescriptorHits)] == 0);

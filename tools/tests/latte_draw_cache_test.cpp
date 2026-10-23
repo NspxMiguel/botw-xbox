@@ -39,6 +39,29 @@ int main()
 	transition.Clear();
 	assert(!transition.Find(range));
 
+	// Immutable views memoize a resource version. Overlapping/disjoint state
+	// changes invalidate every view; a content write alone does not change state.
+	VersionMemo viewA, viewB;
+	uint64_t version = 1;
+	assert(!viewA.Matches(version));
+	viewA.Remember(version);
+	viewB.Remember(version);
+	assert(viewA.Matches(version) && viewB.Matches(version));
+	++version;
+	assert(!viewA.Matches(version) && !viewB.Matches(version));
+	viewA.Remember(version);
+	assert(viewA.Matches(version) && !viewB.Matches(version));
+
+	// A shader-state node remains valid across map growth, but must be cleared
+	// before removal/unload even when the hash key would otherwise match.
+	ExactCache<uint64_t, const void *> shaderState;
+	int firstNode = 0;
+	shaderState.Store(17, &firstNode);
+	assert(*shaderState.Find(17) == &firstNode);
+	assert(!shaderState.Find(18));
+	shaderState.Clear();
+	assert(!shaderState.Find(17));
+
 	// Partial invalidation must intersect the complete input span, including writes
 	// that start before the cached address and finish inside it.
 	assert(RangesOverlap(100, 200, 50, 100));

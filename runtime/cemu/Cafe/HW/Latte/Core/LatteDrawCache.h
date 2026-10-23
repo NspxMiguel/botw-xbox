@@ -39,6 +39,24 @@ class ExactCache
 	bool m_valid = false;
 };
 
+// A view is immutable and owns its memo. Any base-resource state mutation
+// advances the version, invalidating all views without walking a view list.
+class VersionMemo
+{
+  public:
+	bool Matches(uint64_t version) const
+	{
+		return m_version == version;
+	}
+	void Remember(uint64_t version)
+	{
+		m_version = version;
+	}
+
+  private:
+	uint64_t m_version = 0; // Resource versions start at one.
+};
+
 struct IndexKey
 {
 	uintptr_t address = 0;

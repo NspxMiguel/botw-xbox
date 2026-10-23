@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
+#include "Cafe/HW/Latte/Core/LatteDrawCache.h"
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/Core/LatteShaderAssembly.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
@@ -59,6 +60,11 @@ std::atomic_int g_compiled_shaders_total = 0;
 std::atomic_int g_compiled_shaders_async = 0;
 std::atomic_int g_shaderStateCacheSetCount = 0;
 std::atomic_int g_shaderStateCacheSetAuxCount = 0;
+
+LatteActiveShaders LatteSHRC_GetActiveShaders()
+{
+	return {_activeFetchShader, _activeVertexShader, _activePixelShader, _activeGeometryShader};
+}
 
 LatteFetchShader* LatteSHRC_GetActiveFetchShader()
 {
@@ -148,6 +154,7 @@ void LatteSHRC_ResetCachedShaderHash()
 }
 
 LatteShaderPSInputTable _activePSImportTable;
+static LatteDrawCache::ExactCache<std::array<uint32, GPU7_PS_MAX_INPUTS + 1>, bool> s_psInputRegisters;
 
 LatteShaderPSInputTable* LatteSHRC_GetPSInputTable()
 {
@@ -318,7 +325,15 @@ void LatteShader_CreatePSInputTable(LatteShaderPSInputTable* psInputTable, uint3
 // we prepare the PS import info in advance
 void LatteShader_UpdatePSInputs(uint32* contextRegisters)
 {
+	std::array<uint32, GPU7_PS_MAX_INPUTS + 1> key;
+	key[0] = contextRegisters[mmSPI_PS_IN_CONTROL_0];
+	std::memcpy(key.data() + 1, contextRegisters + mmSPI_PS_INPUT_CNTL_0, GPU7_PS_MAX_INPUTS * sizeof(uint32));
+	// This function is the sole writer of the active table; a hit needs neither
+	// register decoding nor a copy of the decoded import array.
+	if (s_psInputRegisters.Find(key))
+		return;
 	LatteShader_CreatePSInputTable(&_activePSImportTable, contextRegisters);
+	s_psInputRegisters.Store(key, true);
 }
 
 void LatteShader_CreateRendererShader(LatteDecompilerShader* shader, bool compileAsync)
@@ -1067,6 +1082,7 @@ struct ShaderStateDirectHash
 std::vector<uint64> s_shaderStateCacheKeys;
 size_t s_shaderStateCacheCleanupIndex = 0;
 std::unordered_map< /* BotWRecomp: was robin_hood::unordered_flat_map */ uint64, ShaderStateInfo, ShaderStateDirectHash> s_shaderStateCache;
+static LatteDrawCache::ExactCache<uint64, ShaderStateInfo *> s_lastShaderState;
 // also benchmarked here but didn't perform better or only marginally better and not worth pulling in an extra library:
 // jg::dense_hash_map<uint64, ShaderStateInfo, FPHDirectHash>
 // folly::F14FastMap<uint64, ShaderStateInfo, FPHDirectHash>
@@ -1094,6 +1110,7 @@ FORCE_INLINE uint64 CalcCombinedAuxHash(LatteFetchShader* fetchShader, LatteDeco
 
 void LatteSHRC_RemoveShaderStateCacheEntryByKey(uint64 key)
 {
+	s_lastShaderState.Clear();
 	auto it = s_shaderStateCache.find(key);
 	if (it == s_shaderStateCache.end())
 	{
@@ -1244,10 +1261,13 @@ void LatteSHRC_UpdateActiveShaders()
 
 	ShaderStateInfo* shaderStateInfo = nullptr;
 
-	auto it = s_shaderStateCache.find(h);
-	if (it != s_shaderStateCache.end())
-	{
+	if (const auto *last = s_lastShaderState.Find(h))
+		shaderStateInfo = *last;
+	else if (auto it = s_shaderStateCache.find(h); it != s_shaderStateCache.end())
 		shaderStateInfo = &it->second;
+	if (shaderStateInfo)
+	{
+		s_lastShaderState.Store(h, shaderStateInfo);
 		shaderStateInfo->lastAccessFrameCount = LatteGPUState.frameCounter;
 		uint64 combinedAuxHash = CalcCombinedAuxHash(shaderStateInfo->fetchShader, shaderStateInfo->vertexShader, shaderStateInfo->pixelShader);
 		if (shaderStateInfo->combinedAuxHash == combinedAuxHash) [[likely]]
@@ -1354,15 +1374,17 @@ void LatteSHRC_Init()
 
 void LatteSHRC_UnloadAll()
 {
-    while(!sVertexShaders.empty())
-        LatteShader_free(sVertexShaders.begin()->second);
-    cemu_assert_debug(sVertexShaders.empty());
-    while(!sGeometryShaders.empty())
-        LatteShader_free(sGeometryShaders.begin()->second);
-    cemu_assert_debug(sGeometryShaders.empty());
-    while(!sPixelShaders.empty())
-        LatteShader_free(sPixelShaders.begin()->second);
-    cemu_assert_debug(sPixelShaders.empty());
+	s_psInputRegisters.Clear();
+	s_lastShaderState.Clear();
+	while (!sVertexShaders.empty())
+		LatteShader_free(sVertexShaders.begin()->second);
+	cemu_assert_debug(sVertexShaders.empty());
+	while (!sGeometryShaders.empty())
+		LatteShader_free(sGeometryShaders.begin()->second);
+	cemu_assert_debug(sGeometryShaders.empty());
+	while (!sPixelShaders.empty())
+		LatteShader_free(sPixelShaders.begin()->second);
+	cemu_assert_debug(sPixelShaders.empty());
 	cemu_assert_debug(s_shaderStateCache.empty());
 	s_shaderStateCacheKeys.clear();
 	s_shaderStateCacheCleanupIndex = 0;

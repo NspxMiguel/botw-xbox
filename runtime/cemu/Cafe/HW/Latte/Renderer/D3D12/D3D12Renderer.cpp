@@ -715,25 +715,9 @@ void D3D12Renderer::ReleaseObjectDeferred(ComPtr<IUnknown> object)
 
 /* --- barriers --- */
 
-void D3D12Renderer::TransitionTexture(LatteTextureD3D12 *texture, uint32 firstMip, uint32 mipCount, uint32 firstSlice, uint32 sliceCount, D3D12_RESOURCE_STATES newState)
+void D3D12Renderer::TransitionTextureSlow(LatteTextureD3D12 *texture, uint32 firstMip, uint32 mipCount, uint32 firstSlice, uint32 sliceCount, D3D12_RESOURCE_STATES newState)
 {
-	if (!texture->GetResource())
-		return;
-	constexpr D3D12_RESOURCE_STATES kWriteStates = D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RESOLVE_DEST;
-	if (newState & kWriteStates)
-		texture->MarkContentWritten();
-	const bool is3D = texture->Is3DTexture();
-	if (is3D)
-	{
-		firstSlice = 0;
-		sliceCount = 1;
-	}
 	const LatteTextureD3D12::TransitionKey key{firstMip, mipCount, firstSlice, sliceCount, (uint32)newState};
-	if (texture->ReuseTransition(key))
-	{
-		LatteProfiler::Add(LatteProfiler::Counter::TransitionHits);
-		return;
-	}
 	LatteProfiler::Add(LatteProfiler::Counter::TransitionMisses);
 	const uint32 planeCount = texture->GetPlaneCount();
 	// whole resource transition if possible
@@ -774,14 +758,6 @@ void D3D12Renderer::TransitionTexture(LatteTextureD3D12 *texture, uint32 firstMi
 void D3D12Renderer::TransitionTextureAll(LatteTextureD3D12 *texture, D3D12_RESOURCE_STATES newState)
 {
 	TransitionTexture(texture, 0, texture->GetMipCount(), 0, texture->GetArraySize(), newState);
-}
-
-void D3D12Renderer::TransitionResource(ID3D12Resource *resource, D3D12_RESOURCE_STATES &trackedState, D3D12_RESOURCE_STATES newState)
-{
-	if (trackedState == newState)
-		return;
-	m_pendingBarriers.push_back(D3D12_TransitionBarrier(resource, trackedState, newState));
-	trackedState = newState;
 }
 
 void D3D12Renderer::UAVBarrier(ID3D12Resource *resource)
@@ -2058,6 +2034,13 @@ static constexpr D3D12_RESOURCE_STATES kBufferCacheReadState = (D3D12_RESOURCE_S
 
 void D3D12Renderer::bufferCache_init(const sint32 bufferSize)
 {
+	// A recreated resource may reuse its former COM address. Force persistent
+	// source descriptors and prior table contents to be refreshed in that case.
+	for (auto &uav : m_stageUAVCache)
+		uav.resource = nullptr;
+	for (auto &table : m_lastViewTable)
+		table.Clear();
+
 	m_bufferCacheSize = (uint32)bufferSize;
 	D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
 	D3D12_RESOURCE_DESC desc = D3D12_BufferDesc((uint64)bufferSize);
