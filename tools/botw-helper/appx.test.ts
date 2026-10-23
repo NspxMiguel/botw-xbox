@@ -41,7 +41,7 @@ def png(w, h):
 for name,w,h in [('StoreLogo',50,50),('Square150x150Logo',150,150),('Square44x44Logo',44,44),('SplashScreen',620,300)]:
     open(os.path.join(stage,'Assets',name+'.png'),'wb').write(b'old logo')
     open(os.path.join(cover,name+'.png'),'wb').write(png(w,h))
-open(os.path.join(stage,'AppxManifest.xml'),'w').write('<Package><Identity Name="Example" Publisher="CN=Test"/></Package>')
+open(os.path.join(stage,'AppxManifest.xml'),'w').write('<Package><Identity Name="Example" Publisher="CN=Test" Version="1.0.0.0"/></Package>')
 open(os.path.join(stage,'payload.bin'),'wb').write(bytes(range(256))*700)
 open(os.path.join(stage,'empty.txt'),'wb').close()
 open(os.path.join(stage,'Assets','a&b.txt'),'wb').write(b'escaped name')
@@ -55,6 +55,7 @@ else:
     os.rename(os.path.join(root,'stored.appx'),os.path.join(root,'input.appx'))
 for name in os.listdir(cover):
     open(os.path.join(stage,'Assets',name),'wb').write(open(os.path.join(cover,name),'rb').read())
+open(os.path.join(stage,'AppxManifest.xml'),'w').write('<Package><Identity Name="Example" Publisher="CN=Test" Version="1.0.0.1"/></Package>')
 subprocess.run([sys.executable,packer,stage,os.path.join(root,'reference.appx')],check=True)
 `,
         directory,
@@ -121,3 +122,11 @@ with open(path, 'r+b') as f:
     }
   });
 }
+
+test("repack raises the package revision", async () => {
+  const { bumpRevision } = await import("./appx");
+  expect(
+    bumpRevision('<Identity Name="X" Publisher="CN=Y" Version="1.0.33.0" />'),
+  ).toContain('Version="1.0.33.1"');
+  expect(() => bumpRevision('<Identity Name="X" />')).toThrow();
+});

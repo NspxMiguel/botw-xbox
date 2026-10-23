@@ -183,6 +183,22 @@ function quote(value: string) {
 }
 
 // Match pack_appx.py: stored ZIP64 entries, descriptors, manifest first, 64 KiB hashes.
+// Windows refuses a package with an installed identity but different contents, so each
+// repack raises the revision (the fourth version field) and installs as an update.
+export function bumpRevision(manifest: string) {
+  let found = false;
+  const out = manifest.replace(
+    /(<Identity\b[^>]*\bVersion=")(\d+)\.(\d+)\.(\d+)\.(\d+)"/,
+    (_, head, a, b, c, d) => {
+      found = true;
+      if (Number(d) >= 65535) throw new Error("Package revision exhausted");
+      return `${head}${a}.${b}.${c}.${Number(d) + 1}"`;
+    },
+  );
+  if (!found) throw new Error("Package version missing from manifest");
+  return out;
+}
+
 export async function repackAppx(
   input: string,
   directory: string,
@@ -226,6 +242,12 @@ export async function repackAppx(
     )
       throw new Error(`Invalid logo: ${logo}.png`);
   }
+  const chunks: Buffer[] = [];
+  for await (const chunk of entryChunks(input, entries[0]))
+    chunks.push(Buffer.from(chunk));
+  const manifest = Buffer.from(
+    bumpRevision(Buffer.concat(chunks).toString("utf8")),
+  );
   const file = await open(output, "wx");
   let position = 0;
   const central: Buffer[] = [];
@@ -335,15 +357,18 @@ export async function repackAppx(
       const hashes: string[] = [];
       const result = await add(
         entry.name,
-        replacement
-          ? createReadStream(join(directory, entry.name.slice(7)), {
-              highWaterMark: BLOCK,
-            })
-          : entryChunks(input, entry),
+        entry.name === "AppxManifest.xml"
+          ? [manifest]
+          : replacement
+            ? createReadStream(join(directory, entry.name.slice(7)), {
+                highWaterMark: BLOCK,
+              })
+            : entryChunks(input, entry),
         hashes,
       );
       if (
         !replacement &&
+        entry.name !== "AppxManifest.xml" &&
         (result.size !== entry.size || result.crc !== entry.crc)
       )
         throw new Error(`Corrupt ZIP entry: ${entry.name}`);
