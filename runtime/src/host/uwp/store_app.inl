@@ -158,7 +158,15 @@ IAsyncAction store_refresh(uint64_t generation, int source, std::string query, b
                             out.error = true;
                         }
                     }
+                } catch (const winrt::hresult_error &e) {
+                    LOG("mods: source %d failed (0x%08lx %ls)", id, static_cast<unsigned long>(e.code().value),
+                        e.message().c_str());
+                    out.error = true;
+                } catch (const std::exception &e) {
+                    LOG("mods: source %d failed: %s", id, e.what());
+                    out.error = true;
                 } catch (...) {
+                    LOG("mods: source %d failed", id);
                     out.error = true;
                 }
                 return out;
@@ -247,7 +255,12 @@ IAsyncAction store_thumbnail(std::string url, uint64_t generation) {
         std::ifstream in(path, std::ios::binary);
         std::vector<uint8_t> data{std::istreambuf_iterator<char>(in), {}};
         decoded = uwp::decode_store_image(data);
+        if (!decoded)
+            LOG("mods: thumbnail not decodable (%zu bytes): %s", data.size(), url.c_str());
+    } catch (const std::exception &e) {
+        LOG("mods: thumbnail failed: %s (%s)", url.c_str(), e.what());
     } catch (...) {
+        LOG("mods: thumbnail failed: %s", url.c_str());
     }
     co_await resume_foreground(dispatcher);
     if (decoded && home.store.active && generation == store_generation && home.ready())

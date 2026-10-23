@@ -346,6 +346,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 ui_feedback();
             if (setup_active) {
                 e.Handled(true);
+                LOG("setup key %d (pad=%d focus=%d)", int(key), int(bool(pad)), home.focus);
                 // Real pads use the repeat/edge sampler below; virtual keys also support remote input.
                 if (pad && (key == VirtualKey::GamepadA || key == VirtualKey::GamepadB ||
                             key == VirtualKey::GamepadX ||
@@ -777,6 +778,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     IAsyncOperation<int32_t> choose(hstring title, hstring body, std::vector<hstring> choices) {
         auto cancellation = co_await get_cancellation_token();
         cancellation.enable_propagation();
+        // On the home screen, menus use the app's own list: every option on one page, B goes back.
+        if (home.ready() && !running) {
+            setup_active = true;
+            setup_page(uwp::Text::settings, std::wstring(body), {}, 0);
+            home.heading = std::wstring(title);
+            for (auto const &choice : choices)
+                home.rows.emplace_back(choice);
+            auto result = co_await setup_choice();
+            setup_active = false;
+            home.setup_mode = false;
+            home.shown = false;
+            co_return result >= 0 && result < int32_t(choices.size()) ? result : int32_t(choices.size() - 1);
+        }
         // MessageDialog accepts at most three commands; every page keeps a real Back action.
         if (choices.size() > 3) {
             auto page = co_await choose(title, body,
@@ -2661,6 +2675,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
                             .count();
                     pressed = setup_repeat.update(buttons, uwp::up | uwp::down | uwp::left | uwp::right, now);
+                    if (pressed)
+                        LOG("setup pressed 0x%x (focus=%d rows=%zu)", pressed, home.focus, home.rows.size());
                     if ((pressed & uwp::x) && setup_detect && !setup_busy) {
                         accepted_forms = !accepted_forms;
                         setup_action = -5;
