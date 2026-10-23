@@ -10,6 +10,10 @@ enum class E_DIM : uint32_t
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12DrawPacket.h"
 
 #include <chrono>
+#include <ctime>
+#ifdef __APPLE__
+#include <pthread/qos.h>
+#endif
 #include <iomanip>
 #include <iostream>
 
@@ -79,7 +83,18 @@ struct Recorder
 	}
 };
 
-static double Run(bool queued, bool churn, uint64_t &commands)
+struct Timing
+{
+	double wall, cpu;
+};
+static double ThreadMilliseconds()
+{
+	timespec time{};
+	if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &time) != 0)
+		std::abort();
+	return static_cast<double>(time.tv_sec) * 1000.0 + static_cast<double>(time.tv_nsec) / 1e6;
+}
+static Timing Run(bool queued, bool churn, uint64_t &commands)
 {
 	setenv("CEMU_LATTE_PIPELINE", queued ? "1" : "0", 1);
 	Context context;
@@ -104,6 +119,7 @@ static double Run(bool queued, bool churn, uint64_t &commands)
 	packet.indices = recorder.ids[2];
 	constexpr uint32_t frames = 100, draws = 5000;
 	const auto start = Clock::now();
+	const auto cpuStart = ThreadMilliseconds();
 	for (uint32_t frame = 0; frame < frames; ++frame)
 	{
 		for (uint32_t draw = 0; draw < draws; ++draw)
@@ -136,15 +152,21 @@ static double Run(bool queued, bool churn, uint64_t &commands)
 		context.EndFrame();
 	}
 	commands = recorder.commands;
-	return std::chrono::duration<double, std::milli>(Clock::now() - start).count() / frames;
+	return {std::chrono::duration<double, std::milli>(Clock::now() - start).count() / frames, (ThreadMilliseconds() - cpuStart) / frames};
 }
 
 int main()
 {
+#ifdef __APPLE__
+	// Keep the rendering-cost model on foreground scheduling policy. This affects
+	// only this benchmark thread; no machine-wide priority or affinity changes.
+	if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0) != 0)
+		return 3;
+#endif
 	bool passed = true;
 	for (const bool churn : {false, true})
 	{
-		std::vector<double> direct, queued, overhead;
+		std::vector<double> direct, queued, overhead, cpuOverhead;
 		for (uint32_t run = 0; run < 9; ++run)
 		{
 			uint64_t a = 0, b = 0;
@@ -154,19 +176,22 @@ int main()
 				std::cerr << "Command mismatch\n";
 				return 2;
 			}
-			direct.push_back(baseline);
-			queued.push_back(pipeline);
-			overhead.push_back(pipeline - baseline);
+			direct.push_back(baseline.wall);
+			queued.push_back(pipeline.wall);
+			overhead.push_back(pipeline.wall - baseline.wall);
+			cpuOverhead.push_back(pipeline.cpu - baseline.cpu);
 		}
 		std::sort(direct.begin(), direct.end());
 		std::sort(queued.begin(), queued.end());
 		std::sort(overhead.begin(), overhead.end());
+		std::sort(cpuOverhead.begin(), cpuOverhead.end());
 		std::cout << std::fixed << std::setprecision(4)
 				  << (churn ? "Changing binding blocks: " : "Repeated binding blocks: ") << "Packet " << sizeof(Packet) << " B; draw payload " << sizeof(DrawPacket) << " B; state block " << sizeof(DrawBlock) << " B\n"
 				  << "5000 draws/frame, 1024 uniform bytes/draw, 9 x 100 frames/path\n"
 				  << "Direct median " << direct[4] << " ms/frame; queued median " << queued[4] << " ms/frame\n"
-				  << "Paired overhead median " << overhead[4] << " ms/frame; maximum " << overhead.back() << " ms/frame\n";
-		passed = passed && overhead[4] <= 1.0;
+				  << "Paired wall overhead median " << overhead[4] << " ms/frame; maximum " << overhead.back() << " ms/frame\n"
+				  << "Paired thread-CPU overhead median " << cpuOverhead[4] << " ms/frame; maximum " << cpuOverhead.back() << " ms/frame\n";
+		passed = passed && overhead[4] <= 1.0 && cpuOverhead[4] <= 1.0;
 	}
 	return passed ? 0 : 1;
 }

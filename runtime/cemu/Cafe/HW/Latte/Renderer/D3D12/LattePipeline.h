@@ -375,24 +375,27 @@ class Arena
 		if (bytes.size() > m_capacity)
 			return false;
 		const uint64_t read = m_consumed.load(std::memory_order_acquire);
-		const uint64_t offset = m_written % m_capacity;
+		const uint64_t offset = Offset(m_written);
 		const uint64_t alignedOffset = (offset + 15) & ~uint64_t{15};
 		// Alignment belongs to the physical buffer, not the absolute cursor:
 		// a configured capacity need not be a multiple of sixteen bytes.
-		const uint64_t start = m_written + ((alignedOffset + bytes.size() > m_capacity) ? m_capacity - offset : alignedOffset - offset);
+		const bool wrap = alignedOffset + bytes.size() > m_capacity;
+		const uint64_t start = m_written + (wrap ? m_capacity - offset : alignedOffset - offset);
+		const uint64_t destination = wrap ? 0 : alignedOffset;
 		if (start + bytes.size() - read > m_capacity)
 			return false;
 		if (!bytes.empty())
-			std::memcpy(m_bytes.get() + start % m_capacity, bytes.data(), bytes.size());
+			std::memcpy(m_bytes.get() + destination, bytes.data(), bytes.size());
 		out = {start, static_cast<uint32_t>(bytes.size()), 0};
 		m_written = start + bytes.size();
 		return true;
 	}
 	std::span<const std::byte> Read(Span span) const
 	{
-		if (span.position < m_consumed.load(std::memory_order_relaxed) || span.position % m_capacity + span.size > m_capacity)
+		const uint64_t offset = Offset(span.position);
+		if (span.position < m_consumed.load(std::memory_order_relaxed) || offset + span.size > m_capacity)
 			throw std::logic_error("Retired Latte arena span");
-		return {m_bytes.get() + span.position % m_capacity, span.size};
+		return {m_bytes.get() + offset, span.size};
 	}
 	uint64_t End() const
 	{
@@ -420,6 +423,10 @@ class Arena
 	}
 
   private:
+	size_t Offset(uint64_t position) const
+	{
+		return (m_capacity & (m_capacity - 1)) == 0 ? position & (m_capacity - 1) : position % m_capacity;
+	}
 	const size_t m_capacity;
 	std::unique_ptr<std::byte[]> m_bytes;
 	uint64_t m_written = 0;
