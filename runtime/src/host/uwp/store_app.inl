@@ -39,7 +39,13 @@ void store_filter() {
                 mods::store::matches(c, query, static_cast<mods::store::Category>(view.category)))
                 view.cards.push_back(std::move(c));
     } else {
+        if (view.tab == 0 && query.empty())
+            std::stable_partition(store_available.begin(), store_available.end(),
+                                  [](const auto &card) { return card.featured; });
         for (auto c : store_available) {
+            if (std::any_of(view.cards.begin(), view.cards.end(),
+                            [&](auto &seen) { return seen.id == c.id && seen.source == c.source; }))
+                continue;
             for (auto &installed : store_installed)
                 if (c.id == installed.id && c.source == installed.source) {
                     c.installed_id = installed.installed_id;
@@ -139,6 +145,7 @@ IAsyncAction store_refresh(uint64_t generation, int source, std::string query, b
                                                             root, drives, force);
                     for (unsigned page = 1; page <= 4; ++page) {
                         auto result = adapter->search(id == 2 ? "" : query, mods::store::Category::all, page);
+                        out.error |= !result.error.empty();
                         out.page.offline |= result.offline;
                         out.page.cards.insert(out.page.cards.end(),
                                               std::make_move_iterator(result.cards.begin()),
@@ -295,7 +302,7 @@ IAsyncAction store_detail(mods::store::Card card) {
         home.store.detail->id != identity)
         co_return;
     home.store.detail = std::move(card);
-    home.store.file = 0;
+    home.store.file = int(mods::store::preferred_file(*home.store.detail, preferences.layout));
     home.store.image = 0;
     if (!home.store.action_enabled(home.focus))
         home.store.navigate(2, home.focus);
@@ -356,7 +363,7 @@ IAsyncAction store_edit(mods::store::Card card, int action) {
             home.store.detail.reset();
     }
 }
-IAsyncAction store_install(mods::store::Card card) {
+IAsyncAction store_install(mods::store::Card card, bool enable = false) {
     auto lifetime = get_strong();
     auto &view = home.store;
     if (card.downloads.empty()) {
@@ -430,6 +437,14 @@ IAsyncAction store_install(mods::store::Card card) {
             mods::install_archive(temporary, root, card.title, card.source == "Graphic packs" ? card.id : "");
         mods::store::finish_install(result.path, [&] {
             mods::store::save_receipt(result.path, card);
+            if (enable) {
+                mods::ModCatalog catalog;
+                catalog.load(root, packs::compiled_plan());
+                auto new_id = "file:" + to_string(result.path.filename().wstring());
+                if (!catalog.setEnabled(new_id, true))
+                    throw std::runtime_error("Cannot enable installed mod");
+                catalog.save();
+            }
             // Keep the old version until the new archive is fully validated and extracted.
             if (!card.installed_id.empty() && card.installed_id.starts_with("file:")) {
                 mods::ModCatalog catalog;
@@ -462,7 +477,9 @@ IAsyncAction store_install(mods::store::Card card) {
     transfer_active = false;
     transfer.set_pending(nullptr);
     view.progress = -1;
-    view.status = view.label(error ? uwp::Text::online_error : uwp::Text::installed);
+    view.status = view.label(error    ? uwp::Text::online_error
+                             : enable ? uwp::Text::store_installed_enabled
+                                      : uwp::Text::installed);
     co_await store_load_installed();
     if (view.detail)
         for (auto &c : store_installed)
@@ -473,6 +490,76 @@ IAsyncAction store_install(mods::store::Card card) {
                 view.detail->enabled = c.enabled;
                 view.detail->locked = c.locked;
             }
+}
+IAsyncAction offer_translation() {
+    auto lifetime = get_strong();
+    auto values = ApplicationData::Current().LocalSettings().Values();
+    bool asked = values.HasKey(L"ptbrTranslationAsked");
+    if (!mods::store::should_offer_translation(pt, asked, {}))
+        co_return;
+    try {
+        auto folder = co_await local.CreateFolderAsync(L"mods", CreationCollisionOption::OpenIfExists);
+        store_root = std::filesystem::path(folder.Path().c_str());
+        co_await store_load_installed();
+    } catch (...) {
+        co_return; // An optional offer must not prevent game setup when storage is unavailable.
+    }
+    if (!mods::store::should_offer_translation(pt, asked, store_installed))
+        co_return;
+    store_requests = std::make_shared<uwp::StoreRequests>();
+    struct OfferGuard {
+        App &app;
+        ~OfferGuard() {
+            app.store_requests->cancel();
+            app.setup_active = true;
+            app.home.store.active = false;
+            app.home.mods_mode = false;
+            app.home.store.detail.reset();
+        }
+    } guard{*this};
+    mods::store::Card card;
+    card.id = mods::store::ptbr_translation_id;
+    card.source = "GameBanana";
+    auto fetch = store_fetcher();
+    setup_page(uwp::Text::translation, setup_label(uwp::Text::store_busy));
+    // Only metadata is fetched before consent, using the same response cache as Explore.
+    co_await setup_work([&] {
+        setup_progress.check();
+        card = mods::store::make_source(mods::store::SourceId::gamebanana, fetch, store_root)->files(card);
+        setup_progress.check();
+    });
+    if (!setup_error.empty() || quit || card.title.empty() || card.author.empty() || card.downloads.empty())
+        co_return;
+    auto credit = std::wstring(to_hstring(card.author + " · " + card.source));
+    setup_page(uwp::Text::translation, setup_label(uwp::Text::translation_offer) + L"\n\n" + credit,
+               {setup_label(uwp::Text::yes), setup_label(uwp::Text::not_now)}, 1);
+    auto answer = co_await setup_choice();
+    if (quit)
+        co_return;
+    // Persist both answers before any download; B is equivalent to Not now.
+    values.Insert(L"ptbrTranslationAsked", box_value(answer == 0));
+    if (answer != 0)
+        co_return;
+    home.store = {};
+    home.store.pt = pt;
+    home.store.active = true;
+    home.store.detail = card;
+    home.store.file = int(mods::store::preferred_file(card, preferences.layout));
+    home.setup_mode = false;
+    home.mods_mode = true;
+    setup_active = false; // The normal transfer input path handles cancellation with B.
+    home_buttons = ~uint32_t(0);
+    bool failed = false;
+    try {
+        co_await store_install(card, true);
+    } catch (...) {
+        failed = true;
+    }
+    setup_active = true;
+    home.store.active = false;
+    setup_page(uwp::Text::translation, failed ? setup_label(uwp::Text::online_error) : home.store.status,
+               {setup_label(uwp::Text::setup_next)});
+    co_await setup_choice();
 }
 IAsyncAction manage_mods() {
     auto lifetime = get_strong();
@@ -552,10 +639,12 @@ IAsyncAction manage_mods() {
             if (v.detail)
                 images = v.detail->images;
             else {
-                auto first = v.first(home.focus);
-                for (size_t i = first; i < v.cards.size() && i < first + 6; ++i)
-                    if (!v.cards[i].images.empty())
+                auto first = v.first_slot(home.focus);
+                for (size_t n = 0; n < 6; ++n) {
+                    auto i = v.card_at(first + n);
+                    if (i < v.cards.size() && !v.cards[i].images.empty())
                         images.push_back(v.cards[i].images[0]);
+                }
             }
             std::erase_if(attempted, [&](const std::string &url) {
                 return std::find(images.begin(), images.end(), url) == images.end();

@@ -50,6 +50,99 @@ int main() {
     auto root = fs::temp_directory_path() / "w15-store-fixture";
     fs::remove_all(root);
     fs::create_directories(root / "mods" / "sample" / "content");
+    const std::string profile = R"({"_idRow":717162,"_sName":"Port de Tradução PT-BR",
+        "_aSubmitter":{"_sName":"gurincrivel"},"_aCategory":{"_sName":"Translations"},
+        "_sText":"Community translation","_sVersion":"1.0","_tsDateUpdated":1234})";
+    const std::string files = R"({"_aFiles":[
+        {"_sFile":"ptbr_jp_xbox_western.zip","_sDownloadUrl":"https://example.test/1847226"},
+        {"_sFile":"ptbr_jp.zip","_sDownloadUrl":"https://example.test/1847225"},
+        {"_sFile":"ptbr_oficial_xbox_western.zip","_sDownloadUrl":"https://example.test/1847227"},
+        {"_sFile":"ptbr_oficial_116d4.zip","_sDownloadUrl":"https://example.test/1847223"}]})";
+    unsigned featured_calls = 0, listing_calls = 0;
+    auto transport = [&](const std::string &url) {
+        if (url.ends_with("/717162/ProfilePage")) {
+            ++featured_calls;
+            return profile;
+        }
+        if (url == mods::gamebanana_files_url(717162)) {
+            ++featured_calls;
+            return files;
+        }
+        ++listing_calls;
+        return fixture("gamebanana.json");
+    };
+    auto banana = make_source(SourceId::gamebanana, transport, root / "featured");
+    auto explore = banana->search("", Category::all, 1);
+    assert(explore.cards.size() == 2 && explore.cards[0].id == ptbr_translation_id);
+    assert(explore.cards[0].featured && !explore.cards[1].featured);
+    assert(explore.cards[0].author == "gurincrivel" && explore.cards[0].source == "GameBanana");
+    assert(explore.cards[0].category == Category::language && explore.cards[1].id == "42");
+    assert(featured_calls == 2 && listing_calls == 1);
+    banana->search("", Category::all, 1);
+    assert(featured_calls == 2 && listing_calls == 1); // Both cards and metadata use the response cache.
+    assert(banana->search("", Category::graphics, 1).cards.empty());
+    assert(banana->search("voice", Category::all, 1).cards.size() == 1);
+    assert(banana->search("", Category::all, 2).cards.size() == 1);
+    assert(featured_calls == 2); // Search and later pages never fetch recommendations.
+    auto duplicate = make_source(
+        SourceId::gamebanana,
+        [&](const std::string &url) {
+            if (url.find("/Index?") == url.npos)
+                return transport(url);
+            return std::string(R"({"_aMetadata":{"_bIsComplete":true},"_aRecords":[
+            {"_idRow":717162,"_sName":"Duplicate listing"}]})");
+        },
+        root / "duplicate");
+    auto deduplicated = duplicate->search("", Category::all, 1);
+    assert(deduplicated.cards.size() == 1 && deduplicated.cards[0].featured);
+    for (bool fail_files : {false, true}) {
+        auto failing = make_source(
+            SourceId::gamebanana,
+            [&](const std::string &url) {
+                if (url.ends_with(fail_files ? "/DownloadPage" : "/ProfilePage"))
+                    throw NetworkError("Missing featured entry");
+                return transport(url);
+            },
+            root / (fail_files ? "failed-files" : "failed-profile"));
+        auto fallback = failing->search("", Category::all, 1);
+        assert(fallback.cards.size() == 1 && fallback.cards[0].id == "42");
+        assert(fallback.error.empty() && !fallback.offline);
+    }
+    auto index_unavailable = make_source(
+        SourceId::gamebanana,
+        [&](const std::string &url) {
+            if (url.find("/Index?") != url.npos)
+                throw NetworkError("Catalog offline");
+            return transport(url);
+        },
+        root / "featured-only");
+    auto featured_only = index_unavailable->search("", Category::all, 1);
+    assert(featured_only.cards.size() == 1 && featured_only.cards[0].featured &&
+           !featured_only.error.empty());
+    auto translation = explore.cards[0];
+    assert(preferred_file(translation, 1) == 2);
+    assert(preferred_file(translation, 0) == 3);
+    translation.downloads.erase(translation.downloads.begin() + 2, translation.downloads.end());
+    assert(preferred_file(translation, 1) == 0 && preferred_file(translation, 0) == 1);
+    translation.downloads = {{"PTBR_XBOX.ZIP", "", "", 0}, {"PTBR.ZIP", "", "", 0}};
+    assert(preferred_file(translation, 1) == 0 && preferred_file(translation, 0) == 1);
+    translation.downloads.resize(1);
+    assert(preferred_file(translation, 0) == 0);
+    translation.downloads.clear();
+    assert(preferred_file(translation, 1) == 0);
+    for (bool portuguese : {false, true})
+        for (bool asked : {false, true})
+            assert(should_offer_translation(portuguese, asked, {}) == (portuguese && !asked));
+    assert(!should_offer_translation(true, false, {translation}));
+    Card manual;
+    for (auto folder :
+         {"PTBR_Oficial_xbox_western", "ptbr_oficial_116d4", "ptbr_jp", "ptbr_jp_xbox_western"}) {
+        manual.installed_id = std::string("file:") + folder;
+        assert(!should_offer_translation(true, false, {manual}));
+    }
+    manual.installed_id = "file:unrelated_translation";
+    assert(should_offer_translation(true, false, {manual}));
+    std::cout << "featured order/cache/failure, layout preselection and translation offer gating passed\n";
     Cache cache(root / "cache");
     bool offline = false;
     int calls = 0;

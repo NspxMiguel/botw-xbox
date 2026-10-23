@@ -175,6 +175,10 @@ enum class Text {
     buttons_question,
     autoboot_missing,
     setup,
+    store_featured,
+    translation_offer,
+    not_now,
+    store_installed_enabled,
     count
 };
 inline std::wstring_view text(Text key, bool pt) {
@@ -414,7 +418,12 @@ inline std::wstring_view text(Text key, bool pt) {
           L"Quais botões você prefere?\nOs avisos do jogo seguem a sua escolha. Dá pra mudar depois em Configurações."},
          {L"Automatic start is on, but the game was not found.\nConnect the USB drive with your game, or set it up again.",
           L"O início automático está ligado, mas o jogo não foi encontrado.\nConecte o pendrive com o seu jogo ou configure de novo."},
-         {L"Set up", L"Configurar"}}};
+         {L"Set up", L"Configurar"},
+         {L"Featured", L"Destaques"},
+         {L"Install the Brazilian Portuguese translation (community mod, downloaded from GameBanana)?",
+          L"Instalar a tradução em português do Brasil (mod da comunidade, baixado do GameBanana)?"},
+         {L"Not now", L"Agora não"},
+         {L"Installed and enabled.", L"Instalado e ativado."}}};
     return table.at(static_cast<size_t>(key))[pt ? 1 : 0];
 }
 } // namespace uwp
