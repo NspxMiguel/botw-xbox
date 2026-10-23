@@ -37,6 +37,8 @@ public:
 class LatteTextureViewLookupCache
 {
 public:
+	// Mutations happen on the Latte thread, together with texture binding.
+	static uint64 GetGeneration();
 	static void Add(LatteTextureView* view, uint32 baseMip = 0, uint32 baseSlice = 0);
 	static void RemoveAll(LatteTextureView* view);
 

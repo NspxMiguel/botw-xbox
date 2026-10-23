@@ -54,6 +54,7 @@ void D3D12StagingDescriptorHeap::Free(D3D12_CPU_DESCRIPTOR_HANDLE handle)
 	if (handle.ptr == 0)
 		return;
 	std::lock_guard _l(m_mutex);
+	m_generation.fetch_add(1, std::memory_order_relaxed);
 	m_freeList.push_back(handle);
 	m_allocatedCount--;
 }
@@ -80,6 +81,8 @@ D3D12GpuViewHeap::Table D3D12GpuViewHeap::AllocateTable(uint32 count)
 	auto tryAllocate = [&](uint32 &startOut) -> bool {
 		if (m_markers.empty() && !m_recordingHasData)
 		{
+			if (m_head || m_tail)
+				++m_generation;
 			m_head = 0;
 			m_tail = 0;
 			startOut = 0;
@@ -123,6 +126,9 @@ D3D12GpuViewHeap::Table D3D12GpuViewHeap::AllocateTable(uint32 count)
 		cemuLog_log(LogType::Force, "D3D12: Shader visible descriptor heap exhausted by a single command list");
 		cemu_assert(false);
 	}
+	// A cached table is only reused within this recording interval and allocation lap.
+	if (start < m_head)
+		++m_generation;
 	m_head = start + count;
 	m_recordingHasData = true;
 	Table t;
@@ -133,6 +139,8 @@ D3D12GpuViewHeap::Table D3D12GpuViewHeap::AllocateTable(uint32 count)
 
 void D3D12GpuViewHeap::OnSubmit(uint64 submissionId)
 {
+	// Reusing a table in a later submission would require extending its retirement marker.
+	++m_generation;
 	if (!m_recordingHasData)
 		return;
 	m_markers.push_back({submissionId, m_head});
@@ -197,6 +205,7 @@ bool D3D12GpuSamplerHeap::GetOrCreateTable(const uint32 *samplerIds, const D3D12
 
 void D3D12GpuSamplerHeap::Reset()
 {
+	++m_generation;
 	m_head = 0;
 	m_tableCache.clear();
 }

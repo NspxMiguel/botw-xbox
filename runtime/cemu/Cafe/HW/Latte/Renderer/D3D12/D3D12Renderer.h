@@ -270,7 +270,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	RendererShaderD3D12 *CreateInternalShader(RendererShader::ShaderType type, const std::string &glsl);
 	void BindRootSignatureAndHeaps();
 	void SetPushConstants(const void *data, uint32 sizeInBytes);
-	D3D12_GPU_DESCRIPTOR_HANDLE WriteStageTable(const D3D12StageTableDesc &tableDesc);
+	D3D12_GPU_DESCRIPTOR_HANDLE WriteStageTable(const D3D12StageTableDesc &tableDesc, D3D12Const::Stage stage = D3D12Const::Stage::Count);
 	// May submit the command list and reset the shader-visible sampler heap if it is full. All command list state is
 	// lost when that happens, so call this before recording any state that the following draw depends on.
 	D3D12_GPU_DESCRIPTOR_HANDLE GetSamplerTable(const D3D12_SAMPLER_DESC *samplers, uint32 count);
@@ -325,7 +325,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		uint32 samplerCount;
 		D3D12_GPU_DESCRIPTOR_HANDLE samplerTable;
 	};
-	void draw_buildStageBindings(LatteDecompilerShader *shader, RendererShaderD3D12 *hostShader, const D3D12_GPU_VIRTUAL_ADDRESS uniformVarAddress, uint32 uniformVarSize, PreparedStageBindings &out);
+	void draw_buildStageBindings(LatteDecompilerShader *shader, RendererShaderD3D12 *hostShader, PreparedStageBindings &out);
 	void draw_acquireSamplerTables(PreparedStageBindings *stages, uint32 count);
 	bool TryGetSamplerTable(const D3D12_SAMPLER_DESC *samplers, uint32 count, D3D12_GPU_DESCRIPTOR_HANDLE &tableOut);
 	void draw_buildSamplerDesc(LatteDecompilerShader *shader, uint32 relativeTextureUnit, LatteTextureViewD3D12 *view, D3D12_SAMPLER_DESC &desc);
@@ -483,6 +483,10 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		D3D12_INDEX_BUFFER_VIEW currentIndexBuffer{};
 		float currentBlendFactor[4]{-1, -1, -1, -1};
 		uint32 currentStencilRef = 0xFFFFFFFF;
+		D3D12_GPU_DESCRIPTOR_HANDLE currentViewTables[3]{};
+		D3D12_GPU_DESCRIPTOR_HANDLE currentSamplerTables[3]{};
+		uint32 currentRuntimeData[D3D12Const::kRuntimeDataDwords]{};
+		bool runtimeDataValid = false;
 		bool rootSignatureBound = false;
 		// streamout
 		struct
@@ -492,6 +496,48 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		} streamoutBuffer[LATTE_NUM_STREAMOUT_BUFFER]{};
 		uint32 verticesPerInstance = 0;
 	} m_state;
+
+	// Upload addresses and view tables never escape the submission that owns their ring allocations.
+	struct UniformCacheEntry
+	{
+		// Keep a CPU shadow: mapped upload memory can be write-combined and expensive to read.
+		std::vector<uint8> data;
+		D3D12_GPU_VIRTUAL_ADDRESS address = 0;
+		uint64 submission = ~0ull;
+	};
+	UniformCacheEntry m_uniformCache[3];
+	struct ViewTableCacheEntry
+	{
+		std::array<uint64, D3D12Const::kMaxCBVsPerStage * 2 + D3D12Const::kMaxSRVsPerStage + 2> key{};
+		uint64 generation = 0;
+		uint64 sourceGeneration = 0;
+		D3D12_GPU_DESCRIPTOR_HANDLE table{};
+	};
+	std::array<ViewTableCacheEntry, 128> m_viewTableCache{};
+	struct CBVCacheEntry
+	{
+		D3D12_CPU_DESCRIPTOR_HANDLE descriptor{};
+		D3D12_GPU_VIRTUAL_ADDRESS address = 0;
+		uint32 size = 0;
+		uint64 submission = ~0ull;
+	};
+	// One staging slot per register avoids source aliasing during the bulk copy. The last bank is for internal passes.
+	CBVCacheEntry m_cbvCache[(uint32)D3D12Const::Stage::Count + 1][D3D12Const::kMaxCBVsPerStage];
+	struct SamplerTableCacheEntry
+	{
+		D3D12_SAMPLER_DESC samplers[D3D12Const::kMaxSamplersPerStage]{};
+		uint32 count = 0;
+		uint64 generation = 0;
+		D3D12_GPU_DESCRIPTOR_HANDLE table{};
+	};
+	SamplerTableCacheEntry m_stageSamplerCache[3];
+	struct SamplerDescCacheEntry
+	{
+		std::array<uint32, 13> key{};
+		D3D12_SAMPLER_DESC desc{};
+		bool valid = false;
+	};
+	SamplerDescCacheEntry m_samplerDescCache[3][LATTE_NUM_MAX_TEX_UNITS];
 
 	std::vector<uint8> m_uniformScratch; // CPU side staging for uniform var blocks
 

@@ -122,80 +122,120 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 		MPTR physAddr = (texRegister.word2.get_BASE_ADDRESS() << 8);
 		if (physAddr == MPTR_NULL)
 			continue; // invalid data
-		MPTR physMipAddr = (texRegister.word3.get_MIP_ADDRESS() << 8);
-
-		// word0
-		const auto word0 = texRegister.word0;
-		auto dim = word0.get_DIM();
-		uint32 pitch = (word0.get_PITCH() + 1) << 3;
-		uint32 width = word0.get_WIDTH() + 1;
-		auto tileMode = word0.get_TILE_MODE();
-		// word1
-		const auto word1 = texRegister.word1;
-		uint32 depth = word1.get_DEPTH();
-		if (dim == Latte::E_DIM::DIM_2D_ARRAY || dim == Latte::E_DIM::DIM_3D || dim == Latte::E_DIM::DIM_2D_ARRAY_MSAA || dim == Latte::E_DIM::DIM_1D_ARRAY)
+		struct BindingCacheEntry
 		{
-			depth = depth + 1;
-		}
-		else
-		{
-			if (dim == Latte::E_DIM::DIM_CUBEMAP)
-				depth = 6 * (depth + 1);
-			if (depth == 0)
-				depth = 1;
-		}
-		uint32 height = word1.get_HEIGHT() + 1;
-		if (dim == Latte::E_DIM::DIM_1D || dim == Latte::E_DIM::DIM_1D_ARRAY)
-			height = 1;
-		if (Latte::IsCompressedFormat(word1.get_DATA_FORMAT()))
-			pitch /= 4;
-		// view slice
+			_LatteRegisterSetTextureUnit words{};
+			uint64 generation = 0;
+			LatteTextureView *view = nullptr;
+			MPTR physMipAddr = 0;
+			uint32 swizzle = 0;
+			uint32 firstMip = 0;
+			uint32 numMips = 0;
+			bool depthCompare = false;
+		};
+		static BindingCacheEntry bindingCache[LATTE_CEMU_GS_TEX_UNIT_BASE + LATTE_NUM_MAX_TEX_UNITS];
+		auto &cached = bindingCache[glBackendBaseTexUnit + textureIndex];
 		const auto word4 = texRegister.word4;
-		const auto word5 = texRegister.word5;
-
-		uint32 viewFirstSlice = word5.get_BASE_ARRAY();
-		uint32 viewNumSlices = word5.get_LAST_ARRAY() + 1 - viewFirstSlice;
-
-		uint32 viewFirstMip = word4.get_BASE_LEVEL();
-		uint32 viewNumMips = word5.get_LAST_LEVEL() + 1 - viewFirstMip;
-
-		cemu_assert_debug(viewNumMips != 0);
-
-		Latte::E_GX2SURFFMT format = LatteTexture_ReconstructGX2Format(word1, word4);
-
-		// todo - AA
-		if (dim == Latte::E_DIM::DIM_2D_MSAA)
+		const bool isDepthSampler = shaderContext->textureUsesDepthCompare[textureIndex];
+		LatteTextureView *textureView;
+		MPTR physMipAddr;
+		uint32 swizzle, viewFirstMip, viewNumMips;
+		if (cached.generation == LatteTextureViewLookupCache::GetGeneration() &&
+			cached.depthCompare == isDepthSampler && memcmp(&cached.words, &texRegister, sizeof(texRegister)) == 0)
 		{
-			// MSAA only supports one mip level?
-			// without this we encounter a crash in The Mysterious Cities of Gold: Secret Paths due to it setting mip count to 2 and leaving mip pointer on an invalid uninitialized value
-			viewFirstMip = 0;
-			viewNumMips = 1;
+			textureView = cached.view;
+			physMipAddr = cached.physMipAddr;
+			swizzle = cached.swizzle;
+			viewFirstMip = cached.firstMip;
+			viewNumMips = cached.numMips;
 		}
-
-		// swizzle
-		uint32 swizzle = 0;
-		if (Latte::TM_IsMacroTiled(tileMode))
-		{
-			// extract swizzle bits from pointer if macro-tiled
-			swizzle = (physAddr & 0x700);
-			physAddr &= ~0x700;
-		}
-
-		bool isDepthSampler = shaderContext->textureUsesDepthCompare[textureIndex];
-		// look for already existing texture
-		LatteTextureView* textureView;
-		if (!isDepthSampler)
-			textureView = LatteTextureViewLookupCache::lookup(physAddr, width, height, depth, pitch, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim);
 		else
-			textureView = LatteTextureViewLookupCache::lookupWithColorOrDepthType(physAddr, width, height, depth, pitch, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim, true);
-		if (!textureView)
 		{
-			// view not found, create a new mapping which will also create a new texture if necessary
-			textureView = LatteTexture_CreateMapping(physAddr, physMipAddr, width, height, depth, pitch, tileMode, swizzle, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim, dim, isDepthSampler);
-			if (textureView == nullptr)
-				continue;
-			LatteGPUState.repeatTextureInitialization = true;
+			const uint64 lookupGeneration = LatteTextureViewLookupCache::GetGeneration();
+			physMipAddr = (texRegister.word3.get_MIP_ADDRESS() << 8);
+
+			// word0
+			const auto word0 = texRegister.word0;
+			auto dim = word0.get_DIM();
+			uint32 pitch = (word0.get_PITCH() + 1) << 3;
+			uint32 width = word0.get_WIDTH() + 1;
+			auto tileMode = word0.get_TILE_MODE();
+			// word1
+			const auto word1 = texRegister.word1;
+			uint32 depth = word1.get_DEPTH();
+			if (dim == Latte::E_DIM::DIM_2D_ARRAY || dim == Latte::E_DIM::DIM_3D || dim == Latte::E_DIM::DIM_2D_ARRAY_MSAA || dim == Latte::E_DIM::DIM_1D_ARRAY)
+			{
+				depth = depth + 1;
+			}
+			else
+			{
+				if (dim == Latte::E_DIM::DIM_CUBEMAP)
+					depth = 6 * (depth + 1);
+				if (depth == 0)
+					depth = 1;
+			}
+			uint32 height = word1.get_HEIGHT() + 1;
+			if (dim == Latte::E_DIM::DIM_1D || dim == Latte::E_DIM::DIM_1D_ARRAY)
+				height = 1;
+			if (Latte::IsCompressedFormat(word1.get_DATA_FORMAT()))
+				pitch /= 4;
+			// view slice
+
+			const auto word5 = texRegister.word5;
+
+			uint32 viewFirstSlice = word5.get_BASE_ARRAY();
+			uint32 viewNumSlices = word5.get_LAST_ARRAY() + 1 - viewFirstSlice;
+
+			viewFirstMip = word4.get_BASE_LEVEL();
+			viewNumMips = word5.get_LAST_LEVEL() + 1 - viewFirstMip;
+
+			cemu_assert_debug(viewNumMips != 0);
+
+			Latte::E_GX2SURFFMT format = LatteTexture_ReconstructGX2Format(word1, word4);
+
+			// todo - AA
+			if (dim == Latte::E_DIM::DIM_2D_MSAA)
+			{
+				// MSAA only supports one mip level?
+				// without this we encounter a crash in The Mysterious Cities of Gold: Secret Paths due to it setting mip count to 2 and leaving mip pointer on an invalid uninitialized value
+				viewFirstMip = 0;
+				viewNumMips = 1;
+			}
+
+			// swizzle
+			swizzle = 0;
+			if (Latte::TM_IsMacroTiled(tileMode))
+			{
+				// extract swizzle bits from pointer if macro-tiled
+				swizzle = (physAddr & 0x700);
+				physAddr &= ~0x700;
+			}
+
+			// look for already existing texture
+
+			if (!isDepthSampler)
+				textureView = LatteTextureViewLookupCache::lookup(physAddr, width, height, depth, pitch, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim);
+			else
+				textureView = LatteTextureViewLookupCache::lookupWithColorOrDepthType(physAddr, width, height, depth, pitch, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim, true);
+			if (!textureView)
+			{
+				// view not found, create a new mapping which will also create a new texture if necessary
+				textureView = LatteTexture_CreateMapping(physAddr, physMipAddr, width, height, depth, pitch, tileMode, swizzle, viewFirstMip, viewNumMips, viewFirstSlice, viewNumSlices, format, dim, dim, isDepthSampler);
+				if (textureView == nullptr)
+					continue;
+				LatteGPUState.repeatTextureInitialization = true;
+			}
+			cached.words = texRegister;
+			// A newly created mapping must go through lookup again on the initialization retry.
+			cached.generation = lookupGeneration;
+			cached.view = textureView;
+			cached.physMipAddr = physMipAddr;
+			cached.swizzle = swizzle;
+			cached.firstMip = viewFirstMip;
+			cached.numMips = viewNumMips;
+			cached.depthCompare = isDepthSampler;
 		}
+		// Always validate contents, dynamic aliases, usage, feedback barriers and scale below.
 
 #ifdef ENABLE_OPENGL
 		if (g_renderer->GetType() == RendererAPI::OpenGL)

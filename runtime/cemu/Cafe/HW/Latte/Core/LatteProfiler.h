@@ -23,6 +23,12 @@ enum class Slot : size_t
 	RenderTargets,
 	Submit,
 	Pm4,
+	DrawStateDecode,
+	PipelineBind,
+	VertexBuffers,
+	RootSignature,
+	RenderState,
+	DrawCall,
 	Count,
 	Unaccounted = Count,
 };
