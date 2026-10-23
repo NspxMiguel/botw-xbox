@@ -58,7 +58,7 @@ Launcher artwork comes from your dump's `meta/` files; disc art is fetched from 
 - Xbox port: NSPX ([nspxmiguel](https://github.com/NspxMiguel)).
 
 This project's own code is MIT licensed ([LICENSE](LICENSE)); third-party components keep their own
-licenses. Not affiliated with or endorsed by Nintendo or Microsoft. Breath of the Wild is a trademark of
+licenses. See [LEGAL.md](LEGAL.md). Not affiliated with or endorsed by Nintendo or Microsoft. Breath of the Wild is a trademark of
 Nintendo.
 
 ---
@@ -110,4 +110,4 @@ promessa.
 - Porte para Xbox: NSPX ([nspxmiguel](https://github.com/NspxMiguel)).
 
 O código próprio está sob licença MIT; componentes de terceiros mantêm suas licenças. Sem vínculo com a
-Nintendo ou a Microsoft. Breath of the Wild é marca da Nintendo.
+Nintendo ou a Microsoft. Breath of the Wild é marca da Nintendo. Veja [LEGAL.md](LEGAL.md#português).
