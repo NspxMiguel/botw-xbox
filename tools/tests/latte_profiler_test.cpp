@@ -43,6 +43,32 @@ int main()
 	assert(TotalExclusiveTime() == std::chrono::duration_cast<std::chrono::nanoseconds>(s_state.last - start).count());
 	assert(s_state.drawTotalNs == TotalExclusiveTime() - s_state.timeNs[static_cast<size_t>(Slot::Pm4)]);
 
+	// Combined draw entry preserves exclusive accounting and the inclusive union,
+	// including nested draws and a reporting boundary inside a nested stage.
+	Reset(Clock::now());
+	const auto combinedStart = s_state.last;
+	{
+		DrawScope draw(Slot::DrawStateDecode);
+		assert(s_state.drawDepth == 1);
+		{
+			Scope descriptors(Slot::Descriptors);
+			DrawScope nested(Slot::DrawStateDecode);
+			assert(s_state.drawDepth == 2);
+		}
+		assert(s_state.current == Slot::DrawStateDecode);
+		assert(s_state.drawDepth == 1);
+	}
+	assert(s_state.current == Slot::Pm4 && s_state.drawDepth == 0);
+	assert(TotalExclusiveTime() == std::chrono::duration_cast<std::chrono::nanoseconds>(s_state.last - combinedStart).count());
+	assert(s_state.drawTotalNs == TotalExclusiveTime() - s_state.timeNs[size_t(Slot::Pm4)]);
+	{
+		DrawScope draw(Slot::DrawStateDecode);
+		Checkpoint(Clock::now());
+		Reset(Clock::now());
+		assert(s_state.drawDepth == 1);
+	}
+	assert(s_state.drawTotalNs == TotalExclusiveTime());
+
 	for (size_t i = 0; i < static_cast<size_t>(Counter::Count); ++i)
 	{
 		Add(static_cast<Counter>(i), i + 1);
@@ -90,13 +116,27 @@ int main()
 	assert(TotalExclusiveTime() == 0);
 	(void)exclusiveBeforeDetail;
 
+	// Outcome classification closes once, survives a window boundary and never
+	// changes exclusive accounting. An explicit End is safe before destruction.
+	for (size_t i = 0; i < size_t(Detail::Count); ++i)
+	{
+		DetailScope scope(static_cast<Detail>(i));
+		CheckpointDetails(Clock::now());
+		Reset(Clock::now());
+		scope.End(Detail::IndexHit);
+		scope.End(Detail::IndexHit);
+		assert(s_state.detailDepth[i] == 0);
+	}
+
 	s_state.enabled = false;
 	Add(Counter::DescriptorHits);
 	assert(s_state.counters[static_cast<size_t>(Counter::DescriptorHits)] == 0);
 	const auto disabledTime = s_state.last;
 	{
 		Scope disabled(Slot::DrawCall);
+		DrawScope disabledDraw(Slot::DrawStateDecode);
 		assert(s_state.current == Slot::Pm4);
+		assert(s_state.drawDepth == 0);
 	}
 	assert(s_state.last == disabledTime);
 }

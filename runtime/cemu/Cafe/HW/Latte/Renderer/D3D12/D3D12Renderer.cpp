@@ -443,6 +443,8 @@ void D3D12Renderer::WaitForSubmission(uint64 submissionId)
 	cemu_assert_debug(submissionId <= m_lastSubmittedFenceValue);
 	if (GetCompletedSubmissionId() >= submissionId)
 		return;
+	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::SubmitWait);
+	LatteProfiler::Add(LatteProfiler::Counter::SubmissionWaits);
 	D3D12_ThrowIfFailed(m_fence->SetEventOnCompletion(submissionId, m_fenceEvent), "SetEventOnCompletion");
 	const auto start = std::chrono::steady_clock::now();
 	WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
@@ -460,6 +462,7 @@ void D3D12Renderer::WaitForIdle()
 
 void D3D12Renderer::ResetCommandList()
 {
+	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::SubmitReset);
 	// reuse the oldest allocator if the GPU is done with it
 	ProcessFinishedSubmissions();
 	if (!m_inFlightAllocators.empty() && m_inFlightAllocators.front().fenceValue <= m_completedFenceValue)
@@ -493,6 +496,7 @@ void D3D12Renderer::ResetCommandList()
 void D3D12Renderer::SubmitCommandList(bool waitIdle)
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Submit);
+	LatteProfiler::DetailScope closeScope(LatteProfiler::Detail::SubmitClose);
 	occlusionQuery_notifyEndCommandList();
 	LatteProfiler::Add(LatteProfiler::Counter::Submissions);
 	if (!m_hasRecordedWork && m_pendingBarriers.empty())
@@ -505,9 +509,16 @@ void D3D12Renderer::SubmitCommandList(bool waitIdle)
 		HandleDeviceError(hr, "ID3D12GraphicsCommandList::Close");
 	ID3D12CommandList *lists[] = {m_cmdList.Get()};
 	D3D12_Checkpoint(m_device.Get(), "command list closed");
-	m_queue->ExecuteCommandLists(1, lists);
+	closeScope.End(LatteProfiler::Detail::SubmitClose);
+	{
+		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::SubmitExecute);
+		m_queue->ExecuteCommandLists(1, lists);
+	}
 	const uint64 submissionId = m_lastSubmittedFenceValue + 1;
-	hr = m_queue->Signal(m_fence.Get(), submissionId);
+	{
+		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::SubmitSignal);
+		hr = m_queue->Signal(m_fence.Get(), submissionId);
+	}
 	if (FAILED(hr))
 		HandleDeviceError(hr, "ID3D12CommandQueue::Signal");
 	m_uploadRing->OnSubmit(submissionId);
@@ -536,6 +547,7 @@ void D3D12Renderer::SubmitCommandList(bool waitIdle)
 
 void D3D12Renderer::ProcessFinishedSubmissions()
 {
+	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::SubmitRetire);
 	const uint64 previous = m_completedFenceValue;
 	const uint64 completed = GetCompletedSubmissionId();
 	m_uploadRing->Retire(completed);

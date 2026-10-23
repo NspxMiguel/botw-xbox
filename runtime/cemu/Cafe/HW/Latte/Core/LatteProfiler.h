@@ -59,6 +59,25 @@ enum class Counter : size_t
 	PipelineStateHits,
 	Submissions,
 	EmptySubmissions,
+	IndexRelocatedHits,
+	IndexComparedBytes,
+	IndexHashedBytes,
+	TextureStageHits,
+	TextureStageMisses,
+	TextureLookupHits,
+	TextureLookupMisses,
+	TextureContentChecks,
+	TextureAliasRefreshes,
+	DrawSequences,
+	RegisterPackets,
+	RegisterWords,
+	RegisterChangedPackets,
+	RingWords,
+	RingRefills,
+	SubmissionWaits,
+	SubmissionDrawLimit,
+	SubmissionReadback,
+	SubmissionOverflow,
 	Count,
 };
 
@@ -69,6 +88,24 @@ enum class Detail : size_t
 	PacketDecode,
 	Streamout,
 	BindingsPrepare,
+	SequenceState,
+	SequenceFinish,
+	DrawSetup,
+	IndexLookup,
+	IndexHit,
+	IndexMiss,
+	IndexConvert,
+	TextureStage,
+	TextureResolve,
+	TextureContent,
+	TextureAliases,
+	Pm4Registers,
+	SubmitClose,
+	SubmitExecute,
+	SubmitSignal,
+	SubmitRetire,
+	SubmitReset,
+	SubmitWait,
 	Count,
 };
 
@@ -166,6 +203,36 @@ class Scope
 	bool m_enabled;
 };
 
+// Draw handlers enter their exclusive slot and the inclusive draw union at the
+// same instant. Avoid a timed DrawOther wrapper with no work between the scopes.
+class DrawScope
+{
+  public:
+	explicit DrawScope(Slot slot) : m_enabled(s_state.enabled)
+	{
+		if (!m_enabled)
+			return;
+		Checkpoint(Clock::now());
+		m_previous = s_state.current;
+		s_state.current = slot;
+		++s_state.drawDepth;
+	}
+	~DrawScope()
+	{
+		if (!m_enabled)
+			return;
+		Checkpoint(Clock::now());
+		--s_state.drawDepth;
+		s_state.current = m_previous;
+	}
+	DrawScope(const DrawScope &) = delete;
+	DrawScope &operator=(const DrawScope &) = delete;
+
+  private:
+	Slot m_previous = Slot::Unaccounted;
+	bool m_enabled;
+};
+
 // Inclusive diagnostic intervals, never added to coverage or the slot total.
 class DetailScope
 {
@@ -177,9 +244,14 @@ class DetailScope
 	}
 	~DetailScope()
 	{
+		End(m_detail);
+	}
+	void End(Detail outcome)
+	{
 		const auto index = static_cast<size_t>(m_detail);
 		if (m_enabled && --s_state.detailDepth[index] == 0)
-			s_state.detailNs[index] += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - s_state.detailStart[index]).count();
+			s_state.detailNs[static_cast<size_t>(outcome)] += std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - s_state.detailStart[index]).count();
+		m_enabled = false;
 	}
 	DetailScope(const DetailScope &) = delete;
 	DetailScope &operator=(const DetailScope &) = delete;

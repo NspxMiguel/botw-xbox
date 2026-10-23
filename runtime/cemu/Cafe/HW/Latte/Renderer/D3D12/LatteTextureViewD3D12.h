@@ -34,6 +34,12 @@ class LatteTextureViewD3D12 : public LatteTextureView
 			m_shaderReadState.Remember(m_baseTexture->GetStateVersion());
 	}
 
+	void RefreshForSampling()
+	{
+		if (m_usesSliceCopy)
+			UpdateSliceCopy();
+	}
+
 	// staging (non shader-visible) SRV for the given GPU7 sampler swizzle (SQ_TEX_RESOURCE_WORD4)
 	D3D12_CPU_DESCRIPTOR_HANDLE GetSRV(uint32 gpuSamplerSwizzle);
 	D3D12_CPU_DESCRIPTOR_HANDLE GetSRVRGBA()

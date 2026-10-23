@@ -3,6 +3,7 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Core/LatteIndices.h"
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
+#include "Cafe/HW/Latte/Core/LatteContentIndex.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Common/cpu_features.h"
@@ -16,8 +17,8 @@
 
 namespace
 {
-constexpr size_t kPersistentEntries = 256;
-constexpr size_t kIndexWays = 4;
+constexpr size_t kPersistentEntries = LatteDrawCache::kSmallIndexEntries + LatteDrawCache::kLargeIndexEntries;
+constexpr size_t kIndexWays = LatteDrawCache::kIndexCacheWays;
 } // namespace
 
 struct
@@ -28,6 +29,7 @@ struct
 		const void* lastPtr;
 		LatteDrawCache::IndexKey key;
 		uint64 lastUsed;
+		uint64 contentHash;
 		size_t inputSize;
 		LatteDrawCache::ContentSnapshot content;
 		// output
@@ -38,10 +40,11 @@ struct
 		uint32 outputCount;
 		Renderer::IndexAllocation indexAllocation;
 	};
-	// Four-way sets prevent alternating draws from evicting each other. Bounded
-	// at 16 MiB of input and 24 MiB of output payload (excluding allocator capacity).
+	// Separate small/large four-way banks retain more geometry without multiplying
+	// the large-entry bound: at most 24 MiB input + 36 MiB output payload.
 	std::array<CacheEntry, kPersistentEntries + 8> entry;
 	uint64 currentUsageCounter{0};
+	LatteDrawCache::ContentIndex<> contentIndex;
 }LatteIndexCache{};
 
 void LatteIndices_invalidate(const void* memPtr, uint32 size)
@@ -78,6 +81,7 @@ void LatteIndices_invalidateOnWait()
 
 void LatteIndices_invalidateAll(Renderer *renderer)
 {
+	LatteIndexCache.contentIndex.Clear();
 	if (!renderer)
 		renderer = g_renderer.get();
 	for(auto& entry : LatteIndexCache.entry)
@@ -626,6 +630,7 @@ void LatteIndices_alternativeCalculateIndexMax(const void* indexData, LatteIndex
 void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32 count, LattePrimitiveMode primitiveMode, uint32& indexMax, Renderer::INDEX_TYPE& renderIndexType, uint32& outputCount, Renderer::IndexAllocation& indexAllocation)
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Indices);
+	LatteProfiler::DetailScope lookupScope(LatteProfiler::Detail::IndexLookup);
 	// what this should do:
 	// [x] use fast SIMD-based index decoding
 	// [x] unpack QUAD indices to triangle indices
@@ -653,14 +658,43 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	if (persistent)
 	{
 		// Compare the complete key and all content bytes inside a four-way set.
-		const size_t slot = key.Slot(kPersistentEntries / kIndexWays) * kIndexWays;
+		const bool small = inputSize <= LatteDrawCache::kSmallIndexInputLimit && indexOutputSize <= LatteDrawCache::kSmallIndexOutputLimit;
+		const size_t entries = small ? LatteDrawCache::kSmallIndexEntries : LatteDrawCache::kLargeIndexEntries;
+		const size_t slot = (small ? 0 : LatteDrawCache::kSmallIndexEntries) + key.Slot(entries / kIndexWays) * kIndexWays;
 		begin = LatteIndexCache.entry.begin() + slot;
 		end = begin + kIndexWays;
 	}
 	auto cacheEntry = std::find_if(begin, end, [&](const auto &entry) {
-		return entry.lastPtr && entry.key == key && (!validateContent || entry.content.Matches(indexData, inputSize));
+		if (!entry.lastPtr || entry.key != key)
+			return false;
+		if (validateContent)
+			LatteProfiler::Add(LatteProfiler::Counter::IndexComparedBytes, inputSize);
+		return !validateContent || entry.content.Matches(indexData, inputSize);
 	});
-	if (cacheEntry != end)
+	bool cacheHit = cacheEntry != end;
+	uint64 contentHash = 0;
+	if (cacheEntry == end && persistent && inputSize)
+	{
+		contentHash = LatteDrawCache::IndexContentHash(indexData, inputSize, count, (uint32)indexType, (uint32)primitiveMode);
+		LatteProfiler::Add(LatteProfiler::Counter::IndexHashedBytes, inputSize);
+		if (const auto *slot = LatteIndexCache.contentIndex.Find(contentHash))
+		{
+			auto candidate = LatteIndexCache.entry.begin() + *slot;
+			// A stale hint or hash collision cannot make recycled output a hit.
+			if (candidate->lastPtr && candidate->contentHash == contentHash &&
+				candidate->key.count == key.count && candidate->key.type == key.type && candidate->key.primitive == key.primitive)
+			{
+				LatteProfiler::Add(LatteProfiler::Counter::IndexComparedBytes, inputSize);
+				if (candidate->content.Matches(indexData, inputSize))
+				{
+					cacheEntry = candidate;
+					cacheHit = true;
+					LatteProfiler::Add(LatteProfiler::Counter::IndexRelocatedHits);
+				}
+			}
+		}
+	}
+	if (cacheHit)
 	{
 		LatteProfiler::Add(LatteProfiler::Counter::IndexHits);
 		// Restart changes the vertex bound, never the converted index bytes.
@@ -677,6 +711,7 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		outputCount = cacheEntry->outputCount;
 		indexAllocation = cacheEntry->indexAllocation;
 		cacheEntry->lastUsed = LatteIndices_GetNextUsageIndex();
+		lookupScope.End(LatteProfiler::Detail::IndexHit);
 		return;
 	}
 	LatteProfiler::Add(LatteProfiler::Counter::IndexMisses);
@@ -687,6 +722,8 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	else if (std::all_of(begin, end, [](const auto &entry) { return entry.lastPtr; }))
 		LatteProfiler::Add(LatteProfiler::Counter::IndexSetEvictions);
 
+	lookupScope.End(LatteProfiler::Detail::IndexMiss);
+	LatteProfiler::DetailScope convertScope(LatteProfiler::Detail::IndexConvert);
 	outputCount = 0;
 	if (indexType == LatteIndexType::AUTO)
 		renderIndexType = Renderer::INDEX_TYPE::NONE;
@@ -867,6 +904,9 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	// update cache
 	if (validateContent)
 		lruEntry->content.Assign(indexData, inputSize);
+	lruEntry->contentHash = contentHash;
+	if (persistent && inputSize)
+		LatteIndexCache.contentIndex.Store(contentHash, size_t(lruEntry - LatteIndexCache.entry.begin()));
 	lruEntry->inputSize = inputSize;
 	lruEntry->key = key;
 	lruEntry->lastPtr = indexType == LatteIndexType::AUTO ? reinterpret_cast<const void *>(uintptr_t(1)) : indexData;

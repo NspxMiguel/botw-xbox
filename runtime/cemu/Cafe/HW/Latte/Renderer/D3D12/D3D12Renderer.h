@@ -8,6 +8,7 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12StageTable.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12TextureStage.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Memory.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12DescriptorHeaps.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Format.h"
@@ -40,7 +41,6 @@ namespace WindowSystem
 {
 struct WindowHandleInfo;
 }
-
 
 class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 {
@@ -349,6 +349,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		uint32 samplerCount;
 		D3D12_GPU_DESCRIPTOR_HANDLE samplerTable;
 	};
+	PreparedStageBindings m_preparedStages[3];
 	void draw_buildStageBindings(LatteDecompilerShader *shader, RendererShaderD3D12 *hostShader, PreparedStageBindings &out);
 	void draw_acquireSamplerTables(PreparedStageBindings *stages, uint32 count);
 	bool TryGetSamplerTable(const D3D12_SAMPLER_DESC *samplers, uint32 count, D3D12_GPU_DESCRIPTOR_HANDLE &tableOut);
@@ -565,6 +566,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		bool valid = false;
 	};
 	SamplerDescCacheEntry m_samplerDescCache[3][LATTE_NUM_MAX_TEX_UNITS];
+	D3D12TextureStageCache m_textureStageCache[3];
 
 	std::vector<uint8> m_uniformScratch; // CPU side staging for uniform var blocks
 

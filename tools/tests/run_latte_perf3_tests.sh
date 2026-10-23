@@ -10,15 +10,15 @@ indices=(-Wno-unused-parameter -Wno-sign-compare -Wno-unused-variable -Itools/te
 index_source=runtime/cemu/Cafe/HW/Latte/Core/LatteIndices.cpp
 export UBSAN_OPTIONS=halt_on_error=1
 
-for test in latte_profiler latte_draw_cache latte_index_conversion latte_index_expansion; do
+for test in latte_profiler latte_draw_cache latte_index_conversion latte_index_expansion latte_content_index latte_word_batch; do
   "$cxx" "${common[@]}" -Iruntime/cemu "tools/tests/${test}_test.cpp" -o "build/tests/${test}_test"
   "build/tests/${test}_test"
 done
-for test in latte_indices latte_index_cache_associativity; do
+for test in latte_indices latte_index_cache_associativity latte_index_relocation; do
   "$cxx" "${common[@]}" "${indices[@]}" -Iruntime/cemu "tools/tests/${test}_test.cpp" "$index_source" -o "build/tests/${test}_test"
   "build/tests/${test}_test"
 done
-for test in latte_stage_table latte_root_signature; do
+for test in latte_stage_table latte_root_signature latte_texture_stage; do
   "$cxx" "${common[@]}" -Itools/tests/d3d12_stubs -Iruntime/cemu "tools/tests/${test}_test.cpp" -o "build/tests/${test}_test"
   "build/tests/${test}_test"
 done
@@ -36,5 +36,7 @@ else
 fi
 "$cxx" "${common[@]}" "${x86[@]}" -Iruntime/cemu tools/tests/latte_index_conversion_test.cpp -o build/tests/latte_index_conversion_x86_test
 build/tests/latte_index_conversion_x86_test
-"$cxx" "${common[@]}" "${indices[@]}" "${x86[@]}" -DARCH_X86_64 -Iruntime/cemu tools/tests/latte_indices_test.cpp "$index_source" -o build/tests/latte_indices_x86_test
-build/tests/latte_indices_x86_test
+for test in latte_indices latte_index_relocation; do
+  "$cxx" "${common[@]}" "${indices[@]}" "${x86[@]}" -DARCH_X86_64 -Iruntime/cemu "tools/tests/${test}_test.cpp" "$index_source" -o "build/tests/${test}_x86_test"
+  "build/tests/${test}_x86_test"
+done

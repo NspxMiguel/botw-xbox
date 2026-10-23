@@ -161,7 +161,11 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				"pipeline-miss/frame {:.2f}, texture-new/frame {:.2f}, texture-upload {:.0f} B/frame, buffer-upload {:.0f} B/frame; "
 				"descriptor-hit/frame {:.1f}, descriptor-fast/frame {:.1f}, descriptor-miss/frame {:.1f}; root-cbv-set/frame {:.1f}, root-cbv-skip/frame {:.1f}; "
 				"dynamic-state-hit/frame {:.1f}, dynamic-state-miss/frame {:.1f}; "
-				"transition-hit/frame {:.1f}, transition-miss/frame {:.1f}; index-hit/frame {:.1f}, index-miss/frame {:.1f}; fbo-hit/frame {:.1f}, fbo-miss/frame {:.1f}, pipeline-state-hit/frame {:.1f}; submit/frame {:.2f}, submit-empty/frame {:.2f}",
+				"transition-hit/frame {:.1f}, transition-miss/frame {:.1f}; index-hit/frame {:.1f}, index-miss/frame {:.1f}; fbo-hit/frame {:.1f}, fbo-miss/frame {:.1f}, pipeline-state-hit/frame {:.1f}; submit/frame {:.2f}, submit-empty/frame {:.2f}; "
+				"index-content/frame {:.1f}, index-eviction/frame {:.1f}, index-transient/frame {:.1f}, index-relocated/frame {:.1f}, index-compared {:.0f} B/frame, index-hashed {:.0f} B/frame; "
+				"texture-stage-hit/frame {:.1f}, texture-stage-miss/frame {:.1f}, texture-lookup-hit/frame {:.1f}, texture-lookup-miss/frame {:.1f}, texture-check/frame {:.1f}, texture-alias/frame {:.1f}, sequence/frame {:.1f}; "
+				"register-packet/frame {:.1f}, register-word/frame {:.1f}, register-changed/frame {:.1f}, ring-word/frame {:.1f}, ring-refill/frame {:.1f}; "
+				"submit-wait/frame {:.2f}, submit-limit/frame {:.2f}, submit-readback/frame {:.2f}, submit-overflow/frame {:.2f}",
 				seconds, frames, perFrame(Counter::Draws), s_state.drawTotalNs * msPerNsPerFrame,
 				ms(Slot::DrawOther), ms(Slot::ShaderPipeline), ms(Slot::TextureBinding), ms(Slot::TextureLoad), ms(Slot::BufferSync),
 				ms(Slot::Indices), ms(Slot::Uniforms), ms(Slot::Descriptors), ms(Slot::RenderTargets), ms(Slot::Submit), ms(Slot::Pm4),
@@ -174,12 +178,19 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				perFrame(Counter::DescriptorHits), perFrame(Counter::DescriptorFastHits), perFrame(Counter::DescriptorMisses), perFrame(Counter::RootCBVSets), perFrame(Counter::RootCBVSkips),
 				perFrame(Counter::DynamicStateHits), perFrame(Counter::DynamicStateMisses),
 				perFrame(Counter::TransitionHits), perFrame(Counter::TransitionMisses), perFrame(Counter::IndexHits), perFrame(Counter::IndexMisses),
-				perFrame(Counter::FramebufferHits), perFrame(Counter::FramebufferMisses), perFrame(Counter::PipelineStateHits), perFrame(Counter::Submissions), perFrame(Counter::EmptySubmissions));
+				perFrame(Counter::FramebufferHits), perFrame(Counter::FramebufferMisses), perFrame(Counter::PipelineStateHits), perFrame(Counter::Submissions), perFrame(Counter::EmptySubmissions),
+				perFrame(Counter::IndexContentMisses), perFrame(Counter::IndexSetEvictions), perFrame(Counter::IndexTransientMisses), perFrame(Counter::IndexRelocatedHits), perFrame(Counter::IndexComparedBytes), perFrame(Counter::IndexHashedBytes),
+				perFrame(Counter::TextureStageHits), perFrame(Counter::TextureStageMisses), perFrame(Counter::TextureLookupHits), perFrame(Counter::TextureLookupMisses), perFrame(Counter::TextureContentChecks), perFrame(Counter::TextureAliasRefreshes), perFrame(Counter::DrawSequences),
+				perFrame(Counter::RegisterPackets), perFrame(Counter::RegisterWords), perFrame(Counter::RegisterChangedPackets), perFrame(Counter::RingWords), perFrame(Counter::RingRefills),
+				perFrame(Counter::SubmissionWaits), perFrame(Counter::SubmissionDrawLimit), perFrame(Counter::SubmissionReadback), perFrame(Counter::SubmissionOverflow));
 	if (s_state.detailEnabled)
 	{
 		const auto detail = [&](Detail slot) { return s_state.detailNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };
 		cemuLog_log(LogType::Force, "Latte detail (inclusive ms/frame): sequence {:.3f}, shader-resolve {:.3f}, packet-decode {:.3f}, streamout {:.3f}, bindings-prepare {:.3f}",
 					detail(Detail::Sequence), detail(Detail::ShaderResolve), detail(Detail::PacketDecode), detail(Detail::Streamout), detail(Detail::BindingsPrepare));
+		cemuLog_log(LogType::Force, "Latte detail (inclusive ms/frame): sequence-state {:.3f}, sequence-finish {:.3f}, draw-setup {:.3f}, index-lookup-tail {:.3f}, index-hit {:.3f}, index-miss-lookup {:.3f}, index-convert {:.3f}, texture-stage {:.3f}, texture-resolve {:.3f}, texture-content {:.3f}, texture-aliases {:.3f}, pm4-registers {:.3f}; submit-close {:.3f}, submit-execute {:.3f}, submit-signal {:.3f}, submit-retire {:.3f}, submit-reset {:.3f}, submit-wait {:.3f}",
+					detail(Detail::SequenceState), detail(Detail::SequenceFinish), detail(Detail::DrawSetup), detail(Detail::IndexLookup), detail(Detail::IndexHit), detail(Detail::IndexMiss), detail(Detail::IndexConvert), detail(Detail::TextureStage), detail(Detail::TextureResolve), detail(Detail::TextureContent), detail(Detail::TextureAliases), detail(Detail::Pm4Registers),
+					detail(Detail::SubmitClose), detail(Detail::SubmitExecute), detail(Detail::SubmitSignal), detail(Detail::SubmitRetire), detail(Detail::SubmitReset), detail(Detail::SubmitWait));
 	}
 	cemuLog_log(LogType::Force, "Latte index misses/frame: content {:.1f}, set-eviction {:.1f}, transient {:.1f}",
 				perFrame(Counter::IndexContentMisses), perFrame(Counter::IndexSetEvictions), perFrame(Counter::IndexTransientMisses));
