@@ -290,7 +290,10 @@ def resolve_runtime(sections, variables):
                 "overwriteAnisotropy",
             }
             for key, value in section.values.items():
-                key = {"tileModes": "tilemodes", "tileModesExcluded": "tilemodesExcluded"}.get(key, key)
+                key = {
+                    "tileModes": "tilemodes",
+                    "tileModesExcluded": "tilemodesExcluded",
+                }.get(key, key)
                 if key not in allowed:
                     raise PackError(f"unsupported texture field {key}")
                 fields[key] = [

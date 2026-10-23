@@ -89,7 +89,11 @@ def main() -> None:
         text = HEADER + "".join(f'extern "C" void {d}(PPCContext*);\n' for d in decls) + "\n" + "\n\n".join(codes) + "\n"
         written += write_if_changed(os.path.join(out, f"{key}.cpp"), text)
     for name in os.listdir(out):
-        if name.endswith(".cpp") and name.startswith(("fn_", "cave_", "big_", "huge_")) and name[:-4] not in buckets:
+        if (
+            name.endswith(".cpp")
+            and name.startswith(("fn_", "cave_", "big_", "huge_"))
+            and name[:-4] not in buckets
+        ):
             os.remove(os.path.join(out, name))
 
     # every import gets a symbol (also the ones only referenced as data, e.g. function pointers)

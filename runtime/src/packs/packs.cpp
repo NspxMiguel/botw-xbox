@@ -76,32 +76,39 @@ bool validate_renderer_fields(const BuildPlan &plan, bool textures,
         const auto &n = field.name;
         const bool dimension = n == "overwriteWidth" ||
                                n == "overwriteHeight" || n == "overwriteDepth";
-        const bool lod = n == "overwriteLodBias" || n == "overwriteRelativeLodBias";
+        const bool lod =
+            n == "overwriteLodBias" || n == "overwriteRelativeLodBias";
         const bool anisotropy = n == "overwriteAnisotropy";
         const bool format = n == "overwriteFormat";
         const bool filter = n == "width" || n == "height" || n == "depth" ||
                             n == "formats" || n == "formatsExcluded" ||
                             n == "tilemodes" || n == "tilemodesExcluded" ||
                             n == "inMEM1";
-        if ((!dimension && !filter && !lod && !anisotropy && !format) || field.values.empty())
+        if ((!dimension && !filter && !lod && !anisotropy && !format) ||
+            field.values.empty())
           return reject("texture field " + n);
         if (dimension &&
             (field.values.size() != 1 || field.values[0] < 1 ||
              field.values[0] > (n == "overwriteDepth" ? 2048 : 16384)))
           return reject("texture field " + n);
-        if (lod && (field.values.size() != 1 || field.values[0] < -16 || field.values[0] > 15.99))
+        if (lod && (field.values.size() != 1 || field.values[0] < -16 ||
+                    field.values[0] > 15.99))
           return reject("texture field " + n);
         if (anisotropy && (field.values.size() != 1 ||
-            (field.values[0] != 1 && field.values[0] != 2 && field.values[0] != 4 &&
-             field.values[0] != 8 && field.values[0] != 16)))
+                           (field.values[0] != 1 && field.values[0] != 2 &&
+                            field.values[0] != 4 && field.values[0] != 8 &&
+                            field.values[0] != 16)))
           return reject("texture field " + n);
         if (format) {
           // Only the Remaster GUI precision upgrade has a matching upload path.
-          const auto source = std::find_if(rule.fields.begin(), rule.fields.end(),
-              [](const Field &f) { return f.name == "formats"; });
-          if (field.values != std::vector<double>{0x1f} || source == rule.fields.end() ||
+          const auto source =
+              std::find_if(rule.fields.begin(), rule.fields.end(),
+                           [](const Field &f) { return f.name == "formats"; });
+          if (field.values != std::vector<double>{0x1f} ||
+              source == rule.fields.end() ||
               source->values != std::vector<double>{0x19})
-            return reject("texture format conversion (supported: 0x19 to 0x1f)");
+            return reject(
+                "texture format conversion (supported: 0x19 to 0x1f)");
         }
         for (double value : field.values)
           if (!std::isfinite(value))

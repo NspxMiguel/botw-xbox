@@ -28,8 +28,9 @@ int g_dt_n = 0;
 bool g_cap30 = false;      // a cutscene that must run at 30 fps is playing
 uint32_t g_cap_event = 0;  // its event id
 bool fps60() {
-    static const bool external_timing = packs::has_timing_pack(packs::compiled_plan());
-    return !external_timing && g_target_fps >= 60;
+  static const bool external_timing =
+      packs::has_timing_pack(packs::compiled_plan());
+  return !external_timing && g_target_fps >= 60;
 }
 
 void data_patches() {
@@ -64,20 +65,24 @@ BOTW_HOOK(0x031facec) {  // lwz r0, 8(r1): swap count, compared against the flip
 // stw r0, 120(r30) in the framework's frame function: r0:r12 = OSGetSystemTime ticks since last frame
 BOTW_HOOK(0x031fa97c) {
 #if defined(BOTW_PLATFORM_UWP)
-    uwp::wait_for_guest_resume();
+  uwp::wait_for_guest_resume();
 #endif
-    if (sim_series_s::settings().enabled)
-        if (auto *thread = threads::current(); thread && thread->is_main)
-            sim_series_s::cpu_frame(thread->sim_waited_ns);
-    if (!fps60()) return;
-    if (g_dt_n == 0) data_patches();
-    uint64_t ticks = ((uint64_t)c->r[0] << 32) | c->r[12];
-    g_dt[g_dt_n++ % kAvgFrames] = ticks / kTicksPerSecond;
-    int n = std::min(g_dt_n, kAvgFrames);
-    double sum = 0;
-    for (int k = 0; k < n; k++) sum += g_dt[k];
-    // never faster than 60 fps or slower than 20 fps (below that the game slows down, as on hardware)
-    g_delta = (float)std::clamp(sum / n * 30.0, 0.5, 1.5);
+  if (sim_series_s::settings().enabled)
+    if (auto *thread = threads::current(); thread && thread->is_main)
+      sim_series_s::cpu_frame(thread->sim_waited_ns);
+  if (!fps60())
+    return;
+  if (g_dt_n == 0)
+    data_patches();
+  uint64_t ticks = ((uint64_t)c->r[0] << 32) | c->r[12];
+  g_dt[g_dt_n++ % kAvgFrames] = ticks / kTicksPerSecond;
+  int n = std::min(g_dt_n, kAvgFrames);
+  double sum = 0;
+  for (int k = 0; k < n; k++)
+    sum += g_dt[k];
+  // never faster than 60 fps or slower than 20 fps (below that the game slows
+  // down, as on hardware)
+  g_delta = (float)std::clamp(sum / n * 30.0, 0.5, 1.5);
 }
 
 // ---- game speed ----------------------------------------------------------------------------------

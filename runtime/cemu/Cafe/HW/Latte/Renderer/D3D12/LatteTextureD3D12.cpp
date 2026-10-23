@@ -40,9 +40,11 @@ LatteTextureD3D12::LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, 
 		}
 	}
 	const auto hostFormat = overwriteInfo.hasFormatOverwrite
-        ? static_cast<Latte::E_GX2SURFFMT>(overwriteInfo.format) : format;
-    D3D12Format::GetTextureFormatInfo(renderer->GetFormatSupport(), hostFormat, isDepth, m_formatInfo);
-    if (hostFormat != format) m_formatInfo.isAlternateFormat = true;
+								? static_cast<Latte::E_GX2SURFFMT>(overwriteInfo.format)
+								: format;
+	D3D12Format::GetTextureFormatInfo(renderer->GetFormatSupport(), hostFormat, isDepth, m_formatInfo);
+	if (hostFormat != format)
+		m_formatInfo.isAlternateFormat = true;
 	cemu_assert_debug(hasStencil == m_formatInfo.hasStencil || !isDepth);
 	{
 		// which host format each guest format uses differs between GPUs (packed 16 bit formats are optional), log it once

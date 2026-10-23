@@ -275,7 +275,9 @@ def compile_patch(statements, symbols, assembler):
                 if padding:
                     # Pad code with nops so falling through the gap stays harmless.
                     nop = padding % 4 == 0 and address % 4 == 0
-                    data = b"\x60\x00\x00\x00" * (padding // 4) if nop else bytes(padding)
+                    data = (
+                        b"\x60\x00\x00\x00" * (padding // 4) if nop else bytes(padding)
+                    )
                     writes.append(Write(address, data, source, previous_code and nop))
                 continue
             if op in _SIZES or op == ".string":
@@ -346,9 +348,17 @@ def compile_patch(statements, symbols, assembler):
                     )
                 else:
                     operand_symbols = symbols
-                    if op.startswith("cr") or (op in ("bc", "bcl", "bca", "bcla") and i == 1):
-                        operand_symbols = {**symbols, **{f"cr{k}": k for k in range(8)},
-                                           "lt": 0, "gt": 1, "eq": 2, "so": 3}
+                    if op.startswith("cr") or (
+                        op in ("bc", "bcl", "bca", "bcla") and i == 1
+                    ):
+                        operand_symbols = {
+                            **symbols,
+                            **{f"cr{k}": k for k in range(8)},
+                            "lt": 0,
+                            "gt": 1,
+                            "eq": 2,
+                            "so": 3,
+                        }
                     value = patch_expression(operand, operand_symbols, address)
                     if int(value) != value:
                         raise PackError("non-integer instruction operand")
@@ -361,7 +371,9 @@ def compile_patch(statements, symbols, assembler):
                         if value % 4 or not -(1 << (bits - 1)) <= value < 1 << (
                             bits - 1
                         ):
-                            raise PackError(f"branch target out of range or unaligned: {op} at {address:#x} offset {value:#x}")
+                            raise PackError(
+                                f"branch target out of range or unaligned: {op} at {address:#x} offset {value:#x}"
+                            )
                     result.append(str(value))
             if op in ("ba", "bla") and not absolute:
                 op = "bl" if op == "bla" else "b"

@@ -78,7 +78,9 @@ def synthetic_elf(compressed=False, code=None):
     """A tiny executable containing only authored nop/blr instructions."""
     import zlib
 
-    code = code if code is not None else struct.pack(">4I", 0x60000000, 0x4E800020, 0, 0)
+    code = (
+        code if code is not None else struct.pack(">4I", 0x60000000, 0x4E800020, 0, 0)
+    )
     stored = struct.pack(">I", len(code)) + zlib.compress(code) if compressed else code
     names = b"\0.text\0.shstrtab\0"
     raw = bytearray(0x100 + len(stored) + len(names))
@@ -212,15 +214,19 @@ blr
             "0x02000004=b 0x01800000\n"
             "0x02000008=bc 12,2,0x02000004"
         )
-        self.assertEqual([w.data.hex() for w in writes], [
-            "4b800005", "4b7ffffc", "4182fffc", "49800002", "49800007"
-        ])
+        self.assertEqual(
+            [w.data.hex() for w in writes],
+            ["4b800005", "4b7ffffc", "4182fffc", "49800002", "49800007"],
+        )
         for op in ("ba", "bla", "b", "bl", "bc"):
-            with self.subTest(op=op), self.assertRaisesRegex(
-                PackError, rf"{op} at 0x4340000 offset"
+            with (
+                self.subTest(op=op),
+                self.assertRaisesRegex(PackError, rf"{op} at 0x4340000 offset"),
             ):
                 operands = "12,2," if op == "bc" else ""
-                self.compile(f"[A]\nmoduleMatches=0x1234\n0x04340000={op} {operands}0x08000000")
+                self.compile(
+                    f"[A]\nmoduleMatches=0x1234\n0x04340000={op} {operands}0x08000000"
+                )
 
     def test_alignment_and_relocation_aliases(self):
         writes, symbols, _, _ = self.compile(
@@ -228,9 +234,10 @@ blr
             "lis r3,x@hi\nlwz r3,x@lo(r3)\n.align 16\nentry:\nblr"
         )
         self.assertEqual(symbols["entry"], 0x02000020)
-        self.assertEqual([w.data.hex() for w in writes], [
-            "3c601000", "80638004", "6000000060000000", "4e800020"
-        ])
+        self.assertEqual(
+            [w.data.hex() for w in writes],
+            ["3c601000", "80638004", "6000000060000000", "4e800020"],
+        )
         self.assertTrue(writes[2].executable)
         writes, symbols, _, _ = self.compile(
             "[A]\nmoduleMatches=0x1234\n.origin=codecave\n.byte 1\n.align 4\nvalue:\n.int 7"
@@ -240,16 +247,18 @@ blr
         self.assertFalse(writes[1].executable)
         for alignment in (0, 3, -4):
             with self.assertRaises(PackError):
-                self.compile(f"[A]\nmoduleMatches=0x1234\n.origin=codecave\n.align {alignment}")
+                self.compile(
+                    f"[A]\nmoduleMatches=0x1234\n.origin=codecave\n.align {alignment}"
+                )
 
     def test_cemu_case_implicit_cr_and_condition_bits(self):
         writes, _, _, _ = self.compile(
             "[A]\nmoduleMatches=0x1234\n.origin=codecave\n"
             "FCMPU f1,f0\nBNE cr0, .-4\ncrxor 4*cr1+eq,4*cr1+eq,4*cr1+eq"
         )
-        self.assertEqual([w.data.hex() for w in writes], [
-            "fc010000", "4082fffc", "4cc63182"
-        ])
+        self.assertEqual(
+            [w.data.hex() for w in writes], ["fc010000", "4082fffc", "4cc63182"]
+        )
 
     def test_cross_file_labels_and_forward_constants(self):
         files = [
@@ -412,9 +421,14 @@ blr
                 (root / "patch_test.asm").write_text(
                     f"[A]\nmoduleMatches={module_checksum(raw):#x}\n{body}"
                 )
-                config = {"version": 1, "title_id": "0000000000000001",
-                          "packs": [{"path": str(root)}]}
-                driver = SimpleNamespace(Image=Image, Analyzer=Analyzer, Generator=Generator)
+                config = {
+                    "version": 1,
+                    "title_id": "0000000000000001",
+                    "packs": [{"path": str(root)}],
+                }
+                driver = SimpleNamespace(
+                    Image=Image, Analyzer=Analyzer, Generator=Generator
+                )
                 configure_hook(driver, config, Assembler(), raw)
                 image = driver.Image(str(path))
                 analyzer = driver.Analyzer(image)
@@ -429,12 +443,12 @@ blr
                     callees.update(calls)
                 self.assertFalse(generator.unsupported)
                 if index == 0:
-                    self.assertEqual(image.lr_redirects, {0x01800010: 0x0200000c})
+                    self.assertEqual(image.lr_redirects, {0x01800010: 0x0200000C})
                     self.assertNotIn(0x01800014, analyzer.functions)
                 else:
-                    self.assertEqual(image.ctr_continuations, {0x0180000c: 0x02000008})
-                    self.assertEqual(image.u32(0x0180000c), 0x4e800421)
-                source = r'''#include "ppc.h"
+                    self.assertEqual(image.ctr_continuations, {0x0180000C: 0x02000008})
+                    self.assertEqual(image.u32(0x0180000C), 0x4E800421)
+                source = r"""#include "ppc.h"
 #include <cassert>
 #include <cstdlib>
 #include <vector>
@@ -442,8 +456,10 @@ uint8_t* g_mem;
 #define RETURN() do { assert(c->lr == lr0); return; } while (0)
 #define RETURN_TAIL() return
 extern "C" PPC_NORETURN void rt_trap(PPCContext*, uint32_t, const char*) { std::abort(); }
-'''
-                source += "\n".join(f'extern "C" void {symbol}(PPCContext*);' for symbol in callees)
+"""
+                source += "\n".join(
+                    f'extern "C" void {symbol}(PPCContext*);' for symbol in callees
+                )
                 source += "\n" + "\n".join(codes)
                 source += "\nint main() { std::vector<uint8_t> memory(0x02000000); g_mem=memory.data();\n"
                 cave = image.secs[0x01800000]
@@ -453,10 +469,22 @@ extern "C" PPC_NORETURN void rt_trap(PPCContext*, uint32_t, const char*) { std::
                 source += "PPCContext c{}; c.lr=0x1234; c.r[3]=7; f_02000000(&c); assert(c.lr==0x1234 && c.r[3]==7); }\n"
                 cpp = root / "continuations.cpp"
                 cpp.write_text(source)
-                subprocess.run(["clang++", "-std=c++20", "-I", "runtime/include",
-                                str(cpp), "-o", str(root / "continuations")],
-                               check=True, capture_output=True)
-                subprocess.run([str(root / "continuations")], check=True, capture_output=True)
+                subprocess.run(
+                    [
+                        "clang++",
+                        "-std=c++20",
+                        "-I",
+                        "runtime/include",
+                        str(cpp),
+                        "-o",
+                        str(root / "continuations"),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run(
+                    [str(root / "continuations")], check=True, capture_output=True
+                )
 
     def test_relocation_invalidation_and_import_calls(self):
         raw = synthetic_elf()
@@ -512,16 +540,27 @@ extern "C" PPC_NORETURN void rt_trap(PPCContext*, uint32_t, const char*) { std::
             path.write_bytes(raw)
             (root / "rules.txt").write_text(RULES)
             image = Image(str(path))
-            config = {"version": 1, "title_id": "0000000000000001",
-                      "packs": [{"path": str(root)}]}
-            with patch("tools.packs.build.layout", return_value=([], {}, 0x02000000, 1)):
+            config = {
+                "version": 1,
+                "title_id": "0000000000000001",
+                "packs": [{"path": str(root)}],
+            }
+            with patch(
+                "tools.packs.build.layout", return_value=([], {}, 0x02000000, 1)
+            ):
                 plan = prepare(image, raw, config)
-                self.assertEqual((plan.cave_base, plan.cave_end), (0x01800000, 0x02000000))
-            with patch("tools.packs.build.layout", return_value=([], {}, 0x02000010, 1)):
+                self.assertEqual(
+                    (plan.cave_base, plan.cave_end), (0x01800000, 0x02000000)
+                )
+            with patch(
+                "tools.packs.build.layout", return_value=([], {}, 0x02000010, 1)
+            ):
                 with self.assertRaisesRegex(PackError, "8 MiB"):
                     prepare(image, raw, config)
             image.secs[0x01800000] = bytearray(16)
-            with patch("tools.packs.build.layout", return_value=([], {}, 0x01800010, 1)):
+            with patch(
+                "tools.packs.build.layout", return_value=([], {}, 0x01800010, 1)
+            ):
                 with self.assertRaisesRegex(PackError, "overlaps another RPX section"):
                     prepare(image, raw, config)
             # Empty snapshots reserve no cave and cannot overlap a section.
@@ -579,7 +618,10 @@ class CliTests(unittest.TestCase):
             self.assertTrue((output / "table.cpp").exists())
             report = json.loads((output / "packs_report.json").read_text())
             self.assertTrue(report["external_timing"])
-            self.assertIn("p.external_timing = true;", (output / "packs_generated.inc").read_text())
+            self.assertIn(
+                "p.external_timing = true;",
+                (output / "packs_generated.inc").read_text(),
+            )
             self.assertIn("value = 60", report["packs"][0]["shaders"][0]["source"])
             driver = SimpleNamespace(
                 Image=Image, Analyzer=Analyzer, Generator=Generator

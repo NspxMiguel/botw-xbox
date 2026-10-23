@@ -27,33 +27,41 @@ bool apply_texture_overrides(const packs::BuildPlan &plan,
 	bool resolution = false;
 	for (const auto &field : overrides)
 	{
-		if (field.name == "overwriteWidth") {
+		if (field.name == "overwriteWidth")
+		{
 			info.width = int(field.values[0]);
 			resolution = true;
 		}
-		if (field.name == "overwriteHeight") {
+		if (field.name == "overwriteHeight")
+		{
 			info.height = int(field.values[0]);
 			resolution = true;
 		}
-		if (field.name == "overwriteDepth") {
+		if (field.name == "overwriteDepth")
+		{
 			info.depth = int(field.values[0]);
 			resolution = true;
 		}
-		if (field.name == "overwriteFormat") {
+		if (field.name == "overwriteFormat")
+		{
 			info.format = int(field.values[0]);
 			info.hasFormatOverwrite = true;
 		}
-		if (field.name == "overwriteLodBias") {
+		if (field.name == "overwriteLodBias")
+		{
 			info.lodBias = int(float(field.values[0]) * 64.0f);
 			info.hasLodBias = true;
 		}
-		if (field.name == "overwriteRelativeLodBias") {
+		if (field.name == "overwriteRelativeLodBias")
+		{
 			info.relativeLodBias = int(float(field.values[0]) * 64.0f);
 			info.hasRelativeLodBias = true;
 		}
-		if (field.name == "overwriteAnisotropy") {
+		if (field.name == "overwriteAnisotropy")
+		{
 			int exponent = 0;
-			for (int value = int(field.values[0]); value > 1; value >>= 1) ++exponent;
+			for (int value = int(field.values[0]); value > 1; value >>= 1)
+				++exponent;
 			info.anisotropicLevel = exponent;
 		}
 	}
@@ -65,17 +73,19 @@ bool apply_texture_overrides(const packs::BuildPlan &plan,
 // RGBA16 render target's layout; views keep the guest channel ordering.
 inline std::vector<uint16_t> expand_rgb10a2(const void *pixels, size_t count)
 {
-    std::vector<uint16_t> result(count * 4);
-    for (size_t i = 0; i < count; ++i) {
-        uint32_t pixel;
-        std::memcpy(&pixel, static_cast<const uint8_t *>(pixels) + i * 4, 4);
-        for (unsigned channel = 0; channel < 3; ++channel) {
-            const uint32_t value = (pixel >> (channel * 10)) & 1023;
-            result[i * 4 + channel] = uint16_t((value * 65535 + 511) / 1023);
-        }
-        result[i * 4 + 3] = uint16_t((pixel >> 30) * 21845);
-    }
-    return result;
+	std::vector<uint16_t> result(count * 4);
+	for (size_t i = 0; i < count; ++i)
+	{
+		uint32_t pixel;
+		std::memcpy(&pixel, static_cast<const uint8_t *>(pixels) + i * 4, 4);
+		for (unsigned channel = 0; channel < 3; ++channel)
+		{
+			const uint32_t value = (pixel >> (channel * 10)) & 1023;
+			result[i * 4 + channel] = uint16_t((value * 65535 + 511) / 1023);
+		}
+		result[i * 4 + 3] = uint16_t((pixel >> 30) * 21845);
+	}
+	return result;
 }
 
 class PackHooks final : public packs::RendererHooks

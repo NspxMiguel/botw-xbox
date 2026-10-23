@@ -57,7 +57,8 @@ void texture_scaling() {
     int width, height, depth;
     bool hasResolutionOverwrite;
     int format = 0, lodBias = 0, relativeLodBias = 0, anisotropicLevel = -1;
-    bool hasFormatOverwrite = false, hasLodBias = false, hasRelativeLodBias = false;
+    bool hasFormatOverwrite = false, hasLodBias = false,
+         hasRelativeLodBias = false;
   };
   packs::BuildPlan plan;
   plan.packs.push_back({"synthetic graphics", {}, {}, {}});
@@ -141,8 +142,10 @@ void texture_scaling() {
          normalized.depth == 1);
   // Non-size overrides must never turn off FSR or create a size override.
   const packs::TextureDescription gui{1280, 720, 1, 0x19, 0, false};
-  rules = {{{{"formats", {0x19}}, {"overwriteFormat", {0x1f}},
-             {"overwriteAnisotropy", {8}}, {"overwriteLodBias", {-0.5}},
+  rules = {{{{"formats", {0x19}},
+             {"overwriteFormat", {0x1f}},
+             {"overwriteAnisotropy", {8}},
+             {"overwriteLodBias", {-0.5}},
              {"overwriteRelativeLodBias", {0.25}}}}};
   std::string error;
   assert(packs::validate_renderer_fields(plan, true, true, error));
@@ -163,17 +166,19 @@ void texture_scaling() {
     d3d12_packs::apply_texture_overrides(plan, gui, info);
     assert((1 << info.anisotropicLevel) == level);
   }
-  for (const auto &field : std::vector<packs::Field>{
-           {"overwriteAnisotropy", {3}}, {"overwriteLodBias", {1000}},
-           {"overwriteFormat", {0x41a}}}) {
+  for (const auto &field :
+       std::vector<packs::Field>{{"overwriteAnisotropy", {3}},
+                                 {"overwriteLodBias", {1000}},
+                                 {"overwriteFormat", {0x41a}}}) {
     rules = {{{field}}};
     assert(!packs::validate_renderer_fields(plan, true, true, error));
   }
-  const uint32_t pixels[] = {0, 0xffffffff, 1023, 1023u << 10,
-                              1023u << 20, 1u << 30, 512};
+  const uint32_t pixels[] = {0,           0xffffffff, 1023, 1023u << 10,
+                             1023u << 20, 1u << 30,   512};
   const auto rgba = d3d12_packs::expand_rgb10a2(pixels, 7);
   assert(rgba.size() == 28 && rgba[0] == 0 && rgba[3] == 0);
-  for (int channel = 0; channel < 4; ++channel) assert(rgba[4 + channel] == 65535);
+  for (int channel = 0; channel < 4; ++channel)
+    assert(rgba[4 + channel] == 65535);
   assert(rgba[8] == 65535 && rgba[9] == 0 && rgba[10] == 0);
   assert(rgba[12] == 0 && rgba[13] == 65535 && rgba[14] == 0);
   assert(rgba[16] == 0 && rgba[17] == 0 && rgba[18] == 65535);

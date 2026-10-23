@@ -207,8 +207,10 @@ def continuation_targets(image, writes, cave_code, text_lo, text_hi):
 
     resume_sites = {
         w.address + offset
-        for w in writes if w.executable and text_lo <= w.address < text_hi
-        if insn(w.address).op == "b" and not insn(w.address).LK
+        for w in writes
+        if w.executable and text_lo <= w.address < text_hi
+        if insn(w.address).op == "b"
+        and not insn(w.address).LK
         and insn(w.address).target in cave_code
         for offset in (4, 8)
     }
@@ -225,12 +227,22 @@ def continuation_targets(image, writes, cave_code, text_lo, text_hi):
         register = high.rD
         if low.rD != register or low.rA != register or move.rD != register:
             continue
-        value = ((high.imm << 16) + low.imm) & 0xffffffff
-        if (branch.op == "bcctr" and branch.LK and move.imm == 9
-                and low.op == "addi" and value in resume_sites):
+        value = ((high.imm << 16) + low.imm) & 0xFFFFFFFF
+        if (
+            branch.op == "bcctr"
+            and branch.LK
+            and move.imm == 9
+            and low.op == "addi"
+            and value in resume_sites
+        ):
             ctr[address] = value
-        if (branch.op == "bclr" and not branch.LK and move.imm == 8
-                and low.op == "lwz" and value not in cave_code):
+        if (
+            branch.op == "bclr"
+            and not branch.LK
+            and move.imm == 8
+            and low.op == "lwz"
+            and value not in cave_code
+        ):
             target = image.u32(value)
             if target is not None and text_lo <= target < text_hi and target % 4 == 0:
                 lr[address] = target

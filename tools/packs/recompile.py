@@ -48,7 +48,12 @@ def configure_hook(driver, config, assembler, rpx_bytes):
             if not self.img.is_text(address):
                 return ppc.decode(0, address)
             if address in self.img.ctr_continuations:
-                return ppc.Insn(address, self.img.u32(address), "b", imm=self.img.ctr_continuations[address])
+                return ppc.Insn(
+                    address,
+                    self.img.u32(address),
+                    "b",
+                    imm=self.img.ctr_continuations[address],
+                )
             return super().insn(address)
 
         def walk(self, entry):
@@ -64,8 +69,11 @@ def configure_hook(driver, config, assembler, rpx_bytes):
         def run(self):
             super().run()
             state["redirect_callees"] = {
-                entry: {self.img.lr_redirects[a] for a in function.insns
-                        if a in self.img.lr_redirects}
+                entry: {
+                    self.img.lr_redirects[a]
+                    for a in function.insns
+                    if a in self.img.lr_redirects
+                }
                 for entry, function in self.functions.items()
             }
 
@@ -79,16 +87,24 @@ def configure_hook(driver, config, assembler, rpx_bytes):
             if address in self.img.ctr_continuations:
                 code.insert(0, f"c->lr = 0x{address + 4:08x}u;")
             if instruction.op in ("b", "bc") and instruction.LK:
-                redirects = state.get("redirect_callees", {}).get(instruction.target, set())
+                redirects = state.get("redirect_callees", {}).get(
+                    instruction.target, set()
+                )
                 if redirects and instruction.op != "b":
-                    raise PackError(f"conditional call with LR redirect at {address:#x}")
+                    raise PackError(
+                        f"conditional call with LR redirect at {address:#x}"
+                    )
                 for target in sorted(redirects):
                     if target not in function.insns:
-                        raise PackError(f"LR redirect {target:#x} leaves caller {function.entry:#x}")
+                        raise PackError(
+                            f"LR redirect {target:#x} leaves caller {function.entry:#x}"
+                        )
                     labels.add(target)
                     code.append(f"if (c->lr == 0x{target:08x}u) goto L_{target:08x};")
                 if redirects:
-                    code.append(f'if (c->lr != 0x{address + 4:08x}u) rt_trap(c, 0x{address:08x}u, "unexpected pack LR redirect");')
+                    code.append(
+                        f'if (c->lr != 0x{address + 4:08x}u) rt_trap(c, 0x{address:08x}u, "unexpected pack LR redirect");'
+                    )
             return code, falls
 
         def gen_function(self, function):
@@ -101,7 +117,10 @@ def configure_hook(driver, config, assembler, rpx_bytes):
                 if state["plan"].external_timing:
                     source = (ROOT / "runtime/src/game/fps.cpp").read_text()
                     self.hooks.difference_update(
-                        {int(a, 16) for a in re.findall(r"BOTW_HOOK\((0x[\da-fA-F]+)\)", source)}
+                        {
+                            int(a, 16)
+                            for a in re.findall(r"BOTW_HOOK\((0x[\da-fA-F]+)\)", source)
+                        }
                         - housekeeping
                     )
                 self._packs_hooks_filtered = True

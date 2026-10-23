@@ -7,14 +7,14 @@ uint8_t *g_mem = nullptr;
 void log_write(const char *, ...) {}
 namespace threads {
 const char *current_name() { return "synthetic"; }
-}
+} // namespace threads
 extern "C" PPC_NORETURN void rt_fatal_exit() { std::abort(); }
 
 namespace {
 void text(PPCContext *context) { context->r[3] = 1; }
 void cave(PPCContext *context) { context->r[3] = 2; }
 void cave_tail(PPCContext *context) { context->r[3] = 3; }
-}
+} // namespace
 const GuestFnEntry g_guest_functions[] = {
     {mem::kText, text},
     {mem::kText + 0x100, text},

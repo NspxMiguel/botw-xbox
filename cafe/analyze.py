@@ -116,7 +116,12 @@ class Analyzer:
             if r.type not in (1, 4):  # ADDR32, ADDR16_LO
                 continue
             t = img.reloc_target(r.offset)
-            if t is not None and img.is_text(t) and t % 4 == 0 and t not in self.switch_bases:
+            if (
+                t is not None
+                and img.is_text(t)
+                and t % 4 == 0
+                and t not in self.switch_bases
+            ):
                 self.entries.add(t)
 
     # ---- per-function control flow ------------------------------------------------------------

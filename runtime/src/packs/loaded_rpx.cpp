@@ -1,6 +1,6 @@
-#include "../platform/host_file.h"
 #include "loaded_rpx.h"
 #include "../mem.h"
+#include "../platform/host_file.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -64,8 +64,8 @@ bool LoadedRpx::validate(uint32_t address, size_t size, uint32_t text_end,
   }
   const uint64_t cave = mem::kCodeCave;
   const uint64_t limit =
-      cave + std::min(pack_count, size_t(mem::kCodeCaveSize / 0x100000)) *
-                 0x100000ull;
+      cave +
+      std::min(pack_count, size_t(mem::kCodeCaveSize / 0x100000)) * 0x100000ull;
   if (!text_end || address < cave || end > limit)
     return false;
   // A codecave must not alias any original section, writable or otherwise.
