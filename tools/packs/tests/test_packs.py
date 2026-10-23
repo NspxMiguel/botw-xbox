@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from cafe.analyze import Analyzer
 from cafe.codegen import Generator
@@ -73,11 +74,11 @@ vsyncFrequency = $fps
 """
 
 
-def synthetic_elf(compressed=False):
+def synthetic_elf(compressed=False, code=None):
     """A tiny executable containing only authored nop/blr instructions."""
     import zlib
 
-    code = struct.pack(">4I", 0x60000000, 0x4E800020, 0, 0)
+    code = code if code is not None else struct.pack(">4I", 0x60000000, 0x4E800020, 0, 0)
     stored = struct.pack(">I", len(code)) + zlib.compress(code) if compressed else code
     names = b"\0.text\0.shstrtab\0"
     raw = bytearray(0x100 + len(stored) + len(names))
@@ -202,6 +203,54 @@ blr
         self.assertEqual(symbols["entry"], 0x02000014)
         self.assertEqual(end, 0x02000020)
 
+    def test_absolute_cave_branches_and_relative_backwards(self):
+        writes, _, _, _ = self.compile(
+            "[A]\nmoduleMatches=0x1234\n"
+            "0x04340000=ba 0x01800000\n"
+            "0x04340004=bla 0x01800004\n"
+            "0x02000000=bl 0x01800004\n"
+            "0x02000004=b 0x01800000\n"
+            "0x02000008=bc 12,2,0x02000004"
+        )
+        self.assertEqual([w.data.hex() for w in writes], [
+            "4b800005", "4b7ffffc", "4182fffc", "49800002", "49800007"
+        ])
+        for op in ("ba", "bla", "b", "bl", "bc"):
+            with self.subTest(op=op), self.assertRaisesRegex(
+                PackError, rf"{op} at 0x4340000 offset"
+            ):
+                operands = "12,2," if op == "bc" else ""
+                self.compile(f"[A]\nmoduleMatches=0x1234\n0x04340000={op} {operands}0x08000000")
+
+    def test_alignment_and_relocation_aliases(self):
+        writes, symbols, _, _ = self.compile(
+            "[A]\nmoduleMatches=0x1234\nx=0x10008004\n.origin=codecave\n"
+            "lis r3,x@hi\nlwz r3,x@lo(r3)\n.align 16\nentry:\nblr"
+        )
+        self.assertEqual(symbols["entry"], 0x02000020)
+        self.assertEqual([w.data.hex() for w in writes], [
+            "3c601000", "80638004", "6000000060000000", "4e800020"
+        ])
+        self.assertTrue(writes[2].executable)
+        writes, symbols, _, _ = self.compile(
+            "[A]\nmoduleMatches=0x1234\n.origin=codecave\n.byte 1\n.align 4\nvalue:\n.int 7"
+        )
+        self.assertEqual(symbols["value"], 0x02000014)
+        self.assertEqual(writes[1].data, bytes(3))
+        self.assertFalse(writes[1].executable)
+        for alignment in (0, 3, -4):
+            with self.assertRaises(PackError):
+                self.compile(f"[A]\nmoduleMatches=0x1234\n.origin=codecave\n.align {alignment}")
+
+    def test_cemu_case_implicit_cr_and_condition_bits(self):
+        writes, _, _, _ = self.compile(
+            "[A]\nmoduleMatches=0x1234\n.origin=codecave\n"
+            "FCMPU f1,f0\nBNE cr0, .-4\ncrxor 4*cr1+eq,4*cr1+eq,4*cr1+eq"
+        )
+        self.assertEqual([w.data.hex() for w in writes], [
+            "fc010000", "4082fffc", "4cc63182"
+        ])
+
     def test_cross_file_labels_and_forward_constants(self):
         files = [
             (
@@ -254,6 +303,7 @@ blr
         for body in (
             "0x02000001=nop",
             "0x02000000=b 0x08000000",
+            "0x02000000=b r3",
             '.origin=codecave\n.include "x"',
             ".origin=codecave\n.int 0x100000000",
             ".origin=codecave\nli r3, unknown",
@@ -303,13 +353,17 @@ blr
             emitted = "\n".join(
                 generator.gen_function(f)[0] for f in analyzer.functions.values()
             )
-            self.assertIn("f_02000014", emitted)
+            self.assertIn("f_01800004", emitted)
             self.assertIn("(uint32_t)60", emitted)
-            self.assertNotIn(0x02000010, analyzer.functions)
+            self.assertNotIn(0x01800000, analyzer.functions)
+            self.assertFalse(image.is_text(0x01900000))
+            self.assertTrue(all(image.is_text(a) for a in analyzer.functions))
+            self.assertEqual(state["plan"].cave_base, 0x01800000)
             self.assertFalse(generator.unsupported)
-            self.assertEqual(image.u32(0x02000000), 0x48000015)
+            self.assertEqual(image.u32(0x02000000), 0x4B800005)
             include = emit_snapshot(state["plan"])
             self.assertIn(hashlib.sha256(raw).hexdigest(), include)
+            self.assertIn("p.external_timing = false;", include)
             self.assertIn("pack.textures.push_back", include)
             # Compile the exact generated snapshot with the portable runtime.
             (root / "packs_generated.inc").write_text(include)
@@ -334,6 +388,75 @@ blr
                 check=True,
                 capture_output=True,
             )
+
+    def test_pack_lr_redirect_and_ctr_continuation_execute(self):
+        # Authored stack fragments model the two FPS++ continuation conventions.
+        bodies = (
+            "0x02000000=mflr r31\n0x02000004=bla entry\n"
+            "0x02000008=li r3,99\n0x0200000c=mtlr r31\n0x02000010=blr\n"
+            ".origin=codecave\n.ptr 0x0200000c\nentry:\n"
+            "lis r12,0x01800000@ha\nlwz r12,0x01800000@lo(r12)\nmtlr r12\nblr\n"
+            ".int 0x4f000000",
+            "0x02000000=mflr r31\n0x02000004=b entry\n"
+            "0x02000008=mtlr r31\n0x0200000c=blr\n"
+            ".origin=codecave\nentry:\nlis r11,0x02000008@ha\n"
+            "addi r11,r11,0x02000008@lo\nmtctr r11\nbctrl",
+        )
+        for index, body in enumerate(bodies):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                raw = synthetic_elf(code=bytes(32))
+                path = root / "authored.elf"
+                path.write_bytes(raw)
+                (root / "rules.txt").write_text(RULES)
+                (root / "patch_test.asm").write_text(
+                    f"[A]\nmoduleMatches={module_checksum(raw):#x}\n{body}"
+                )
+                config = {"version": 1, "title_id": "0000000000000001",
+                          "packs": [{"path": str(root)}]}
+                driver = SimpleNamespace(Image=Image, Analyzer=Analyzer, Generator=Generator)
+                configure_hook(driver, config, Assembler(), raw)
+                image = driver.Image(str(path))
+                analyzer = driver.Analyzer(image)
+                analyzer.run()
+                self.assertFalse(analyzer.problems)
+                self.assertTrue(all(image.is_text(a) for a in analyzer.functions))
+                generator = driver.Generator(image, analyzer.entries)
+                codes, callees = [], set()
+                for function in analyzer.functions.values():
+                    code, calls = generator.gen_function(function)
+                    codes.append(code)
+                    callees.update(calls)
+                self.assertFalse(generator.unsupported)
+                if index == 0:
+                    self.assertEqual(image.lr_redirects, {0x01800010: 0x0200000c})
+                    self.assertNotIn(0x01800014, analyzer.functions)
+                else:
+                    self.assertEqual(image.ctr_continuations, {0x0180000c: 0x02000008})
+                    self.assertEqual(image.u32(0x0180000c), 0x4e800421)
+                source = r'''#include "ppc.h"
+#include <cassert>
+#include <cstdlib>
+#include <vector>
+uint8_t* g_mem;
+#define RETURN() do { assert(c->lr == lr0); return; } while (0)
+#define RETURN_TAIL() return
+extern "C" PPC_NORETURN void rt_trap(PPCContext*, uint32_t, const char*) { std::abort(); }
+'''
+                source += "\n".join(f'extern "C" void {symbol}(PPCContext*);' for symbol in callees)
+                source += "\n" + "\n".join(codes)
+                source += "\nint main() { std::vector<uint8_t> memory(0x02000000); g_mem=memory.data();\n"
+                cave = image.secs[0x01800000]
+                for offset, value in enumerate(cave):
+                    if value:
+                        source += f"g_mem[{0x01800000 + offset}]={value};\n"
+                source += "PPCContext c{}; c.lr=0x1234; c.r[3]=7; f_02000000(&c); assert(c.lr==0x1234 && c.r[3]==7); }\n"
+                cpp = root / "continuations.cpp"
+                cpp.write_text(source)
+                subprocess.run(["clang++", "-std=c++20", "-I", "runtime/include",
+                                str(cpp), "-o", str(root / "continuations")],
+                               check=True, capture_output=True)
+                subprocess.run([str(root / "continuations")], check=True, capture_output=True)
 
     def test_relocation_invalidation_and_import_calls(self):
         raw = synthetic_elf()
@@ -381,6 +504,30 @@ blr
         with self.assertRaises(PackError):
             module_checksum(b"bad")
 
+    def test_cave_window_bounds_and_section_overlap(self):
+        raw = synthetic_elf()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "authored.elf"
+            path.write_bytes(raw)
+            (root / "rules.txt").write_text(RULES)
+            image = Image(str(path))
+            config = {"version": 1, "title_id": "0000000000000001",
+                      "packs": [{"path": str(root)}]}
+            with patch("tools.packs.build.layout", return_value=([], {}, 0x02000000, 1)):
+                plan = prepare(image, raw, config)
+                self.assertEqual((plan.cave_base, plan.cave_end), (0x01800000, 0x02000000))
+            with patch("tools.packs.build.layout", return_value=([], {}, 0x02000010, 1)):
+                with self.assertRaisesRegex(PackError, "8 MiB"):
+                    prepare(image, raw, config)
+            image.secs[0x01800000] = bytearray(16)
+            with patch("tools.packs.build.layout", return_value=([], {}, 0x01800010, 1)):
+                with self.assertRaisesRegex(PackError, "overlaps another RPX section"):
+                    prepare(image, raw, config)
+            # Empty snapshots reserve no cave and cannot overlap a section.
+            plan = prepare(image, raw, {"packs": []})
+            self.assertEqual(plan.cave_base, plan.cave_end)
+
     def test_manifest_mismatch(self):
         raw = synthetic_elf()
         image = SimpleNamespace(text_hi=0x02000010)
@@ -399,6 +546,7 @@ class CliTests(unittest.TestCase):
             crc = module_checksum(raw)
             (root / "patch_test.asm").write_text(
                 f"[Authored]\nmoduleMatches=0x{crc:08x}\n0x02000000=li r3, $fps\n"
+                ".origin=codecave\n.float 1\nli r3,$fps\nblr\n"
             )
             (root / "0000000000000001_0000000000000002_ps.txt").write_text(
                 "// Authored test shader\nvoid main() { float value = $fps; }\n"
@@ -425,10 +573,13 @@ class CliTests(unittest.TestCase):
                 capture_output=True,
                 text=True,
             )
-            self.assertIn("1 writes before PPC analysis", result.stdout)
+            self.assertIn("4 writes before PPC analysis", result.stdout)
+            self.assertTrue((output / "cave_0000.cpp").exists())
+            self.assertFalse(any("-" in p.name for p in output.glob("*.cpp")))
             self.assertTrue((output / "table.cpp").exists())
             report = json.loads((output / "packs_report.json").read_text())
             self.assertTrue(report["external_timing"])
+            self.assertIn("p.external_timing = true;", (output / "packs_generated.inc").read_text())
             self.assertIn("value = 60", report["packs"][0]["shaders"][0]["source"])
             driver = SimpleNamespace(
                 Image=Image, Analyzer=Analyzer, Generator=Generator
@@ -438,9 +589,9 @@ class CliTests(unittest.TestCase):
             analyzer = driver.Analyzer(image)
             analyzer.run()
             generator = driver.Generator(image, analyzer.entries)
-            generator.hooks.update({0x02000000, 0x031FAAE8, 0x02000004})
+            generator.hooks.update({0x02000000, 0x031FAAE8, 0x031FA97C, 0x02000004})
             generator.gen_function(analyzer.functions[0x02000000])
-            self.assertEqual(generator.hooks, {0x02000004})
+            self.assertEqual(generator.hooks, {0x02000004, 0x031FA97C})
             # An empty selection overwrites the old snapshot instead of retaining patches.
             config["packs"] = []
             manifest.write_text(json.dumps(config))

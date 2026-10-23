@@ -53,9 +53,22 @@ def string_bytes(text):
     return value.encode("utf-8") + b"\0"
 
 
-def size_of(text):
+def align_padding(args, address):
+    """Bytes `.align N` inserts at address (Cemu packs: N is a byte alignment)."""
+    try:
+        alignment = int(args.strip(), 0)
+    except ValueError as exc:
+        raise PackError("invalid .align") from exc
+    if alignment <= 0 or alignment & (alignment - 1):
+        raise PackError(".align requires a power of two")
+    return -address % alignment
+
+
+def size_of(text, address):
     pieces = text.split(None, 1)
-    op, args = pieces[0], pieces[1] if len(pieces) > 1 else ""
+    op, args = pieces[0].lower(), pieces[1] if len(pieces) > 1 else ""
+    if op == ".align":
+        return align_padding(args, address)
     if op == ".string":
         return len(string_bytes(args))
     if op in _SIZES:
@@ -152,7 +165,9 @@ def layout(files, checksum, variables, cave_base):
                         raise PackError(f"invalid or duplicate label {name}")
                     symbols[name] = address
                     continue
-                size = size_of(line)
+                if explicit and line.startswith(".align"):
+                    raise PackError(".align needs a sequential address")
+                size = size_of(line, address)
                 statements.append(Statement(address, line, location))
                 if not explicit:
                     cursor += size
@@ -186,12 +201,12 @@ def patch_expression(text, symbols, address):
         kind = match[2]
         if kind == "ha":
             return str(((value + 0x8000) >> 16) & 0xFFFF)
-        if kind == "h":
+        if kind in ("h", "hi"):
             return str((value >> 16) & 0xFFFF)
         low = value & 0xFFFF
         return str(low - 0x10000 if low & 0x8000 else low)
 
-    text = re.sub(r"([A-Za-z_][\w.]*|0x[\da-fA-F]+)@(ha|h|l)\b", modifier, text)
+    text = re.sub(r"([A-Za-z_][\w.]*|0x[\da-fA-F]+)@(ha|hi|h|lo|l)\b", modifier, text)
     return evaluate(text, symbols)
 
 
@@ -245,11 +260,24 @@ class Assembler:
 def compile_patch(statements, symbols, assembler):
     writes, jobs = [], []
     previous_code = False
+    previous_end, previous_file = None, None
     for statement in statements:
         address, text, source = statement.address, statement.text, statement.source
+        source_file = source.rsplit(":", 1)[0]
+        if address != previous_end or source_file != previous_file:
+            previous_code = False
+        previous_end, previous_file = address + size_of(text, address), source_file
         pieces = text.split(None, 1)
-        op, args = pieces[0], pieces[1] if len(pieces) > 1 else ""
+        op, args = pieces[0].lower(), pieces[1] if len(pieces) > 1 else ""
         try:
+            if op == ".align":
+                padding = align_padding(args, address)
+                if padding:
+                    # Pad code with nops so falling through the gap stays harmless.
+                    nop = padding % 4 == 0 and address % 4 == 0
+                    data = b"\x60\x00\x00\x00" * (padding // 4) if nop else bytes(padding)
+                    writes.append(Write(address, data, source, previous_code and nop))
+                continue
             if op in _SIZES or op == ".string":
                 if op == ".string":
                     data = string_bytes(args)
@@ -282,7 +310,7 @@ def compile_patch(statements, symbols, assembler):
                 continue
             if address % 4:
                 raise PackError("unaligned PPC instruction")
-            previous_code = True
+            previous_code = op not in ("blr", "bctr", "b", "ba", "trap")
             if op in ("b", "bl", "ba", "bla") and args.startswith("import."):
                 if op not in ("b", "bl", "ba", "bla") or not re.fullmatch(
                     r"import\.\w+\.\w+", args
@@ -302,33 +330,50 @@ def compile_patch(statements, symbols, assembler):
                 re.fullmatch(r"b(eq|ne|lt|le|gt|ge|so|ns|dnz|dz)l?a?[+-]?", op)
             )
             operands = split_expressions(args) if args else []
+            if op in ("fcmpu", "fcmpo") and len(operands) == 2:
+                operands.insert(0, "cr0")
             result = []
+            absolute = False
             for i, operand in enumerate(operands):
-                if re.fullmatch(r"(?:r|f|cr)\d+", operand):
-                    result.append(re.sub(r"^(r|f|cr)", "", operand))
-                elif re.search(r"\((r\d+)\)$", operand):
+                if re.fullmatch(r"(?:r|f|cr)\d+", operand, re.IGNORECASE):
+                    if branch and i == len(operands) - 1:
+                        raise PackError("branch target must be an address")
+                    result.append(re.sub(r"^(r|f|cr)", "", operand.lower()))
+                elif re.search(r"\((r\d+)\)$", operand, re.IGNORECASE):
                     offset, register = operand.rsplit("(", 1)
                     result.append(
                         f"{int(patch_expression(offset or '0', symbols, address))}({register[1:-1]})"
                     )
                 else:
-                    value = patch_expression(operand, symbols, address)
+                    operand_symbols = symbols
+                    if op.startswith("cr") or (op in ("bc", "bcl", "bca", "bcla") and i == 1):
+                        operand_symbols = {**symbols, **{f"cr{k}": k for k in range(8)},
+                                           "lt": 0, "gt": 1, "eq": 2, "so": 3}
+                    value = patch_expression(operand, operand_symbols, address)
                     if int(value) != value:
                         raise PackError("non-integer instruction operand")
                     value = int(value)
                     if branch and i == len(operands) - 1:
-                        # Caves live near .text, so convert absolute branches to equivalent relative branches.
-                        value -= address
+                        absolute = op in ("ba", "bla") and 0 <= value < 0x02000000
+                        if not absolute:
+                            value -= address
                         bits = 26 if op in ("b", "bl", "ba", "bla") else 16
                         if value % 4 or not -(1 << (bits - 1)) <= value < 1 << (
                             bits - 1
                         ):
-                            raise PackError("branch target out of range or unaligned")
+                            raise PackError(f"branch target out of range or unaligned: {op} at {address:#x} offset {value:#x}")
                     result.append(str(value))
-            if op in ("ba", "bla"):
+            if op in ("ba", "bla") and not absolute:
                 op = "bl" if op == "bla" else "b"
-            elif branch:
+            elif branch and not absolute:
                 op = re.sub(r"a(?=[+-]?$)", "", op)
+            if op in ("b", "bl", "ba", "bla") and len(result) == 1:
+                # LLVM rejects negative numeric operands for b/bl. Encode the
+                # already range-checked I-form directly, retaining AA and LK.
+                word = 0x48000000 | (int(result[0]) & 0x03FFFFFC)
+                word |= 2 * absolute | int(op in ("bl", "bla"))
+                writes.append(Write(address, struct.pack(">I", word), source, True))
+                continue
             instruction = op + (" " + ",".join(result) if result else "")
             jobs.append((statement, instruction))
         except (ValueError, OverflowError, struct.error) as exc:

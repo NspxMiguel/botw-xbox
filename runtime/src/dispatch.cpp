@@ -34,6 +34,8 @@ std::string key(const char* lib, const char* name) { return std::string(lib) + "
 
 GuestFn* g_text_table = nullptr;  // (addr - kText) >> 2
 uint32_t g_text_end = 0;
+GuestFn* g_cave_table = nullptr;
+uint32_t g_cave_end = mem::kCodeCave;
 std::shared_mutex g_lock;
 GuestFn g_thunks[mem::kThunkSize / 4];
 const char* g_thunk_names[mem::kThunkSize / 4];
@@ -59,13 +61,30 @@ GuestFn hle::find(const char* lib, const char* name) {
 namespace dispatch {
 void init() {
 #if !defined(BOTW_BUILD_GAME) || BOTW_BUILD_GAME
-    uint32_t hi = 0;
-    for (uint32_t i = 0; i < g_guest_function_count; i++) hi = std::max(hi, g_guest_functions[i].addr);
-    g_text_end = hi + 4;
+    g_text_end = mem::kText;
+    for (uint32_t i = 0; i < g_guest_function_count; i++) {
+        uint32_t addr = g_guest_functions[i].addr;
+        if (addr >= mem::kText && addr < mem::kDataImports)
+            g_text_end = std::max(g_text_end, addr + 4);
+        else if (addr >= mem::kCodeCave && addr < mem::kCodeCave + mem::kCodeCaveSize)
+            g_cave_end = std::max(g_cave_end, addr + 4);
+        else {
+            LOG("FATAL: guest function outside code ranges: %08x", addr);
+            abort();
+        }
+    }
     size_t n = (g_text_end - mem::kText) >> 2;
     g_text_table = (GuestFn*)calloc(n, sizeof(GuestFn));
-    for (uint32_t i = 0; i < g_guest_function_count; i++)
-        g_text_table[(g_guest_functions[i].addr - mem::kText) >> 2] = g_guest_functions[i].fn;
+    size_t caves = (g_cave_end - mem::kCodeCave) >> 2;
+    g_cave_table = (GuestFn*)calloc(caves, sizeof(GuestFn));
+    if ((n && !g_text_table) || (caves && !g_cave_table)) abort();
+    for (uint32_t i = 0; i < g_guest_function_count; i++) {
+        const auto& entry = g_guest_functions[i];
+        if (entry.addr >= mem::kText)
+            g_text_table[(entry.addr - mem::kText) >> 2] = entry.fn;
+        else
+            g_cave_table[(entry.addr - mem::kCodeCave) >> 2] = entry.fn;
+    }
     LOG("dispatch: %u guest functions, %zu HLE exports registered", g_guest_function_count, registry().size());
 #else
     LOG("dispatch: runtime-only build, %zu HLE exports registered", registry().size());
@@ -74,6 +93,7 @@ void init() {
 
 GuestFn lookup(uint32_t addr) {
     if (addr >= mem::kText && addr < g_text_end) return g_text_table[(addr - mem::kText) >> 2];
+    if (addr >= mem::kCodeCave && addr < g_cave_end) return g_cave_table[(addr - mem::kCodeCave) >> 2];
     if (addr >= mem::kThunkBase && addr < mem::kThunkBase + mem::kThunkSize) return g_thunks[(addr - mem::kThunkBase) >> 2];
     CacheEntry& ce = t_cache[(addr >> 2) & 1023];
     if (ce.addr == addr && ce.fn) return ce.fn;

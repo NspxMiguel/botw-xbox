@@ -10,6 +10,7 @@
 #include "ppc.h"
 
 namespace mem {
+constexpr uint32_t kCodeCave = 0x01800000, kCodeCaveSize = 0x00800000;
 constexpr uint32_t kText = 0x02000000;
 constexpr uint32_t kDataImports = 0x0DF00000;  // fixed 4 KB slots for OS-exported variables
 constexpr uint32_t kThunkBase = 0x0E000000, kThunkSize = 0x00100000;   // 4 bytes per HLE thunk

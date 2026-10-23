@@ -11,8 +11,11 @@ Install failures are logged and guest startup continues, as required by W7.
 Writable range validation uses loaded ELF section flags, loader module bounds
 and the `mem.h` address layout. Executable sections are writable guest data in
 this static recompilation. Read-only sections, holes, runtime areas and address
-wraparound are rejected. Appended codecaves are bounded to 1 MiB per selected
-pack below data imports and cannot overlap original allocated sections.
+wraparound are rejected. Codecaves occupy 0x01800000–0x02000000, bounded to 1 MiB per selected
+pack and 8 MiB total, and cannot overlap original allocated sections. Dispatch
+uses a separate table sized only through the highest cave function; ordinary
+text keeps its existing fast lookup. Windows/UWP commits this area even in
+the lazy-commit path; Apple maps it read/write outside the null guard.
 
 D3D12 validates all fields before compiling replacement shaders on the CPU.
 Commit publishes the static plan. Shader lookup uses original hashes/stage;
@@ -28,8 +31,12 @@ selects the native 1280x720 Resolution preset so its resolution rules are identi
 Built-in scaling remains enabled for the session: identity-only and unmatched
 textures retain it, while nonidentity pack dimensions replace scaling only for
 that matching texture. Shadow-map overrides therefore coexist with FSR and other
-render targets keep the selected scale. Format,
-LOD and anisotropy overrides are currently rejected explicitly. Shader and PSO
+render targets keep the selected scale. LOD bias values are converted to signed 1/64 units; anisotropy values 1/2/4/8/16
+map to the existing sampler exponents. The RGB10A2-to-RGBA16 UNORM GUI precision
+upgrade selects the new resource/view format and expands original guest uploads.
+Other format conversions are rejected explicitly. CPU readback of alternate
+formats retains D3D12's existing unsupported restriction; this requires particular
+attention when checking GUI surfaces on console. Shader and PSO
 persistent caches are bypassed for pack sessions to prevent reuse across pack
 fingerprints; sessions without packs retain their existing cache behavior.
 
@@ -45,10 +52,13 @@ render scale and renderer/swap-chain creation. The renderer clamps scale to
 The recomp D3D12 present path always synchronizes: interval 1 for the 60 fps
 setting, 2 for 30 fps on the game's 60 Hz clock; frame interpolation is disabled.
 FPS++ names and `vsyncFrequency` controls trigger one host message and do not
-create a second host pacer. `g_target_fps` remains the host authority. Note that
-`tools/packs/recompile.py` currently omits `game/fps.cpp` hooks when an external
-timing pack is compiled. This host change cannot restore hooks omitted from
-already generated code; the generator is outside W7's allowed paths.
+create a second host pacer. `g_target_fps` controls host presentation only.
+`tools/packs/recompile.py` omits the host timing/physics hooks for external
+timing packs. It retains the frame pause/telemetry hook, including after
+FPS++'s replacement call, with host delta/scaling disabled. Pack LR redirects
+return to labels in their caller; constant CTR continuations back to displaced
+original instructions execute in the same generated stack frame. Guest bytes
+remain unchanged. Synthetic tests execute both continuation conventions.
 
 ## Synthetic verification
 
@@ -67,4 +77,5 @@ scale 1.5, and explicit render-target precedence without changing other surfaces
 needed. See the D3D12 `validation/syntax_check.py` for the Windows-target check;
 that controlled header check does not run a Windows GPU or validate the WinRT
 HDMI branch. Full app linking needs private `generated/` sources. No Xbox/device
-rendering or real FPS++ gameplay validation is claimed.
+rendering or real FPS++ gameplay validation is claimed. See
+[Remaster validation](../../../docs/remaster-validation.md).

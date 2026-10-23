@@ -15,8 +15,8 @@ CONSOLES = ("series_s", "series_x")
 TITLE_ID = "00050000101c9400"
 
 # Pack, category, Series S, Series X. None leaves that category at pack defaults.
-# Native Resolution leaves render-target scaling to FSR. Texture LOD, anisotropy
-# and format overrides are unsupported by D3D12; no requesting category is selected.
+# Native Resolution leaves render-target scaling to FSR. Texture LOD and
+# anisotropy retain the pack defaults; D3D12 applies their unconditional rules.
 REMASTER = (
     ("Mods/FPS++", "Mode", "Normal Settings", "Normal Settings"),
     ("Mods/FPS++", "FPS Limit", "60FPS Limit (Default)", "60FPS Limit (Default)"),

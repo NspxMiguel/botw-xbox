@@ -56,6 +56,8 @@ void texture_scaling() {
   struct Dimensions {
     int width, height, depth;
     bool hasResolutionOverwrite;
+    int format = 0, lodBias = 0, relativeLodBias = 0, anisotropicLevel = -1;
+    bool hasFormatOverwrite = false, hasLodBias = false, hasRelativeLodBias = false;
   };
   packs::BuildPlan plan;
   plan.packs.push_back({"synthetic graphics", {}, {}, {}});
@@ -137,6 +139,45 @@ void texture_scaling() {
   assert(d3d12_packs::apply_texture_overrides(plan, zero_depth, normalized));
   assert(normalized.width == 2560 && normalized.height == 720 &&
          normalized.depth == 1);
+  // Non-size overrides must never turn off FSR or create a size override.
+  const packs::TextureDescription gui{1280, 720, 1, 0x19, 0, false};
+  rules = {{{{"formats", {0x19}}, {"overwriteFormat", {0x1f}},
+             {"overwriteAnisotropy", {8}}, {"overwriteLodBias", {-0.5}},
+             {"overwriteRelativeLodBias", {0.25}}}}};
+  std::string error;
+  assert(packs::validate_renderer_fields(plan, true, true, error));
+  Dimensions gui_scaled{1920, 1080, 1, true};
+  assert(d3d12_packs::apply_texture_overrides(plan, gui, gui_scaled));
+  assert(gui_scaled.width == 1920 && gui_scaled.height == 1080);
+  assert(gui_scaled.format == 0x1f && gui_scaled.hasFormatOverwrite);
+  assert(gui_scaled.anisotropicLevel == 3);
+  assert(gui_scaled.hasLodBias && gui_scaled.lodBias == -32);
+  assert(gui_scaled.hasRelativeLodBias && gui_scaled.relativeLodBias == 16);
+  Dimensions gui_native{0, 0, 0, false};
+  assert(d3d12_packs::apply_texture_overrides(plan, gui, gui_native));
+  assert(!gui_native.hasResolutionOverwrite);
+  for (int level : {1, 2, 4, 8, 16}) {
+    rules = {{{{"overwriteAnisotropy", {double(level)}}}}};
+    assert(packs::validate_renderer_fields(plan, true, true, error));
+    Dimensions info{0, 0, 0, false};
+    d3d12_packs::apply_texture_overrides(plan, gui, info);
+    assert((1 << info.anisotropicLevel) == level);
+  }
+  for (const auto &field : std::vector<packs::Field>{
+           {"overwriteAnisotropy", {3}}, {"overwriteLodBias", {1000}},
+           {"overwriteFormat", {0x41a}}}) {
+    rules = {{{field}}};
+    assert(!packs::validate_renderer_fields(plan, true, true, error));
+  }
+  const uint32_t pixels[] = {0, 0xffffffff, 1023, 1023u << 10,
+                              1023u << 20, 1u << 30, 512};
+  const auto rgba = d3d12_packs::expand_rgb10a2(pixels, 7);
+  assert(rgba.size() == 28 && rgba[0] == 0 && rgba[3] == 0);
+  for (int channel = 0; channel < 4; ++channel) assert(rgba[4 + channel] == 65535);
+  assert(rgba[8] == 65535 && rgba[9] == 0 && rgba[10] == 0);
+  assert(rgba[12] == 0 && rgba[13] == 65535 && rgba[14] == 0);
+  assert(rgba[16] == 0 && rgba[17] == 0 && rgba[18] == 65535);
+  assert(rgba[23] == 21845 && rgba[24] == 32800);
   std::cout << "texture overrides: identity removal and per-texture scale "
                "precedence passed\n";
 }
@@ -154,6 +195,10 @@ int main(int argc, char **argv) {
   std::cout << "SHA-256: 4 vectors passed\n";
 
   packs::BuildPlan plan;
+  plan.external_timing = true;
+  assert(packs::has_timing_pack(plan));
+  plan.external_timing = false;
+  assert(!packs::has_timing_pack(plan));
   plan.rpx_sha256 = "test hash";
   plan.packs.push_back({"memory only", {}, {}, {}});
   plan.initial_memory.push_back({0x1000, {1, 2, 3, 4}});
@@ -232,7 +277,17 @@ int main(int argc, char **argv) {
   assert(!loaded.validate(0x1000000f, 2, 0x02000010, 1));
   assert(!loaded.validate(0x10001000, 4, 0x02000010, 1));
   assert(!loaded.validate(0x02000010, 4, 0x02000010, 1));
-  assert(loaded.validate(0x02000020, 16, 0x02000010, 1));
+  assert(!loaded.validate(0x02000020, 16, 0x02000010, 1));
+  assert(loaded.validate(0x01800000, 16, 0x02000010, 1));
+  assert(loaded.validate(0x018ffffc, 4, 0x02000010, 1));
+  assert(!loaded.validate(0x018ffffc, 8, 0x02000010, 1));
+  assert(!loaded.validate(0x01800000, 4, 0x02000010, 0));
+  assert(!loaded.validate(0x017ffffc, 8, 0x02000010, 1));
+  assert(loaded.validate(0x01fffffc, 4, 0x02000010, 100));
+  assert(!loaded.validate(0x01fffffc, 8, 0x02000010, 100));
+  loaded.allocated.push_back({0x01800000, 0x01800010});
+  assert(!loaded.validate(0x01800000, 4, 0x02000010, 1));
+  assert(!loaded.validate(0x0180000c, 8, 0x02000010, 1));
   assert(!loaded.validate(0x0df00000, 4, 0x02000010, 1));
   assert(!loaded.validate(0x0e100000, 4, 0x02000010, 1));
   assert(!loaded.validate(0xfffffff0, 32, 0x02000010, 1));
