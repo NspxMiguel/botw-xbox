@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
+#include "Cafe/HW/Latte/Core/LatteDrawCache.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 
 #include "Cafe/HW/Latte/Core/Latte.h"
@@ -25,6 +26,7 @@ uint32 prevScissorWidth = 0;
 uint32 prevScissorHeight = 0;
 
 bool hasValidFramebufferAttached = false;
+static uint64_t s_renderStateEpoch = 1;
 
 struct LatteMRTQuad
 {
@@ -108,6 +110,7 @@ LatteCachedFBO* LatteMRT::CreateCachedFBO(uint64 key)
 
 void LatteMRT::DeleteCachedFBO(LatteCachedFBO* cfbo)
 {
+	++s_renderStateEpoch;
 	// color textures
 	for (sint32 i = 0; i < 8; i++)
 	{
@@ -153,6 +156,27 @@ LatteTextureView* LatteMRT::GetDepthAttachment()
 void LatteMRT::ApplyCurrentState()
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::RenderTargets);
+	static LatteDrawCache::ExactCache<std::array<uintptr_t, 10>, LatteCachedFBO *> lastFBO;
+	std::array<uintptr_t, 10> attachments{};
+	for (size_t i = 0; i < 8; ++i)
+		attachments[i] = (uintptr_t)sLatteCurrentRendertargets.colorBuffer[i].view;
+	attachments[8] = (uintptr_t)sLatteCurrentRendertargets.depthBuffer.view;
+	attachments[9] = sLatteCurrentRendertargets.depthBuffer.hasStencil;
+	const auto viewGeneration = LatteTextureViewLookupCache::GetGeneration();
+	if (g_renderer->GetType() == RendererAPI::D3D12)
+	{
+		if (const auto *fbo = lastFBO.Find(attachments, viewGeneration, s_renderStateEpoch))
+		{
+			LatteProfiler::Add(LatteProfiler::Counter::FramebufferHits);
+			g_renderer->rendertarget_bindFramebufferObject(*fbo);
+			return;
+		}
+		LatteProfiler::Add(LatteProfiler::Counter::FramebufferMisses);
+	}
+	auto bind = [&](LatteCachedFBO *fbo) {
+		lastFBO.Store(attachments, fbo, viewGeneration, s_renderStateEpoch);
+		g_renderer->rendertarget_bindFramebufferObject(fbo);
+	};
 	uint64 key = 0;
 	LatteTextureView* fboLookupView = NULL;
 	for (sint32 i = 0; i < 8; i++)
@@ -181,7 +205,7 @@ void LatteMRT::ApplyCurrentState()
 	{
 		if (!g_emptyFBO)
 			g_emptyFBO = CreateCachedFBO(key);
-		g_renderer->rendertarget_bindFramebufferObject(g_emptyFBO);
+		bind(g_emptyFBO);
 		return;
 	}
 	// look for FBO
@@ -190,13 +214,13 @@ void LatteMRT::ApplyCurrentState()
 		if (fbo->key == key)
 		{
 			// found matching FBO
-			g_renderer->rendertarget_bindFramebufferObject(fbo);
+			bind(fbo);
 			return;
 		}
 	}
 	// create new cached FBO
 	LatteCachedFBO* cfbo = CreateCachedFBO(key);
-	g_renderer->rendertarget_bindFramebufferObject(cfbo);
+	bind(cfbo);
 	fboLookupView->list_fboLookup.push_back(cfbo);
 	// some extra checks to verify that looked up fbo matches active buffers
 	cemu_assert_debug(cfbo->colorBuffer[0].texture == sLatteCurrentRendertargets.colorBuffer[0].view);
@@ -1040,8 +1064,38 @@ void LatteRenderTarget_GetCurrentVirtualViewportSize(sint32* viewportWidth, sint
 	*viewportHeight = sLatteRenderTargetState.currentGuestViewport.height;
 }
 
+void LatteRenderTarget_invalidateCachedState()
+{
+	++s_renderStateEpoch;
+}
+
 void LatteRenderTarget_updateViewport()
 {
+	if (g_renderer->GetType() == RendererAPI::D3D12)
+	{
+		static LatteDrawCache::ExactCache<std::array<uint32_t, 12>, bool> cache;
+		std::array<uint32_t, 12> key{};
+		key[0] = LatteGPUState.contextNew.PA_CL_VPORT_XSCALE.getRawValue();
+		key[1] = LatteGPUState.contextNew.PA_CL_VPORT_XOFFSET.getRawValue();
+		key[2] = LatteGPUState.contextNew.PA_CL_VPORT_YSCALE.getRawValue();
+		key[3] = LatteGPUState.contextNew.PA_CL_VPORT_YOFFSET.getRawValue();
+		key[4] = LatteGPUState.contextNew.PA_CL_VPORT_ZSCALE.getRawValue();
+		key[5] = LatteGPUState.contextNew.PA_CL_VPORT_ZOFFSET.getRawValue();
+		key[6] = LatteGPUState.contextNew.PA_CL_CLIP_CNTL.getRawValue();
+		key[7] = sLatteRenderTargetState.renderTargetIsResized;
+		key[8] = sLatteRenderTargetState.currentRenderSize.width;
+		key[9] = sLatteRenderTargetState.currentRenderSize.height;
+		key[10] = sLatteRenderTargetState.currentEffectiveSize.width;
+		key[11] = sLatteRenderTargetState.currentEffectiveSize.height;
+		if (cache.Find(key, s_renderStateEpoch))
+		{
+			LatteProfiler::Add(LatteProfiler::Counter::DynamicStateHits);
+			return;
+		}
+		LatteProfiler::Add(LatteProfiler::Counter::DynamicStateMisses);
+		cache.Store(key, true, s_renderStateEpoch);
+	}
+
 	float vpWidth = LatteGPUState.contextNew.PA_CL_VPORT_XSCALE.get_SCALE() / 0.5f;
 	float vpX = LatteGPUState.contextNew.PA_CL_VPORT_XOFFSET.get_OFFSET() - LatteGPUState.contextNew.PA_CL_VPORT_XSCALE.get_SCALE();
 	float vpHeight = LatteGPUState.contextNew.PA_CL_VPORT_YSCALE.get_SCALE() / -0.5f;
@@ -1079,6 +1133,26 @@ void LatteRenderTarget_updateViewport()
 
 void LatteRenderTarget_updateScissorBox()
 {
+	if (g_renderer->GetType() == RendererAPI::D3D12)
+	{
+		static LatteDrawCache::ExactCache<std::array<uint32_t, 7>, bool> cache;
+		std::array<uint32_t, 7> key{};
+		key[0] = LatteGPUState.contextNew.PA_SC_GENERIC_SCISSOR_TL.getRawValue();
+		key[1] = LatteGPUState.contextNew.PA_SC_GENERIC_SCISSOR_BR.getRawValue();
+		key[2] = sLatteRenderTargetState.renderTargetIsResized;
+		key[3] = sLatteRenderTargetState.currentRenderSize.width;
+		key[4] = sLatteRenderTargetState.currentRenderSize.height;
+		key[5] = sLatteRenderTargetState.currentEffectiveSize.width;
+		key[6] = sLatteRenderTargetState.currentEffectiveSize.height;
+		if (cache.Find(key, s_renderStateEpoch))
+		{
+			LatteProfiler::Add(LatteProfiler::Counter::DynamicStateHits);
+			return;
+		}
+		LatteProfiler::Add(LatteProfiler::Counter::DynamicStateMisses);
+		cache.Store(key, true, s_renderStateEpoch);
+	}
+
 	// update scissor box
 	uint32 scissorX = LatteGPUState.contextNew.PA_SC_GENERIC_SCISSOR_TL.get_TL_X();
 	uint32 scissorY = LatteGPUState.contextNew.PA_SC_GENERIC_SCISSOR_TL.get_TL_Y();
@@ -1092,7 +1166,7 @@ void LatteRenderTarget_updateScissorBox()
 		scissorHeight = (sint32)((float)scissorHeight * ((float)sLatteRenderTargetState.currentEffectiveSize.height / (float)sLatteRenderTargetState.currentRenderSize.height));
 	}
 
-	if( scissorX != prevScissorX || scissorY != prevScissorY || scissorWidth != prevScissorWidth || scissorHeight != prevScissorHeight )
+	if (g_renderer->GetType() == RendererAPI::D3D12 || scissorX != prevScissorX || scissorY != prevScissorY || scissorWidth != prevScissorWidth || scissorHeight != prevScissorHeight)
 	{
 		g_renderer->renderTarget_setScissor(scissorX, scissorY, scissorWidth, scissorHeight);
 		prevScissorX = scissorX;
@@ -1104,6 +1178,7 @@ void LatteRenderTarget_updateScissorBox()
 
 void LatteRenderTarget_unloadAll()
 {
+	++s_renderStateEpoch;
 	if (g_emptyFBO)
 	{
 		LatteMRT::DeleteCachedFBO(g_emptyFBO);

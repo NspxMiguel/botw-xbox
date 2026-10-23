@@ -1264,6 +1264,7 @@ void D3D12PipelineCache::EndPreload()
 
 void D3D12PipelineCache::Clear()
 {
+	m_lastPipeline.Clear();
 	// pipelines still being created are owned by their compile job until it finishes, they were never used by the GPU
 	for (auto &it : m_pipelines)
 		if (it.second->isValid())
@@ -1359,10 +1360,33 @@ D3D12PipelineInfo *D3D12PipelineCache::GetOrCreate(const LatteFetchShader *fetch
 												   CachedFBOD3D12 *fbo, const LatteContextRegister &lcr, Renderer::INDEX_TYPE indexType)
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::ShaderPipeline);
+	const auto shaderId = [](const LatteDecompilerShader *shader) -> uint64_t {
+		return shader && shader->shader ? static_cast<RendererShaderD3D12 *>(shader->shader)->GetUniqueId() : 0;
+	};
+	const auto *regs = lcr.GetRawView();
+	const std::array<uint64_t, 28> stateKey{
+		fetchShader->key, fetchShader->getVkPipelineHashFragment(), shaderId(vertexShader), shaderId(geometryShader), shaderId(pixelShader),
+		fbo->GetFormatHash(), (uint64_t)indexType, regs[mmVGT_PRIMITIVE_TYPE], regs[mmVGT_STRMOUT_EN],
+		lcr.PA_SU_SC_MODE_CNTL.getRawValue(), lcr.PA_CL_CLIP_CNTL.getRawValue(), lcr.PA_CL_VTE_CNTL.getRawValue(),
+		lcr.PA_SU_POLY_OFFSET_FRONT_SCALE.getRawValue(), lcr.PA_SU_POLY_OFFSET_FRONT_OFFSET.getRawValue(), lcr.PA_SU_POLY_OFFSET_CLAMP.getRawValue(),
+		regs[Latte::REGADDR::CB_COLOR_CONTROL], regs[Latte::REGADDR::CB_TARGET_MASK],
+		regs[Latte::REGADDR::CB_BLEND0_CONTROL], regs[Latte::REGADDR::CB_BLEND0_CONTROL + 1],
+		regs[Latte::REGADDR::CB_BLEND0_CONTROL + 2], regs[Latte::REGADDR::CB_BLEND0_CONTROL + 3],
+		regs[Latte::REGADDR::CB_BLEND0_CONTROL + 4], regs[Latte::REGADDR::CB_BLEND0_CONTROL + 5],
+		regs[Latte::REGADDR::CB_BLEND0_CONTROL + 6], regs[Latte::REGADDR::CB_BLEND0_CONTROL + 7],
+		regs[Latte::REGADDR::DB_DEPTH_CONTROL], regs[mmDB_STENCILREFMASK], regs[mmDB_STENCILREFMASK_BF]};
+	if (const auto *pipeline = m_lastPipeline.Find(stateKey))
+	{
+		LatteProfiler::Add(LatteProfiler::Counter::PipelineStateHits);
+		return *pipeline;
+	}
 	const uint64 hash = CalculateHash(fetchShader, vertexShader, geometryShader, pixelShader, fbo, lcr, indexType);
 	auto it = m_pipelines.find(hash);
 	if (it != m_pipelines.end())
+	{
+		m_lastPipeline.Store(stateKey, it->second.get());
 		return it->second.get();
+	}
 
 	// Count every in-memory lookup miss, including retries while shaders are pending.
 	LatteProfiler::Add(LatteProfiler::Counter::PipelineMisses);

@@ -128,6 +128,7 @@ LatteTextureD3D12::LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, 
 	{
 		D3D12_SetDebugName(m_resource.Get(), fmt::format("tex_{:08x}_fmt{:04x}_tm{:x}", physAddress, (uint32)format, (uint32)tileMode));
 	}
+	m_lastTransition.Clear();
 	m_states.resize(GetSubresourceCount(), initialState);
 }
 
@@ -162,6 +163,7 @@ bool LatteTextureD3D12::AllSubresourcesInState(D3D12_RESOURCE_STATES state) cons
 
 void LatteTextureD3D12::SetAllSubresourceStates(D3D12_RESOURCE_STATES state)
 {
+	m_lastTransition.Clear();
 	std::fill(m_states.begin(), m_states.end(), state);
 }
 

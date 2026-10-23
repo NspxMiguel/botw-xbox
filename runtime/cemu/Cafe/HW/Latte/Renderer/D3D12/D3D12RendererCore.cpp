@@ -197,17 +197,19 @@ bool D3D12Renderer::draw_prepareUniformVars(LatteDecompilerShader *shader, D3D12
 
 void D3D12Renderer::draw_buildSamplerDesc(LatteDecompilerShader *shader, uint32 relativeTextureUnit, LatteTextureViewD3D12 *view, D3D12_SAMPLER_DESC &desc)
 {
-	desc = {};
-	desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-	desc.AddressU = desc.AddressV = desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-	desc.MaxAnisotropy = 1;
-	desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-	desc.MinLOD = 0.0f;
-	desc.MaxLOD = 0.0f; // matches the zero initialized VkSamplerCreateInfo the Vulkan backend uses when no sampler is assigned
-
 	const uint32 stageSamplerIndex = shader->textureUnitSamplerAssignment[relativeTextureUnit];
 	if (stageSamplerIndex == LATTE_DECOMPILER_SAMPLER_NONE)
+	{
+		desc = {};
+		desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+		desc.AddressU = desc.AddressV = desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+		desc.MaxAnisotropy = 1;
+		desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+		desc.MinLOD = 0.0f;
+		desc.MaxLOD = 0.0f; // matches the zero initialized VkSamplerCreateInfo the Vulkan backend uses when no sampler is assigned
+
 		return;
+	}
 	LatteTextureD3D12 *baseTexture = view ? view->GetBaseTexture() : nullptr;
 	const uint32 samplerIndex = stageSamplerIndex + LatteDecompiler_getTextureSamplerBaseIndex(shader->shaderType);
 	const _LatteRegisterSetSampler *samplerWords = LatteGPUState.contextNew.SQ_TEX_SAMPLER + samplerIndex;
@@ -241,6 +243,14 @@ void D3D12Renderer::draw_buildSamplerDesc(LatteDecompilerShader *shader, uint32 
 		desc = cached.desc;
 		return;
 	}
+
+	desc = {};
+	desc.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+	desc.AddressU = desc.AddressV = desc.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+	desc.MaxAnisotropy = 1;
+	desc.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	desc.MinLOD = 0.0f;
+	desc.MaxLOD = 0.0f; // matches the zero initialized VkSamplerCreateInfo the Vulkan backend uses when no sampler is assigned
 
 	// LOD
 	const uint32 iMinLOD = samplerWords->WORD1.get_MIN_LOD();
@@ -333,6 +343,15 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
 	using namespace D3D12Const;
+	auto &last = m_lastViewTable[(uint32)stage];
+	const auto generation = m_gpuViewHeap->GetGeneration();
+	const auto sourceGeneration = m_stagingViewHeap->GetGeneration();
+	if (const auto *table = last.Find(tableDesc, generation, sourceGeneration))
+	{
+		LatteProfiler::Add(LatteProfiler::Counter::DescriptorHits);
+		LatteProfiler::Add(LatteProfiler::Counter::DescriptorFastHits);
+		return *table;
+	}
 	decltype(ViewTableCacheEntry::key) key{};
 	uint32 keyIndex = 0;
 	for (uint32 i = 0; i < kMaxCBVsPerStage; ++i)
@@ -352,7 +371,12 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 	auto &cached = m_viewTableCache[hash % m_viewTableCache.size()];
 	if (cached.generation == m_gpuViewHeap->GetGeneration() &&
 		cached.sourceGeneration == m_stagingViewHeap->GetGeneration() && cached.key == key)
+	{
+		LatteProfiler::Add(LatteProfiler::Counter::DescriptorHits);
+		last.Store(tableDesc, cached.table, generation, sourceGeneration);
 		return cached.table;
+	}
+	LatteProfiler::Add(LatteProfiler::Counter::DescriptorMisses);
 
 	auto table = m_gpuViewHeap->AllocateTable(kStageTableSize);
 	// Copy stable CBVs, SRVs and null slots in one call; only changed CBVs need to be created.
@@ -396,6 +420,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 	cached.generation = m_gpuViewHeap->GetGeneration();
 	cached.sourceGeneration = m_stagingViewHeap->GetGeneration();
 	cached.table = table.gpu;
+	last.Store(tableDesc, table.gpu, cached.generation, cached.sourceGeneration);
 	return table.gpu;
 }
 
@@ -468,15 +493,18 @@ void D3D12Renderer::draw_buildStageBindings(LatteDecompilerShader *shader, Rende
 		D3D12_SAMPLER_DESC *samplers = out.samplers;
 		out.samplerCount = std::max<uint32>(remap.srvCount, 1);
 		cemu_assert_debug(out.samplerCount <= kMaxSamplersPerStage);
-		for (uint32 i = 0; i < out.samplerCount; i++)
-		{
-			auto &s = samplers[i];
-			s = {};
-			s.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-			s.AddressU = s.AddressV = s.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-			s.MaxAnisotropy = 1;
-			s.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-		}
+		static const auto defaultSamplers = [] {
+			std::array<D3D12_SAMPLER_DESC, kMaxSamplersPerStage> values{};
+			for (auto &sampler : values)
+			{
+				sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+				sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+				sampler.MaxAnisotropy = 1;
+				sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+			}
+			return values;
+		}();
+		memcpy(samplers, defaultSamplers.data(), out.samplerCount * sizeof(*samplers));
 		out.samplerTable = {};
 		const sint32 textureBase = mapping.getTextureBaseBindingPoint();
 		const sint32 textureCount = mapping.getTextureCount();

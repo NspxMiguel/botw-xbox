@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
+#include "Cafe/HW/Latte/Core/LatteDrawCache.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
@@ -132,6 +133,7 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 			uint32 firstMip = 0;
 			uint32 numMips = 0;
 			bool depthCompare = false;
+			LatteDrawCache::ExactCache<std::array<uint32_t, 5>, TexScaleXY> scale;
 		};
 		static BindingCacheEntry bindingCache[LATTE_CEMU_GS_TEX_UNIT_BASE + LATTE_NUM_MAX_TEX_UNITS];
 		auto &cached = bindingCache[glBackendBaseTexUnit + textureIndex];
@@ -286,7 +288,11 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 			cemu_assert_debug(physMipAddr != MPTR_NULL);
 		}
 		// check for changes
-		if (LatteTC_HasTextureChanged(textureView->baseTexture) || swizzleChanged)
+		// Preserve the change tracker's exact early-out while avoiding the out-of-line
+		// call for the usual already-checked texture. Forced invalidation still wins.
+		auto *checkedTexture = textureView->baseTexture;
+		const bool needsContentCheck = checkedTexture->forceInvalidate || checkedTexture->lastDataUpdateFrameCounter != LatteGPUState.frameCounter;
+		if ((needsContentCheck && LatteTC_HasTextureChanged(checkedTexture)) || swizzleChanged)
 		{
 			debug_printf("Reload texture 0x%08x res %dx%d memRange %08x-%08x SwizzleChange: %s\n", textureView->baseTexture->physAddress, textureView->baseTexture->width, textureView->baseTexture->height, textureView->baseTexture->texDataPtrLow, textureView->baseTexture->texDataPtrHigh, swizzleChanged ? "yes" : "no");
 			// update swizzle / changed mip address
@@ -315,19 +321,29 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 			LatteGPUState.requiresTextureBarrier = true;
 			baseTexture->lastUnflushedRTDrawcallIndex = 0;
 		}
-		// update scale
-		float texScaleU, texScaleV;
-		if (baseTexture->overwriteInfo.hasResolutionOverwrite == false)
+		// Dimensions and graphic-pack overrides can change without a new view. Compare
+		// their values; still publish the scale on every bind (another shader may use the unit).
+		if (!baseTexture->overwriteInfo.hasResolutionOverwrite)
 		{
-			texScaleU = 1.0f;
-			texScaleV = 1.0f;
+			LatteTexture_setEffectiveTextureScale(shaderContext->shaderType, textureIndex, 1.0f, 1.0f);
 		}
 		else
 		{
-			texScaleU = (float)baseTexture->overwriteInfo.width / (float)baseTexture->width;
-			texScaleV = (float)baseTexture->overwriteInfo.height / (float)baseTexture->height;
+			const std::array<uint32_t, 5> scaleKey{
+				(uint32_t)baseTexture->width, (uint32_t)baseTexture->height,
+				(uint32_t)baseTexture->overwriteInfo.hasResolutionOverwrite,
+				(uint32_t)baseTexture->overwriteInfo.width, (uint32_t)baseTexture->overwriteInfo.height};
+			const auto *scale = cached.scale.Find(scaleKey);
+			TexScaleXY computed{};
+			if (!scale)
+			{
+				computed.xy[0] = (float)baseTexture->overwriteInfo.width / (float)baseTexture->width;
+				computed.xy[1] = (float)baseTexture->overwriteInfo.height / (float)baseTexture->height;
+				cached.scale.Store(scaleKey, computed);
+				scale = &computed;
+			}
+			LatteTexture_setEffectiveTextureScale(shaderContext->shaderType, textureIndex, scale->xy[0], scale->xy[1]);
 		}
-		LatteTexture_setEffectiveTextureScale(shaderContext->shaderType, textureIndex, texScaleU, texScaleV);
 	}
 }
 

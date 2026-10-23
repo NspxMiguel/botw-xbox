@@ -43,6 +43,12 @@ int main()
 	assert(TotalExclusiveTime() == std::chrono::duration_cast<std::chrono::nanoseconds>(s_state.last - start).count());
 	assert(s_state.drawTotalNs == TotalExclusiveTime() - s_state.timeNs[static_cast<size_t>(Slot::Pm4)]);
 
+	for (size_t i = 0; i < static_cast<size_t>(Counter::Count); ++i)
+	{
+		Add(static_cast<Counter>(i), i + 1);
+		assert(s_state.counters[i] == i + 1);
+	}
+
 	// Reporting/resetting a window inside a new slot must preserve the active hierarchy.
 	{
 		Scope draw(Slot::DrawOther);
@@ -54,12 +60,16 @@ int main()
 		assert(s_state.drawDepth == 1);
 		assert(TotalExclusiveTime() == 0);
 		assert(s_state.drawTotalNs == 0);
+		for (auto value : s_state.counters)
+			assert(value == 0);
 	}
 	assert(s_state.current == Slot::Pm4);
 	assert(s_state.drawDepth == 0);
 	assert(s_state.drawTotalNs == TotalExclusiveTime());
 
 	s_state.enabled = false;
+	Add(Counter::DescriptorHits);
+	assert(s_state.counters[static_cast<size_t>(Counter::DescriptorHits)] == 0);
 	const auto disabledTime = s_state.last;
 	{
 		Scope disabled(Slot::DrawCall);

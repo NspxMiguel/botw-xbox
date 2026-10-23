@@ -12,6 +12,8 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Format.h"
 #include "util/math/vector2.h"
 
+#include "Cafe/HW/Latte/Core/LatteDrawCache.h"
+
 #include <memory>
 #include <unordered_map>
 #include <unordered_set>
@@ -44,6 +46,12 @@ struct D3D12StageTableDesc
 	D3D12_CPU_DESCRIPTOR_HANDLE srv[D3D12Const::kMaxSRVsPerStage]{};
 	ID3D12Resource *uavResource = nullptr;
 	uint32 uavSize = 0;
+	bool operator==(const D3D12StageTableDesc &other) const
+	{
+		return std::memcmp(cbvAddress, other.cbvAddress, sizeof(cbvAddress)) == 0 &&
+			   std::memcmp(cbvSize, other.cbvSize, sizeof(cbvSize)) == 0 &&
+			   std::memcmp(srv, other.srv, sizeof(srv)) == 0 && uavResource == other.uavResource && uavSize == other.uavSize;
+	}
 };
 
 class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
@@ -514,6 +522,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		D3D12_GPU_DESCRIPTOR_HANDLE table{};
 	};
 	std::array<ViewTableCacheEntry, 128> m_viewTableCache{};
+	LatteDrawCache::ExactCache<D3D12StageTableDesc, D3D12_GPU_DESCRIPTOR_HANDLE> m_lastViewTable[4];
 	struct CBVCacheEntry
 	{
 		D3D12_CPU_DESCRIPTOR_HANDLE descriptor{};
