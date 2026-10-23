@@ -23,7 +23,7 @@ using Clock = std::chrono::steady_clock;
 struct Recorder
 {
 	uint64_t commands = 0, sequence = 0, pinnedFence = 0;
-	ResourceId pinnedBlock;
+	BlockId pinnedBlock;
 	Registry resources;
 	std::array<uint64_t, 64> objects{};
 	std::array<ResourceId, 64> ids{};
@@ -117,11 +117,18 @@ static Timing Run(bool queued, bool churn, uint64_t &commands)
 	packet.pipeline = recorder.ids[0];
 	packet.framebuffer = recorder.ids[1];
 	packet.indices = recorder.ids[2];
-	constexpr uint32_t frames = 100, draws = 5000;
-	const auto start = Clock::now();
-	const auto cpuStart = ThreadMilliseconds();
-	for (uint32_t frame = 0; frame < frames; ++frame)
+	constexpr uint32_t warmupFrames = 5, frames = 20, draws = 5000;
+	Clock::time_point start;
+	double cpuStart = 0;
+	for (uint32_t frame = 0; frame < warmupFrames + frames; ++frame)
 	{
+		if (frame == warmupFrames)
+		{
+			// Touch the complete arena/ring and train the caches before the fixed
+			// Plateau-style steady-state measurement, rather than timing page faults.
+			start = Clock::now();
+			cpuStart = ThreadMilliseconds();
+		}
 		for (uint32_t draw = 0; draw < draws; ++draw)
 		{
 			packet.baseVertex = draw;
@@ -187,7 +194,7 @@ int main()
 		std::sort(cpuOverhead.begin(), cpuOverhead.end());
 		std::cout << std::fixed << std::setprecision(4)
 				  << (churn ? "Changing binding blocks: " : "Repeated binding blocks: ") << "Packet " << sizeof(Packet) << " B; draw payload " << sizeof(DrawPacket) << " B; state block " << sizeof(DrawBlock) << " B\n"
-				  << "5000 draws/frame, 1024 uniform bytes/draw, 9 x 100 frames/path\n"
+				  << "5000 draws/frame, 1024 uniform bytes/draw, 5 warmup + 9 x 20 measured frames/path\n"
 				  << "Direct median " << direct[4] << " ms/frame; queued median " << queued[4] << " ms/frame\n"
 				  << "Paired wall overhead median " << overhead[4] << " ms/frame; maximum " << overhead.back() << " ms/frame\n"
 				  << "Paired thread-CPU overhead median " << cpuOverhead[4] << " ms/frame; maximum " << cpuOverhead.back() << " ms/frame\n";

@@ -155,10 +155,10 @@ static void StateBlockTests()
 	assert(a && blocks.Get(a) == 1);
 	assert(blocks.Intern(1, 2, 0) == a);
 	const auto b = blocks.Intern(2, 3, 0);
-	assert(b && b.slot != a.slot);
+	assert(b && b != a);
 	assert(!blocks.Intern(3, 4, 1));
 	const auto c = blocks.Intern(3, 4, 2);
-	assert(c.slot == a.slot && c.generation != a.generation);
+	assert(c != a);
 	assert(blocks.Get(c) == 3 && blocks.Get(b) == 2);
 	Throws([&] { blocks.Get(a); });
 }

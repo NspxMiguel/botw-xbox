@@ -231,6 +231,19 @@ class Registry
 	std::mutex m_allocationMutex;
 };
 
+// Block slots turn over at draw frequency. Pack their small slot index into a
+// 64-bit generation token instead of exhausting a 32-bit generation in hours.
+struct BlockId
+{
+	uint64_t value = 0;
+	explicit operator bool() const
+	{
+		return value != 0;
+	}
+	bool operator==(const BlockId &) const = default;
+};
+static_assert(sizeof(BlockId) == 8);
+
 // Fixed immutable front-owned blocks. Slot replacement is legal only after
 // consumption; equality is always checked (a hash alone never establishes a hit).
 template <class T>
@@ -248,38 +261,40 @@ class StateBlocks
 	{
 		T value{};
 		uint64_t sequence = 0;
-		uint32_t generation = 0;
+		uint64_t generation = 0;
 	};
 
   public:
-	ResourceId Intern(const T &value, uint64_t sequence, uint64_t consumed)
+	BlockId Intern(const T &value, uint64_t sequence, uint64_t consumed)
 	{
 		static_assert(std::is_trivially_copyable_v<T>);
 		auto &last = m_entries[m_last];
 		if (last.generation && Equal{}(last.value, value))
 		{
 			last.sequence = sequence;
-			return {static_cast<uint32_t>(m_last), last.generation};
+			return {last.generation * Capacity + m_last};
 		}
 		for (size_t i = 0; i < Capacity; ++i)
 		{
 			auto &entry = m_entries[i];
-			if (entry.sequence <= consumed && entry.generation != UINT32_MAX)
+			if (entry.sequence <= consumed && entry.generation != UINT64_MAX / Capacity)
 			{
 				entry.value = value;
 				entry.sequence = sequence;
 				++entry.generation;
 				m_last = i;
-				return {static_cast<uint32_t>(i), entry.generation};
+				return {entry.generation * Capacity + i};
 			}
 		}
 		return {};
 	}
-	const T &Get(ResourceId id) const
+	const T &Get(BlockId id) const
 	{
-		if (!id || id.slot >= Capacity || m_entries[id.slot].generation != id.generation)
+		const uint64_t generation = id.value / Capacity;
+		const size_t slot = id.value % Capacity;
+		if (!generation || m_entries[slot].generation != generation)
 			throw std::logic_error("Stale Latte immutable state block");
-		return m_entries[id.slot].value;
+		return m_entries[slot].value;
 	}
 
   private:

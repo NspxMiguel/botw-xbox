@@ -61,7 +61,7 @@ struct DrawBlockEqual
 struct DrawPacket
 {
 	ResourceId pipeline, framebuffer, indices;
-	ResourceId state;
+	BlockId state;
 	Span uniformBytes[3];
 	uint32_t baseVertex = 0, baseInstance = 0, instanceCount = 0, count = 0, indexCount = 0;
 	Span runtime;

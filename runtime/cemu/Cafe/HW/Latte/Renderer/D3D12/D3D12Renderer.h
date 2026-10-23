@@ -341,7 +341,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		LattePipeline::CapacityFromEnvironment("CEMU_LATTE_PIPELINE_ARENA", 16 * 1024 * 1024, 1024 * 1024, 64 * 1024 * 1024)};
 	LattePipeline::Registry m_resources;
 	LattePipeline::ResourceId m_recordingFBO;
-	LattePipeline::ResourceId m_pinnedDrawBlock, m_pinnedFramebuffer;
+	LattePipeline::BlockId m_pinnedDrawBlock;
+	LattePipeline::ResourceId m_pinnedFramebuffer;
 	uint64 m_pinnedDrawFence = 0;
 	LattePipeline::StateBlocks<LattePipeline::DrawBlock, 4, LattePipeline::DrawBlockEqual> m_drawBlocks;
 	struct IndexResource
