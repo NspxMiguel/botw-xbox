@@ -15,8 +15,8 @@ copy of the game. Nothing will be published for players before the project reach
 
 | | |
 | --- | --- |
-| Performance | **46 fps** at a fixed spot on the Great Plateau; 33–56 fps while walking. Not 60 yet. |
-| Resolution | 1080p output. Native 1080p rendering is being made the default; FSR 1 upscaling today. |
+| Performance | **45 fps** at a fixed spot on the Great Plateau with the Remaster preset; 33–56 fps while walking. Not 60 yet. |
+| Resolution | Native 1080p rendering. Upscaling is off by default; FSR 1 or FSR 3.1 can be chosen in the quick menu. |
 | Bottleneck | The CPU thread that turns the game's GPU commands into Direct3D 12 work (~21.7 ms per frame). The GPU is mostly idle. |
 | Series S | Not tested on real hardware. |
 
@@ -29,8 +29,7 @@ copy of the game. Nothing will be published for players before the project reach
 
 **Known issues**
 - Below 60 fps in demanding areas.
-- FSR 3.1 is packaged but does not load on the console yet; it falls back to FSR 1.
-- The "Remaster" graphic-pack preset (shadows, draw distance, grass, reflections) is not active yet.
+- The "Remaster" graphic-pack preset (FPS++, shadows, draw distance, reflections) is compiled in, but not every category is verified on the console yet.
 - Shaders are precompiled at boot; the first minutes after boot are not smooth.
 - Mods on USB storage cannot be read yet.
 - The Wii U GamePad screen is not shown on the TV yet.
@@ -75,8 +74,8 @@ ponto de lançamento: 60 fps cravados, sem travadas de compilação de shader, 4
 
 | | |
 | --- | --- |
-| Desempenho | **46 fps** num ponto fixo do Planalto Esquecido; 33–56 fps andando. Ainda não é 60. |
-| Resolução | Saída em 1080p. Renderização nativa em 1080p virando o padrão; hoje com FSR 1. |
+| Desempenho | **45 fps** num ponto fixo do Planalto Esquecido com o preset Remaster; 33–56 fps andando. Ainda não é 60. |
+| Resolução | 1080p nativo. Upscaling desligado por padrão; FSR 1 ou FSR 3.1 podem ser escolhidos no menu rápido. |
 | Gargalo | A thread da CPU que transforma os comandos de GPU do jogo em Direct3D 12 (~21,7 ms por quadro). A GPU fica quase parada. |
 | Series S | Ainda não testado no aparelho. |
 
@@ -89,8 +88,7 @@ ponto de lançamento: 60 fps cravados, sem travadas de compilação de shader, 4
 
 **Problemas conhecidos**
 - Abaixo de 60 fps em áreas pesadas.
-- O FSR 3.1 está no pacote, mas ainda não carrega no console; cai para o FSR 1.
-- O preset "Remaster" de packs gráficos (sombras, distância de visão, grama, reflexos) ainda não está ativo.
+- O preset "Remaster" de packs gráficos (FPS++, sombras, distância de visão, reflexos) já é compilado junto, mas nem toda categoria foi conferida no console.
 - Os shaders são pré-compilados ao abrir; os primeiros minutos não são lisos.
 - Mods em pendrive ainda não são lidos.
 - A tela do Wii U GamePad ainda não aparece na TV.
