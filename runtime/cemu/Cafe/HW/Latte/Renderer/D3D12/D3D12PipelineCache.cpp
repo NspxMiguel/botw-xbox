@@ -1264,6 +1264,7 @@ void D3D12PipelineCache::EndPreload()
 
 void D3D12PipelineCache::Clear()
 {
+	m_renderer->WaitForRecording();
 	m_lastPipeline.Clear();
 	// pipelines still being created are owned by their compile job until it finishes, they were never used by the GPU
 	for (auto &it : m_pipelines)

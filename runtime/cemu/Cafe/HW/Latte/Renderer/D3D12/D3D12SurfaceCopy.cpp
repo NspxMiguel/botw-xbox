@@ -253,9 +253,9 @@ void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *so
 	packet.words[3] = dstSlice;
 	packet.words[4] = effectiveCopyWidth;
 	packet.words[5] = effectiveCopyHeight;
-	m_surfaceCopyRecorded = false;
-	ExecuteBackend(LattePipeline::Opcode::Copy, packet);
-	if (m_surfaceCopyRecorded)
+
+	const auto reply = ExecuteBackend(LattePipeline::Opcode::Copy, packet);
+	if (reply.words[0])
 		LatteTexture_TrackTextureGPUWrite(dstTex, dstSlice, dstMip, LatteTexture_getNextUpdateEventCounter());
 }
 
@@ -367,7 +367,7 @@ void D3D12Renderer::surfaceCopy_record(const BackendPacket &packet)
 
 	InvalidateDrawState();
 	m_hasRecordedWork = true;
-	m_surfaceCopyRecorded = true;
+	m_operations.Result().words[0] = true;
 }
 
 #endif // ENABLE_D3D12

@@ -35,7 +35,8 @@ class LatteTextureReadbackInfoD3D12 : public LatteTextureReadbackInfo
 	bool RecordFinished();
 	void RecordForceFinish();
 	bool m_replyFinished = false;
-	uint8 *m_replyData = nullptr;
+	std::vector<uint8> m_replyData;
+	bool m_pollPending = false;
 
 	D3D12Renderer *m_renderer;
 	uint64 m_bufferOffset = 0;

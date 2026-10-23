@@ -51,6 +51,9 @@
 #include <chrono>
 #include <thread>
 
+static uint64 CurrentThreadCpuNs();
+static thread_local bool s_recordComInitialized = false;
+
 D3D12Renderer *D3D12Renderer::GetInstance()
 {
 	cemu_assert_debug(g_renderer && g_renderer->GetType() == RendererAPI::D3D12);
@@ -133,22 +136,25 @@ D3D12Renderer::D3D12Renderer()
 D3D12Renderer::~D3D12Renderer()
 {
 	LatteIndices_invalidateAll(this);
-	// Shutdown() is expected to have been called already
-	if (m_device)
-		WaitForIdle();
-	m_simSeriesS.reset();
-	if (m_ffx)
-		m_ffx->Reset();
-	// Disabled SDK chains still use provider code; release them before unloading FFX.
-	m_swapChainMain.reset();
-	m_swapChainPad.reset();
-	m_ffx.reset();
-	m_fsr.reset();
-	occlusionQuery_destroyAll();
-	m_imgui.reset();
-	m_pipelineCache.reset();
-	m_internal.reset();
-	m_deferredReleaser.ReleaseAll();
+	m_operations.Finish();
+	// Final native teardown runs with the worker parked, after its last GPU use.
+	m_operations.Exclusive(m_pipeline, [&] {
+		if (m_device)
+			WaitForIdle();
+		m_simSeriesS.reset();
+		if (m_ffx)
+			m_ffx->Reset();
+		// Disabled SDK chains still use provider code; release them before unloading FFX.
+		m_swapChainMain.reset();
+		m_swapChainPad.reset();
+		m_ffx.reset();
+		m_fsr.reset();
+		occlusionQuery_destroyAll();
+		m_imgui.reset();
+		m_pipelineCache.reset();
+		m_internal.reset();
+		m_deferredReleaser.ReleaseAll();
+	});
 	RendererShaderD3D12::Shutdown();
 	RendererShaderD3D12::ShaderCacheLoading_Close();
 	D3D12ShaderCompiler::Shutdown();
@@ -436,6 +442,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE D3D12Renderer::GetNullSRV(Latte::E_DIM dim) const
 
 uint64 D3D12Renderer::GetCompletedSubmissionId()
 {
+	m_pipeline.CheckBack();
 	m_completedFenceValue = std::max(m_completedFenceValue, m_fence->GetCompletedValue());
 	if (m_completedFenceValue == UINT64_MAX)
 		HandleDeviceError(m_device->GetDeviceRemovedReason(), "Fence (device removed)");
@@ -444,6 +451,7 @@ uint64 D3D12Renderer::GetCompletedSubmissionId()
 		m_operations.Completed(m_submissionSequences.front().second);
 		m_submissionSequences.pop_front();
 	}
+	m_operations.SetCompletedFence(m_completedFenceValue);
 	UpdatePipelineProfile();
 	return m_completedFenceValue;
 }
@@ -463,6 +471,14 @@ void D3D12Renderer::WaitForSubmission(uint64 submissionId)
 
 void D3D12Renderer::WaitForIdle()
 {
+	if (m_operations.Running() && !m_operations.Recording())
+	{
+		BackendPacket packet{};
+		packet.kind = BackendPacket::Kind::ShutdownDrain;
+		ExecuteBackend(LattePipeline::Opcode::Shutdown, packet);
+		return;
+	}
+	m_pipeline.CheckBack();
 	if (m_hasRecordedWork)
 		SubmitCommandList(false);
 	WaitForSubmission(m_lastSubmittedFenceValue);
@@ -471,6 +487,7 @@ void D3D12Renderer::WaitForIdle()
 
 void D3D12Renderer::ResetCommandList()
 {
+	m_pipeline.CheckBack();
 	// reuse the oldest allocator if the GPU is done with it
 	ProcessFinishedSubmissions();
 	if (!m_inFlightAllocators.empty() && m_inFlightAllocators.front().fenceValue <= m_completedFenceValue)
@@ -552,16 +569,15 @@ void D3D12Renderer::SubmitCommandList_record(bool waitIdle)
 
 void D3D12Renderer::ProcessFinishedSubmissions()
 {
-	const uint64 previous = m_completedFenceValue;
+	m_pipeline.CheckBack();
 	const uint64 completed = GetCompletedSubmissionId();
 	m_uploadRing->Retire(completed);
 	m_gpuViewHeap->Retire(completed);
 	m_indexAllocator->Retire(completed);
 	m_deferredReleaser.Retire(completed);
-	m_resources.Retire(m_operations.Progress().recorded, completed);
-	if (completed != previous)
-		m_frontReadbacksPending = true;
-	if (!m_operations.Recording())
+	m_resources.Retire(m_operations.Progress().recorded, completed,
+					   m_operations.Running() ? &m_operations.RetiredResources() : nullptr);
+	if (!m_pipeline.Threaded() && !m_operations.Recording())
 		ApplyFrontCompletions();
 }
 
@@ -739,11 +755,21 @@ void D3D12Renderer::ReleaseResourceDeferred(ComPtr<ID3D12Resource> resource)
 		return;
 	ComPtr<IUnknown> unk;
 	resource.As(&unk);
-	m_deferredReleaser.Release(std::move(unk), GetRecordingSubmissionId());
+	ReleaseObjectDeferred(std::move(unk));
 }
 
 void D3D12Renderer::ReleaseObjectDeferred(ComPtr<IUnknown> object)
 {
+	if (m_operations.Running() && !m_operations.Recording())
+	{
+		BackendPacket packet{};
+		packet.kind = BackendPacket::Kind::NativeRelease;
+		packet.resources[0] = RegisterResource(std::addressof(object));
+		ExecuteBackend(LattePipeline::Opcode::Release, packet);
+		RetireResource(packet.resources[0]);
+		return;
+	}
+	m_pipeline.CheckBack();
 	m_deferredReleaser.Release(std::move(object), GetRecordingSubmissionId());
 }
 
@@ -796,6 +822,7 @@ void D3D12Renderer::TransitionTextureAll(LatteTextureD3D12 *texture, D3D12_RESOU
 
 void D3D12Renderer::UAVBarrier(ID3D12Resource *resource)
 {
+	m_pipeline.CheckBack();
 	m_pendingBarriers.push_back(D3D12_UAVBarrier(resource));
 }
 
@@ -844,12 +871,25 @@ void D3D12Renderer::NotifyFBORelease(CachedFBOD3D12 *fbo)
 
 void D3D12Renderer::Initialize()
 {
+	// UWP constructs the device/surface on the CoreWindow caller, then starts
+	// Latte. Transfer the drained initial ownership before any front work.
+	m_pipeline.BindFrontThread();
 	Renderer::Initialize();
 	D3D12_Checkpoint(m_device.Get(), "Renderer::Initialize");
 	m_imgui = std::make_unique<D3D12ImGuiRenderer>(this);
 	D3D12_Checkpoint(m_device.Get(), "ImGui renderer created (internal shaders)");
 	surfaceCopy_init();
 	D3D12_Checkpoint(m_device.Get(), "surfaceCopy_init");
+	m_frontCpuStart = CurrentThreadCpuNs();
+	m_operations.SetCompletionHandler([this](const LattePipeline::Completion &completion) { AcceptCompletion(completion); });
+	m_operations.Start(m_pipeline, *this, [this] { WorkerIdle(); }, [] {
+		// The native collector is local to the recording worker. It is transported
+		// at report boundaries, never merged into front wall-time coverage.
+		s_recordComInitialized = SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED));
+		SetThreadDescription(GetCurrentThread(), L"Latte D3D12 recorder");
+		LatteProfiler::s_state = {};
+		LatteProfiler::s_state.enabled = LatteProfiler::IsConfigured();
+		LatteProfiler::s_state.last = LatteProfiler::Clock::now(); }, [] { if (s_recordComInitialized) CoUninitialize(); });
 }
 
 void D3D12Renderer::Shutdown()
@@ -858,12 +898,14 @@ void D3D12Renderer::Shutdown()
 	packet.kind = BackendPacket::Kind::ShutdownDrain;
 	ExecuteBackend(LattePipeline::Opcode::Shutdown, packet);
 	DeleteFontTextures();
-	m_imgui.reset();
-	surfaceCopy_shutdown();
 	m_pipelineCache->Clear();
+	m_operations.Exclusive(m_pipeline, [&] {
+		WaitForIdle();
+		m_imgui.reset();
+		surfaceCopy_shutdown();
+		m_deferredReleaser.ReleaseAll();
+	});
 	Renderer::Shutdown();
-	WaitForIdle();
-	m_deferredReleaser.ReleaseAll();
 	// a reset during teardown otherwise only shows up later, without breadcrumbs, when the launcher uses the device
 	if (!D3D12_Checkpoint(m_device.Get(), "renderer shutdown"))
 		LogDeviceRemovedData();
@@ -894,6 +936,11 @@ bool D3D12Renderer::GetVRAMInfo(int &usageInMB, int &totalInMB) const
 
 void D3D12Renderer::InitializeSurface(const Vector2i &size, bool mainWindow, SurfaceType surfaceType, void *nativeHandle)
 {
+	if (m_operations.Running() && !m_operations.Recording())
+	{
+		m_operations.Exclusive(m_pipeline, [&] { InitializeSurface(size, mainWindow, surfaceType, nativeHandle); });
+		return;
+	}
 	const auto type = static_cast<D3D12SwapChain::TargetType>(surfaceType);
 	auto swapChain = std::make_unique<D3D12SwapChain>(m_device.Get(), m_dxgiFactory.Get(), m_queue.Get(), m_stagingRTVHeap.get(), type, nativeHandle, (uint32)size.x, (uint32)size.y);
 	if (!swapChain->IsValid())
@@ -909,17 +956,32 @@ void D3D12Renderer::InitializeSurface(const Vector2i &size, bool mainWindow, Sur
 		m_fsrResizePending = m_fsr != nullptr;
 	}
 	else
+	{
 		m_swapChainPad = std::move(swapChain);
+		m_padActive.store(true, std::memory_order_release);
+	}
 }
 
 void D3D12Renderer::ShutdownSurface(bool mainWindow)
 {
+	if (m_operations.Running() && !m_operations.Recording())
+	{
+		m_operations.Exclusive(m_pipeline, [&] { ShutdownSurface(mainWindow); });
+		return;
+	}
 	if (mainWindow)
 	{
 		if (m_ffx)
 			m_ffx->Reset();
 		WaitForIdle();
 		m_swapChainMain.reset();
+		return;
+	}
+	if (m_operations.Recording())
+	{
+		WaitForIdle();
+		m_swapChainPad.reset();
+		m_padActive.store(false);
 		return;
 	}
 	// called from the UI thread. Ask the render thread to release the pad swap chain and wait for it to do so
@@ -942,25 +1004,30 @@ void D3D12Renderer::ProcessPadSwapChainShutdown()
 	std::lock_guard _l(m_padSwapChainMutex);
 	WaitForIdle();
 	m_swapChainPad.reset();
+	m_padActive.store(false, std::memory_order_release);
 	m_padShutdownRequested = false;
 }
 
 void D3D12Renderer::ResizeSurface(const Vector2i &size, bool mainWindow)
 {
-	// called from the UI thread. The swap chain is resized on the render thread before the next frame
-	D3D12SwapChain *swapChain = GetSwapChainObj(mainWindow);
-	if (swapChain)
-		swapChain->RequestResize((uint32)size.x, (uint32)size.y);
+	m_surfaceResize[mainWindow ? 0 : 1].store((uint64(uint32(size.x)) << 32) | uint32(size.y), std::memory_order_release);
+	m_operations.Wake();
 }
 
 IDXGISwapChain1 *D3D12Renderer::GetSwapChain(bool mainWindow)
 {
+	if (m_operations.Running() && !m_operations.Recording())
+	{
+		return m_operations.Exclusive(m_pipeline, [&] { return GetSwapChain(mainWindow); });
+	}
 	D3D12SwapChain *swapChain = GetSwapChainObj(mainWindow);
 	return swapChain ? swapChain->GetSwapChain() : nullptr;
 }
 
 bool D3D12Renderer::IsPadWindowActive()
 {
+	if (m_operations.Running() && !m_operations.Recording())
+		return m_padActive.load(std::memory_order_acquire);
 	ProcessPadSwapChainShutdown();
 	return m_swapChainPad != nullptr && m_swapChainPad->IsValid();
 }
@@ -973,6 +1040,9 @@ bool D3D12Renderer::AcquireBackbuffer(bool mainWindow)
 	D3D12SwapChain *swapChain = GetSwapChainObj(mainWindow);
 	if (!swapChain || !swapChain->IsValid())
 		return false;
+	const auto resize = m_surfaceResize[mainWindow ? 0 : 1].exchange(0, std::memory_order_acq_rel);
+	if (resize)
+		swapChain->RequestResize(uint32(resize >> 32), uint32(resize));
 	uint32 w, h;
 	if (swapChain->ConsumeResizeRequest(w, h))
 	{
@@ -1083,8 +1153,11 @@ void D3D12Renderer::UpdatePresentDiagnostics(D3D12SwapChain *swapChain, bool int
 		m_presentLogStart = now;
 		LatteProfiler::Reset(now);
 		extern std::atomic<uint64> g_latteIdleNs;
-		g_latteIdleNs.exchange(0);
+		if (!m_pipeline.Threaded())
+			g_latteIdleNs.exchange(0);
+		m_backIdleObserved = m_pipeline.Threaded() ? g_latteIdleNs.load() : 0;
 		m_fenceWaitMs = 0;
+		m_latteCpuTime = CurrentThreadCpuNs() / 100;
 		swapChain->TakePresentStats();
 		swapChain->MeasureRefreshRate();
 		return;
@@ -1098,7 +1171,14 @@ void D3D12Renderer::UpdatePresentDiagnostics(D3D12SwapChain *swapChain, bool int
 	const double hz = swapChain->MeasureRefreshRate();
 	// Keep the 2 s refresh-rate checks, but log and profile the same complete 10 s interval.
 	extern std::atomic<uint64> g_latteIdleNs;
-	m_presentLogIdleNs += g_latteIdleNs.exchange(0);
+	if (m_pipeline.Threaded())
+	{
+		const auto idle = g_latteIdleNs.load();
+		m_presentLogIdleNs += idle - m_backIdleObserved;
+		m_backIdleObserved = idle;
+	}
+	else
+		m_presentLogIdleNs += g_latteIdleNs.exchange(0);
 	m_presentLogPresents += stats.presents;
 	m_presentLogBlockedMs += stats.blockedMs;
 	m_presentLogMaxBlockedMs = std::max(m_presentLogMaxBlockedMs, stats.maxBlockedMs);
@@ -1106,7 +1186,7 @@ void D3D12Renderer::UpdatePresentDiagnostics(D3D12SwapChain *swapChain, bool int
 	const double logSeconds = std::chrono::duration<double>(now - m_presentLogStart).count();
 	if (logSeconds >= 10.0)
 	{
-		// This runs on the Latte thread: its CPU time against the wall clock shows preemption by other threads.
+		// This is the recorder in mode 2, the Latte thread otherwise.
 		FILETIME created, exited, kernel, user;
 		double cpuMs = 0;
 		if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
@@ -1114,12 +1194,24 @@ void D3D12Renderer::UpdatePresentDiagnostics(D3D12SwapChain *swapChain, bool int
 			const uint64 total = (uint64(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime) + (uint64(user.dwHighDateTime) << 32 | user.dwLowDateTime);
 			cpuMs = m_latteCpuTime ? (total - m_latteCpuTime) / 1e4 : 0;
 			m_latteCpuTime = total;
+			if (m_pipeline.Threaded())
+				LatteProfiler::s_state.backCpuNs = uint64(cpuMs * 1e6);
 		}
-		cemuLog_log(LogType::Force, "D3D12: {:.1f} presents/s, Present blocked {:.1f} ms/frame (max {:.1f}), GPU fence wait {:.1f} ms/frame, Latte idle {:.0f}%, Latte CPU {:.0f}%, {} cores",
+		cemuLog_log(LogType::Force, "D3D12: {:.1f} presents/s, Present blocked {:.1f} ms/frame (max {:.1f}), GPU fence wait {:.1f} ms/frame, Latte idle {:.0f}%, recording CPU {:.0f}%, {} cores",
 					m_presentLogPresents / logSeconds, m_presentLogPresents ? m_presentLogBlockedMs / m_presentLogPresents : 0.0, m_presentLogMaxBlockedMs,
 					m_presentLogPresents ? m_presentLogFenceWaitMs / m_presentLogPresents : 0.0, m_presentLogIdleNs / (logSeconds * 1e7),
 					cpuMs / (logSeconds * 10), std::thread::hardware_concurrency());
-		LatteProfiler::Report(now, logSeconds, m_presentLogFrames);
+		if (m_pipeline.Threaded())
+		{
+			m_reportSeconds = logSeconds;
+			m_reportFrames = m_presentLogFrames;
+		}
+		else
+		{
+			LatteProfiler::s_state.frontCpuNs = uint64(cpuMs * 1e6);
+			LatteProfiler::s_state.frontBusyNs = LatteProfiler::s_state.frontCpuNs;
+			LatteProfiler::Report(now, logSeconds, m_presentLogFrames);
+		}
 		m_presentLogStart = now;
 		m_presentLogFrames = 0;
 		m_presentLogPresents = 0;
@@ -1359,8 +1451,7 @@ bool D3D12Renderer::BeginFrame(bool mainWindow)
 	BackendPacket packet{};
 	packet.kind = BackendPacket::Kind::BeginFrame;
 	packet.words[0] = mainWindow;
-	ExecuteBackend(LattePipeline::Opcode::Control, packet);
-	return m_controlReply;
+	return ExecuteBackend(LattePipeline::Opcode::Control, packet).words[0] != 0;
 }
 
 void D3D12Renderer::DrawEmptyFrame_record(bool mainWindow)
@@ -1490,18 +1581,21 @@ void D3D12Renderer::NotifyLatteCommandProcessorIdle_record()
 
 void D3D12Renderer::AppendOverlayDebugInfo()
 {
+	BackendPacket packet{};
+	packet.kind = BackendPacket::Kind::DebugSnapshot;
+	const auto words = ExecuteBackend(LattePipeline::Opcode::Control, packet).words;
 	ImGui::Text("--- D3D12 debug info ---");
 	ImGui::Text("Device         %s", m_selectedDeviceName.c_str());
 	ImGui::Text("ShaderModel    %x", (uint32)m_highestShaderModel);
 	ImGui::Text("BindingTier    %u", (uint32)m_bindingTier);
 	ImGui::Text("Pipelines      %u", m_pipelineCache->GetPipelineCount());
-	ImGui::Text("Samplers       %u", m_samplerCache->GetCount());
-	ImGui::Text("SamplerHeap    %u / %u", m_gpuSamplerHeap->GetUsedCount(), D3D12Const::kGpuSamplerHeapSize);
-	ImGui::Text("UploadRing     %uKB / %uKB", (uint32)(m_uploadRing->GetUsedBytes() / 1024), (uint32)(m_uploadRing->GetSize() / 1024));
-	ImGui::Text("DeferredRel    %u", (uint32)m_deferredReleaser.GetCount());
-	ImGui::Text("Draws/f        %u", m_statDrawsPerFrame);
-	ImGui::Text("Submits/f      %u", m_statSubmitsPerFrame);
-	ImGui::Text("Barriers/f     %u", m_statBarriersPerFrame);
+	ImGui::Text("Samplers       %u", (uint32)words[0]);
+	ImGui::Text("SamplerHeap    %u / %u", (uint32)words[1], D3D12Const::kGpuSamplerHeapSize);
+	ImGui::Text("UploadRing     %uKB / %uKB", (uint32)words[2], (uint32)words[7]);
+	ImGui::Text("DeferredRel    %u", (uint32)words[3]);
+	ImGui::Text("Draws/f        %u", (uint32)words[4]);
+	ImGui::Text("Submits/f      %u", (uint32)words[5]);
+	ImGui::Text("Barriers/f     %u", (uint32)words[6]);
 	uint32 bufferCacheHeapSize = 0, bufferCacheAllocationSize = 0, bufferCacheNumAllocations = 0;
 	LatteBufferCache_getStats(bufferCacheHeapSize, bufferCacheAllocationSize, bufferCacheNumAllocations);
 	ImGui::Text("Buffer         %06uKB / %06uKB Allocs: %u", (bufferCacheAllocationSize + 1023) / 1024, (bufferCacheHeapSize + 1023) / 1024, bufferCacheNumAllocations);
@@ -1516,8 +1610,8 @@ bool D3D12Renderer::ImguiBegin(bool mainWindow)
 	BackendPacket packet{};
 	packet.kind = BackendPacket::Kind::UIAcquire;
 	packet.words[0] = mainWindow;
-	ExecuteBackend(LattePipeline::Opcode::Control, packet);
-	if (!m_controlReply)
+	const auto reply = ExecuteBackend(LattePipeline::Opcode::Control, packet);
+	if (!reply.words[0])
 		return false;
 	m_imgui->EnsureFontTexture();
 	ImGui_UpdateWindowInformation(mainWindow);
@@ -1553,7 +1647,17 @@ void D3D12Renderer::ImguiEnd()
 	packet.kind = BackendPacket::Kind::UIRender;
 	packet.resources[0] = RegisterResource(&snapshot);
 	packet.words[0] = m_imguiMainWindow;
-	ExecuteBackend(LattePipeline::Opcode::Control, packet);
+	bool customCallback = false;
+	for (const auto *list : snapshot.lists)
+		for (const auto &command : list->CmdBuffer)
+			customCallback |= command.UserCallback && command.UserCallback != ImDrawCallback_ResetRenderState;
+	if (customCallback)
+	{
+		m_operations.Finish();
+		m_operations.Exclusive(m_pipeline, [&] { m_pipeline.RunFrontCallback([&] { ui_record(packet); }); });
+	}
+	else
+		ExecuteBackend(LattePipeline::Opcode::Control, packet);
 	RetireResource(packet.resources[0]);
 	m_imguiActive = false;
 }
@@ -2310,8 +2414,8 @@ Renderer::IndexAllocation D3D12Renderer::indexData_reserveIndexMemory(uint32 siz
 	packet.kind = BackendPacket::Kind::IndexCreate;
 	packet.resources[0] = resource->id;
 	packet.words[0] = size;
-	ExecuteBackend(LattePipeline::Opcode::Create, packet);
-	if (!resource->native)
+	const auto reply = ExecuteBackend(LattePipeline::Opcode::Create, packet);
+	if (!reply.words[0])
 	{
 		RetireResource(resource->id);
 		return {nullptr, nullptr};
@@ -2418,13 +2522,14 @@ void D3D12Renderer::HandleScreenshotRequest(LatteTextureView *texView, bool padV
 	packet.words[0] = view->GetNativeDefinition().firstSlice;
 	packet.words[1] = width;
 	packet.words[2] = height;
-	ExecuteBackend(LattePipeline::Opcode::Readback, packet);
-	const uint64 offset = m_screenshotReadbackOffset;
+	const auto reply = ExecuteBackend(LattePipeline::Opcode::Readback, packet);
+	m_screenshotBytes.resize(reply.bytes.size());
+	memcpy(m_screenshotBytes.data(), reply.bytes.data(), m_screenshotBytes.size());
 	const uint32 rowPitch = AlignUp<uint32>((uint32)width * 4, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
 	const bool formatIsSRGB = tex->GetFormatInfo().srvFormat == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 	const bool dstUsesSRGB = (!padView && LatteGPUState.tvBufferUsesSRGB) || (padView && LatteGPUState.drcBufferUsesSRGB);
 	std::vector<uint8> rgb((size_t)width * height * 3);
-	const uint8 *src = m_readbackRing->GetCPUPtr(offset);
+	const uint8 *src = m_screenshotBytes.data();
 	for (sint32 y = 0; y < height; y++)
 	{
 		for (sint32 x = 0; x < width; x++)
@@ -2679,12 +2784,29 @@ void D3D12Renderer::occlusionQuery_updateState()
 	ExecuteBackend(LattePipeline::Opcode::Query, packet);
 }
 
-void D3D12Renderer::ExecuteBackend(LattePipeline::Opcode opcode, const BackendPacket &packet)
+LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode opcode, const BackendPacket &packet)
 {
 	m_pipeline.CheckFront();
-	m_operations.Execute<BackendPacket, &D3D12Renderer::RecordBackend>(m_pipeline, opcode, packet, *this);
-	ApplyFrontCompletions();
+	using Kind = BackendPacket::Kind;
+	const bool needsReply = opcode == LattePipeline::Opcode::Create || opcode == LattePipeline::Opcode::Release ||
+							opcode == LattePipeline::Opcode::Present || opcode == LattePipeline::Opcode::Shutdown ||
+							opcode == LattePipeline::Opcode::Readback || opcode == LattePipeline::Opcode::Submit ||
+							packet.kind == Kind::UIAcquire || packet.kind == Kind::UIRender || packet.kind == Kind::BeginFrame ||
+							packet.kind == Kind::DebugSnapshot || packet.kind == Kind::SurfaceCopy || packet.kind == Kind::occlusionQuery_flush;
+	const auto sequence = m_operations.Execute<BackendPacket, &D3D12Renderer::RecordBackend>(m_pipeline, opcode, packet, *this, needsReply);
+	LattePipeline::Completion reply;
+	if (needsReply)
+	{
+		m_operations.Wait(sequence);
+		reply = m_operations.TakeReply(sequence);
+	}
+	// Logical destructors publish Release while their front cache entry can
+	// still be on an outer readback/query traversal. Defer cache callbacks
+	// until that traversal has removed the adapter; transport polling is safe.
+	if (opcode != LattePipeline::Opcode::Release)
+		ApplyFrontCompletions();
 	UpdatePipelineProfile();
+	return reply;
 }
 
 void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeline::Arena &arena)
@@ -2743,7 +2865,7 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		m_resources.Release(packet.resources[0]);
 		break;
 	case BackendPacket::Kind::UICreate:
-		m_uiTextureReply = m_imgui->CreateTexture(nullptr, packet.words[0], packet.words[1]);
+		m_operations.Result().words[0] = reinterpret_cast<uintptr_t>(m_imgui->CreateTexture(nullptr, packet.words[0], packet.words[1]));
 		break;
 	case BackendPacket::Kind::UIUpload:
 		m_imgui->UploadTexture(LattePipeline::OpaqueId(packet.resources[0]), reinterpret_cast<const uint8 *>(arena.Read(packet.bytes).data()), packet.words[0], packet.words[1], packet.words[2], packet.words[3] != 0);
@@ -2756,7 +2878,7 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		ui_record(packet);
 		break;
 	case BackendPacket::Kind::UIAcquire:
-		m_controlReply = AcquireBackbuffer(packet.words[0] != 0);
+		m_operations.Result().words[0] = AcquireBackbuffer(packet.words[0] != 0);
 		break;
 	case BackendPacket::Kind::Screenshot:
 		capture_record(packet);
@@ -2769,7 +2891,7 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		ServicePendingPresent(false);
 		break;
 	case BackendPacket::Kind::BeginFrame:
-		m_controlReply = BeginFrame_record(packet.words[0] != 0);
+		m_operations.Result().words[0] = BeginFrame_record(packet.words[0] != 0);
 		break;
 	case BackendPacket::Kind::ShutdownDrain:
 		WaitForIdle();
@@ -2832,6 +2954,7 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 	case BackendPacket::Kind::IndexCreate: {
 		auto *index = m_resources.Get<IndexResource>(packet.resources[0]);
 		index->native = m_indexAllocator->Allocate(packet.words[0], 4);
+		m_operations.Result().words[0] = index->native != nullptr;
 		break;
 	}
 	case BackendPacket::Kind::IndexUpload: {
@@ -2847,9 +2970,31 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 	case BackendPacket::Kind::BufferInit:
 		bufferCache_init_record(packet.words[0], packet.words[1]);
 		break;
+	case BackendPacket::Kind::NativeRelease:
+		ReleaseObjectDeferred(std::move(*m_resources.Get<ComPtr<IUnknown>>(packet.resources[0])));
+		InvalidateDrawState();
+		break;
+	case BackendPacket::Kind::DebugSnapshot: {
+		auto &words = m_operations.Result().words;
+		words = {m_samplerCache->GetCount(), m_gpuSamplerHeap->GetUsedCount(), m_uploadRing->GetUsedBytes() / 1024,
+				 m_deferredReleaser.GetCount(), m_statDrawsPerFrame, m_statSubmitsPerFrame, m_statBarriersPerFrame, m_uploadRing->GetSize() / 1024};
+		break;
+	}
 	case BackendPacket::Kind::TexturePlane:
 		texture_recordPlane(packet, arena);
 		break;
+	}
+	if (m_pipeline.Threaded() && m_reportFrames)
+	{
+		LatteProfiler::Checkpoint(LatteProfiler::Clock::now());
+		auto &result = m_operations.Result();
+		result.kind = ProfileResult;
+		result.words[0] = m_reportFrames;
+		result.words[1] = std::bit_cast<uint64>(m_reportSeconds);
+		result.bytes.resize(sizeof(LatteProfiler::State));
+		memcpy(result.bytes.data(), &LatteProfiler::s_state, sizeof(LatteProfiler::State));
+		LatteProfiler::Reset(LatteProfiler::Clock::now());
+		m_reportFrames = 0;
 	}
 	if (packet.kind != BackendPacket::Kind::UIRelease && packet.kind != BackendPacket::Kind::RegistryRetire)
 		for (auto id : packet.resources)
@@ -2859,10 +3004,35 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 void D3D12Renderer::ApplyFrontCompletions()
 {
 	m_pipeline.CheckFront();
-	if (!m_frontReadbacksPending)
+	if (m_applyingCompletions)
 		return;
-	m_frontReadbacksPending = false;
-	LatteTextureReadback_UpdateFinishedTransfers(false);
+	m_applyingCompletions = true;
+	try
+	{
+		m_operations.Poll();
+		const auto completed = m_operations.CompletedFence();
+		if (completed != m_frontCompleted || m_frontReadbacksReady)
+		{
+			m_frontCompleted = completed;
+			m_frontReadbacksReady = false;
+			LatteTextureReadback_UpdateFinishedTransfers(false);
+		}
+	}
+	catch (...)
+	{
+		m_applyingCompletions = false;
+		throw;
+	}
+	m_applyingCompletions = false;
+}
+
+void D3D12Renderer::WorkerIdle()
+{
+	m_pipeline.CheckBack();
+	ServicePendingPresent(false);
+	ProcessPadSwapChainShutdown();
+	NotifyLatteCommandProcessorIdle_record();
+	ProcessFinishedSubmissions();
 }
 
 void D3D12Renderer::texture_preparePlane(LatteTextureD3D12 *texture, uint32 mip, uint32 slice, uint32 plane, const uint8 *data, uint32 rowBytes, uint32 rows, uint32 width, uint32 blockDim, bool first)
@@ -3030,7 +3200,9 @@ void D3D12Renderer::capture_record(const BackendPacket &packet)
 	m_cmdList->CopyTextureRegion(&d, 0, 0, 0, &s, &box);
 	SubmitCommandList(true);
 
-	m_screenshotReadbackOffset = offset;
+	auto &bytes = m_operations.Result().bytes;
+	bytes.resize(size);
+	memcpy(bytes.data(), m_readbackRing->GetCPUPtr(offset), size);
 }
 
 void *D3D12Renderer::CreateUITexture(const uint8 *rgba, sint32 width, sint32 height)
@@ -3040,9 +3212,9 @@ void *D3D12Renderer::CreateUITexture(const uint8 *rgba, sint32 width, sint32 hei
 	packet.kind = BackendPacket::Kind::UICreate;
 	packet.words[0] = width;
 	packet.words[1] = height;
-	ExecuteBackend(LattePipeline::Opcode::Create, packet);
+	const auto reply = ExecuteBackend(LattePipeline::Opcode::Create, packet);
 	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
-	void *texture = m_uiTextureReply;
+	void *texture = reinterpret_cast<void *>(reply.words[0]);
 	if (!texture || width <= 0 || height <= 0)
 		return texture;
 	const uint32 rowBytes = static_cast<uint32>(width) * 4;
@@ -3075,9 +3247,78 @@ void D3D12Renderer::ui_record(const BackendPacket &packet)
 	swapChain->SetDefinedContent();
 }
 
+static uint64 CurrentThreadCpuNs()
+{
+	FILETIME created, exited, kernel, user;
+	if (!GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+		return 0;
+	return (((uint64(kernel.dwHighDateTime) << 32) | kernel.dwLowDateTime) +
+			((uint64(user.dwHighDateTime) << 32) | user.dwLowDateTime)) *
+		   100;
+}
+
+void D3D12Renderer::AcceptCompletion(const LattePipeline::Completion &completion)
+{
+	m_pipeline.CheckFront();
+	m_resources.Recycle(completion.retiredResources);
+	if (completion.kind == QueryResult)
+	{
+		AcceptQueryResult(completion);
+		return;
+	}
+	if (completion.kind == QueryBatchResult)
+	{
+		AcceptQueryBatch(completion);
+		return;
+	}
+	if (completion.kind == ReadbackResult)
+	{
+		AcceptReadbackResult(completion);
+		return;
+	}
+	if (completion.kind != ProfileResult)
+		return;
+	LatteProfiler::State back;
+	if (completion.bytes.size() != sizeof(back))
+		throw std::logic_error("Invalid Latte profile reply");
+	memcpy(&back, completion.bytes.data(), sizeof(back));
+	auto &front = LatteProfiler::s_state;
+	// Counters from both actors describe the same command stream. Wall-time
+	// slots/covered remain exclusively front; the back collector is separate.
+	for (size_t i = 0; i < front.counters.size(); ++i)
+		front.counters[i] += back.counters[i];
+	const auto now = LatteProfiler::Clock::now();
+	const auto timing = m_operations.Metrics();
+	const auto stall = timing.backpressureNs - m_profilePipelineTiming.backpressureNs;
+	const auto reply = timing.replyWaitNs - m_profilePipelineTiming.replyWaitNs;
+	// OS thread CPU time excludes waits and preemption without subtracting
+	// overlapping PM4-idle/reply intervals (OSScreen can present inside idle).
+	front.backRecordWallNs = completion.backBusyNs - m_profilePipelineTiming.backBusyNs;
+	front.frontStallNs = stall;
+	front.frontReplyNs = reply;
+	front.backIdleNs = completion.backIdleNs - m_profilePipelineTiming.backIdleNs;
+	front.ringHighWater = timing.highWater;
+	const auto cpu = CurrentThreadCpuNs();
+	front.frontCpuNs = cpu >= m_frontCpuStart ? cpu - m_frontCpuStart : 0;
+	front.backCpuNs = back.backCpuNs;
+	front.frontBusyNs = front.frontCpuNs;
+	front.backBusyNs = front.backCpuNs;
+	front.threaded = true;
+	front.operationSequence = m_pipeline.Sequence();
+	front.sourceFrame = m_pipeline.Frame();
+	front.recordedSequence = completion.tickets.recorded;
+	front.submittedSequence = completion.tickets.submitted;
+	front.completedSequence = completion.tickets.completed;
+	LatteProfiler::Report(now, std::bit_cast<double>(completion.words[1]), completion.words[0]);
+	m_profilePipelineTiming = timing;
+	m_profilePipelineTiming.backBusyNs = completion.backBusyNs;
+	m_profilePipelineTiming.backIdleNs = completion.backIdleNs;
+	m_frontCpuStart = cpu;
+}
+
 void D3D12Renderer::UpdatePipelineProfile()
 {
-	if (!LatteProfiler::s_state.enabled)
+	if (!LatteProfiler::s_state.enabled || (m_pipeline.Threaded() && m_operations.Recording()))
 		return;
 	auto &profile = LatteProfiler::s_state;
 	profile.operationSequence = m_operations.Recording() ? m_operations.ActiveHeader().sequence : m_pipeline.Sequence();
@@ -3086,10 +3327,17 @@ void D3D12Renderer::UpdatePipelineProfile()
 	profile.recordedSequence = tickets.recorded;
 	profile.submittedSequence = tickets.submitted;
 	profile.completedSequence = tickets.completed;
+	if (!m_pipeline.Threaded())
+		profile.ringHighWater = m_operations.Metrics().highWater;
 }
 
 void D3D12Renderer::RetireResource(LattePipeline::ResourceId id)
 {
+	if (m_operations.Recording())
+	{
+		m_resources.Release(id);
+		return;
+	}
 	m_pipeline.CheckFront();
 	if (!id)
 		return;

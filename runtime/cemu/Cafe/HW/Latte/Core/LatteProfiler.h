@@ -86,6 +86,9 @@ struct State
 	Slot current = Slot::Unaccounted;
 	uint32_t drawDepth = 0;
 	uint64_t operationSequence = 0, sourceFrame = 0, recordedSequence = 0, submittedSequence = 0, completedSequence = 0;
+	uint64_t frontBusyNs = 0, backBusyNs = 0, backRecordWallNs = 0, frontStallNs = 0, frontReplyNs = 0, backIdleNs = 0, ringHighWater = 0;
+	uint64_t frontCpuNs = 0, backCpuNs = 0;
+	bool threaded = false;
 	bool enabled = false;
 	bool detailEnabled = false;
 	std::array<int64_t, static_cast<size_t>(Detail::Count)> detailNs{};
@@ -93,7 +96,7 @@ struct State
 	std::array<uint32_t, static_cast<size_t>(Detail::Count)> detailDepth{};
 };
 
-// Only the command processor enables its own state. Worker threads never contribute.
+// Each actor owns a thread-local collector. Worker snapshots cross the completion ring.
 inline thread_local State s_state;
 
 inline bool IsConfigured()

@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 
 // Keep the POSIX implementation of GuestThread out of the UWP host. W1 owns thread.h/thread.cpp.
 namespace threads {
@@ -137,9 +138,16 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
         setenv("CEMU_LATTE_PROFILE", "1", 1);
 #endif
     }
-    // LocalState/latte-pipeline.txt selects the queued Latte recording path (CEMU_LATTE_PIPELINE=1).
-    if (std::filesystem::exists(std::filesystem::path(user) / "latte-pipeline.txt"))
-        _putenv_s("CEMU_LATTE_PIPELINE", "1");
+    // A file containing 2 selects the worker; all other contents preserve mode 1.
+    const auto pipelineFile = std::filesystem::path(user) / "latte-pipeline.txt";
+    if (std::filesystem::exists(pipelineFile)) {
+        std::ifstream input(pipelineFile);
+        std::string mode((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+        const auto first = mode.find_first_not_of(" \t\r\n");
+        const auto last = mode.find_last_not_of(" \t\r\n");
+        _putenv_s("CEMU_LATTE_PIPELINE",
+                  first != std::string::npos && mode.substr(first, last - first + 1) == "2" ? "2" : "1");
+    }
     try {
         mem::init();
         dispatch::init();

@@ -921,6 +921,9 @@ LattePipeline::Span D3D12Renderer::StageBytes(const void *data, size_t size)
 	{
 		// A full-capacity upload may need to skip the previous empty tail.
 		// ResetEmpty refuses to invalidate a live draw's uniform spans.
+		m_operations.WaitCapacity();
+		if (m_operations.Staging().Copy({static_cast<const std::byte *>(data), size}, span))
+			return span;
 		m_operations.Staging().ResetEmpty();
 		if (!m_operations.Staging().Copy({static_cast<const std::byte *>(data), size}, span))
 			throw std::runtime_error("Latte CPU staging arena exhausted by one operation");
@@ -1063,6 +1066,20 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 		runtimeDwords[0] = baseVertex;
 		runtimeDwords[1] = baseInstance;
 	}
+	size_t stagingBytes = sizeof(runtimeDwords);
+	for (auto *shader : {vs, ps, gs})
+		if (shader)
+			stagingBytes += AlignUp<size_t>(shader->uniform.uniformRangeSize, 16);
+	if (!m_operations.Staging().Prepare(stagingBytes))
+	{
+		m_operations.WaitCapacity();
+		if (!m_operations.Staging().Prepare(stagingBytes))
+		{
+			m_operations.Staging().ResetEmpty();
+			if (!m_operations.Staging().Prepare(stagingBytes))
+				throw std::runtime_error("Latte draw exceeds CPU staging capacity");
+		}
+	}
 	packet.runtime = StageBytes(runtimeDwords, sizeof(runtimeDwords));
 	LattePipeline::DrawBlock block{};
 	memcpy(block.vertices, m_frontBindings.vertices, sizeof(block.vertices));
@@ -1084,8 +1101,11 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 		block.stages[i].uniformBytes = {};
 	}
 	packet.state = m_drawBlocks.Intern(block, m_pipeline.Sequence() + 1, m_operations.Progress().recorded);
-	if (!packet.state)
-		throw std::runtime_error("Latte immutable draw blocks exhausted");
+	while (!packet.state)
+	{
+		m_operations.WaitCapacity(m_operations.Progress().recorded + 1);
+		packet.state = m_drawBlocks.Intern(block, m_pipeline.Sequence() + 1, m_operations.Progress().recorded);
+	}
 	m_operations.Execute<LattePipeline::DrawPacket, &D3D12Renderer::draw_record>(m_pipeline, LattePipeline::Opcode::Draw, packet, *this);
 	ApplyFrontCompletions();
 	UpdatePipelineProfile();

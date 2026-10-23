@@ -14,6 +14,7 @@ LatteTextureReadbackInfoD3D12::LatteTextureReadbackInfoD3D12(D3D12Renderer *rend
 	: LatteTextureReadbackInfo(textureView, textureView->firstMip), m_renderer(renderer)
 {
 	m_recordingId = m_renderer->RegisterResource(this);
+	m_renderer->m_frontReadbacks[D3D12Renderer::ResourceKey(m_recordingId)] = this;
 	auto *baseTexture = static_cast<LatteTextureD3D12 *>(textureView->baseTexture);
 	if (!baseTexture->GetResource() || baseTexture->IsAlternateFormat() || baseTexture->IsCompressedFormat())
 	{
@@ -85,18 +86,25 @@ void LatteTextureReadbackInfoD3D12::RecordForceFinish()
 
 uint8 *LatteTextureReadbackInfoD3D12::GetData()
 {
-	Dispatch(3);
-	return m_replyData;
+	if (m_replyData.empty() && m_image_size)
+		Dispatch(3);
+	return m_replyData.data();
 }
 
 LatteTextureReadbackInfoD3D12::~LatteTextureReadbackInfoD3D12()
 {
 	m_renderer->RetireResource(m_recordingId);
+	m_renderer->m_frontReadbacks.erase(D3D12Renderer::ResourceKey(m_recordingId));
 }
 
 bool LatteTextureReadbackInfoD3D12::IsFinished()
 {
-	Dispatch(1);
+	m_renderer->m_operations.Poll();
+	if (!m_pollPending && !m_replyFinished)
+	{
+		m_pollPending = true;
+		Dispatch(1);
+	}
 	return m_replyFinished;
 }
 void LatteTextureReadbackInfoD3D12::ForceFinish()
@@ -123,7 +131,25 @@ void LatteTextureReadbackInfoD3D12::Dispatch(uint32 action)
 		packet.width = texture->GetMipWidth(m_firstMip);
 		packet.height = texture->GetMipHeight(m_firstMip);
 	}
-	m_renderer->m_operations.Execute<D3D12Renderer::ReadbackPacket, &D3D12Renderer::readback_record>(m_renderer->m_pipeline, LattePipeline::Opcode::Readback, packet, *m_renderer);
+	const auto sequence = m_renderer->m_operations.Execute<D3D12Renderer::ReadbackPacket, &D3D12Renderer::readback_record>(m_renderer->m_pipeline, LattePipeline::Opcode::Readback, packet, *m_renderer);
+	if (action >= 2)
+		m_renderer->m_operations.Wait(sequence);
+}
+
+void D3D12Renderer::AcceptReadbackResult(const LattePipeline::Completion &completion)
+{
+	const auto it = m_frontReadbacks.find(ResourceKey(completion.resource));
+	if (it == m_frontReadbacks.end())
+		return;
+	auto *readback = it->second;
+	readback->m_pollPending = false;
+	readback->m_replyFinished = completion.words[0] != 0;
+	m_frontReadbacksReady |= readback->m_replyFinished;
+	if (!completion.bytes.empty())
+	{
+		readback->m_replyData.resize(completion.bytes.size());
+		memcpy(readback->m_replyData.data(), completion.bytes.data(), completion.bytes.size());
+	}
 }
 
 void D3D12Renderer::readback_record(const ReadbackPacket &packet, const LattePipeline::Arena &)
@@ -136,16 +162,34 @@ void D3D12Renderer::readback_record(const ReadbackPacket &packet, const LattePip
 		readback->RecordStart(packet.texture, packet.mip, packet.slice, packet.rowPitch, packet.imageSize, packet.width, packet.height);
 		break;
 	case 1:
-		readback->m_replyFinished = readback->RecordFinished();
+		m_operations.Result().kind = ReadbackResult;
+		m_operations.Result().resource = packet.readback;
+		m_operations.Result().words[0] = readback->RecordFinished();
 		break;
 	case 2:
 		readback->RecordForceFinish();
+		m_operations.Result().kind = ReadbackResult;
+		m_operations.Result().resource = packet.readback;
+		m_operations.Result().words[0] = true;
 		break;
 	case 3:
-		readback->m_replyData = m_readbackRing->GetCPUPtr(readback->m_bufferOffset);
+		// Transfer owned bytes after GPU completion. Front never borrows mapped
+		// native ring memory while the worker can allocate/overwrite it.
+		readback->RecordForceFinish();
+		m_operations.Result().kind = ReadbackResult;
+		m_operations.Result().resource = packet.readback;
+		m_operations.Result().words[0] = true;
+		m_operations.Result().bytes.resize(readback->GetImageSize());
+		memcpy(m_operations.Result().bytes.data(), m_readbackRing->GetCPUPtr(readback->m_bufferOffset), readback->GetImageSize());
 		break;
 	default:
 		throw std::logic_error("Invalid Latte readback operation");
+	}
+	if (m_operations.Result().kind == ReadbackResult && m_operations.Result().words[0] && m_operations.Result().bytes.empty())
+	{
+		auto &bytes = m_operations.Result().bytes;
+		bytes.resize(readback->GetImageSize());
+		memcpy(bytes.data(), m_readbackRing->GetCPUPtr(readback->m_bufferOffset), bytes.size());
 	}
 	for (auto id : {packet.readback, packet.texture})
 		m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
