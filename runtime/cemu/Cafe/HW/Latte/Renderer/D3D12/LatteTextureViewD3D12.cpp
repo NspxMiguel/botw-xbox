@@ -67,8 +67,9 @@ static uint32 _AdjustSwizzle(Latte::E_GX2SURFFMT format, uint32 word4)
 }
 
 LatteTextureViewD3D12::LatteTextureViewD3D12(D3D12Renderer *renderer, LatteTextureD3D12 *texture, Latte::E_DIM dim, Latte::E_GX2SURFFMT format, sint32 firstMip, sint32 mipCount, sint32 firstSlice, sint32 sliceCount)
-	: LatteTextureView(texture, firstMip, mipCount, firstSlice, sliceCount, dim, format), m_renderer(renderer), m_baseTexture(texture)
+	: LatteTextureView(texture, firstMip, mipCount, firstSlice, sliceCount, dim, format), m_definition{firstMip, mipCount, firstSlice, sliceCount, dim, format}, m_renderer(renderer), m_baseTexture(texture)
 {
+	recordingId = renderer->RegisterResource(this);
 	m_uniqueId = renderer->GenUniqueId();
 	const D3D12TextureFormatInfo &baseInfo = texture->GetFormatInfo();
 	m_srvFormat = baseInfo.srvFormat;
@@ -120,15 +121,15 @@ void LatteTextureViewD3D12::UpdateSliceCopy()
 	if (!m_sliceCopy)
 	{
 		D3D12_RESOURCE_DESC desc = m_baseTexture->GetDesc();
-		desc.Width = (UINT64)std::max(1, m_baseTexture->GetMipWidth(firstMip));
-		desc.Height = (UINT)std::max(1, m_baseTexture->GetMipHeight(firstMip));
+		desc.Width = (UINT64)std::max(1, m_baseTexture->GetNativeMipWidth(m_definition.firstMip));
+		desc.Height = (UINT)std::max(1, m_baseTexture->GetNativeMipHeight(m_definition.firstMip));
 		if (m_baseTexture->GetFormatInfo().isCompressed)
 		{
 			desc.Width = AlignUp<UINT64>(desc.Width, 4);
 			desc.Height = AlignUp<UINT>(desc.Height, 4);
 		}
 		desc.DepthOrArraySize = 1;
-		desc.MipLevels = (UINT16)std::max(1, numMip);
+		desc.MipLevels = (UINT16)std::max(1, m_definition.numMip);
 		desc.Flags = D3D12_RESOURCE_FLAG_NONE;
 		D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
 		if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&m_sliceCopy))))
@@ -138,17 +139,17 @@ void LatteTextureViewD3D12::UpdateSliceCopy()
 			return;
 		}
 		D3D12_SetDebugName(m_sliceCopy.Get(), "TextureSliceCopy");
-		cemuLog_log(LogType::Force, "D3D12: slice copy for a 2D view of slice {} ({}x{}, {} mips, fmt {:04x}, phys {:08x})", firstSlice, (uint32)desc.Width, desc.Height, numMip, (uint32)format, m_baseTexture->physAddress);
+		cemuLog_log(LogType::Force, "D3D12: slice copy for a 2D view of slice {} ({}x{}, {} mips, fmt {:04x}, phys {:08x})", m_definition.firstSlice, (uint32)desc.Width, desc.Height, m_definition.numMip, (uint32)m_definition.format, m_baseTexture->physAddress);
 		m_sliceCopyState = D3D12_RESOURCE_STATE_COPY_DEST;
 	}
 	m_renderer->TransitionResource(m_sliceCopy.Get(), m_sliceCopyState, D3D12_RESOURCE_STATE_COPY_DEST);
-	m_renderer->TransitionTexture(m_baseTexture, firstMip, numMip, firstSlice, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
+	m_renderer->TransitionTexture(m_baseTexture, m_definition.firstMip, m_definition.numMip, m_definition.firstSlice, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
 	m_renderer->FlushBarriers();
 	const D3D12_RESOURCE_DESC srcDesc = m_baseTexture->GetDesc();
 	const D3D12_RESOURCE_DESC dstDesc = m_sliceCopy->GetDesc();
-	for (sint32 m = 0; m < numMip; m++)
+	for (sint32 m = 0; m < m_definition.numMip; m++)
 	{
-		const UINT srcSub = m_baseTexture->GetSubresourceIndex(firstMip + m, firstSlice, 0);
+		const UINT srcSub = m_baseTexture->GetSubresourceIndex(m_definition.firstMip + m, m_definition.firstSlice, 0);
 		D3D12_PLACED_SUBRESOURCE_FOOTPRINT srcFp, dstFp;
 		UINT rows;
 		UINT64 rowSize, total;
@@ -163,7 +164,7 @@ void LatteTextureViewD3D12::UpdateSliceCopy()
 		src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
 		src.SubresourceIndex = srcSub;
 		// depth resources only allow whole subresource copies (no box)
-		m_renderer->GetCommandList()->CopyTextureRegion(&dst, 0, 0, 0, &src, m_baseTexture->isDepth ? nullptr : &box);
+		m_renderer->GetCommandList()->CopyTextureRegion(&dst, 0, 0, 0, &src, m_baseTexture->GetNativeDefinition().isDepth ? nullptr : &box);
 	}
 	m_renderer->TransitionResource(m_sliceCopy.Get(), m_sliceCopyState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 	m_renderer->m_hasRecordedWork = true;
@@ -171,6 +172,12 @@ void LatteTextureViewD3D12::UpdateSliceCopy()
 }
 
 LatteTextureViewD3D12::~LatteTextureViewD3D12()
+{
+	m_renderer->ReleaseView(recordingId);
+	m_renderer->RetireResource(recordingId);
+}
+
+void LatteTextureViewD3D12::ReleaseNative()
 {
 	m_renderer->NotifyTextureViewRelease(this);
 	auto &srvHeap = m_renderer->GetStagingViewHeap();
@@ -228,12 +235,12 @@ D3D12_CPU_DESCRIPTOR_HANDLE LatteTextureViewD3D12::CreateSRV(uint32 gpuSamplerSw
 	// dimension mismatch but is handled consistently by all D3D12 drivers we are aware of.
 	D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
 	desc.Format = m_srvFormat;
-	desc.Shader4ComponentMapping = D3D12Format::GetComponentMapping(_AdjustSwizzle(format, gpuSamplerSwizzle));
+	desc.Shader4ComponentMapping = D3D12Format::GetComponentMapping(_AdjustSwizzle(m_definition.format, gpuSamplerSwizzle));
 	if (m_usesSliceCopy && m_sliceCopy)
 	{
 		desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		desc.Texture2D.MostDetailedMip = 0;
-		desc.Texture2D.MipLevels = (UINT)std::max(1, numMip);
+		desc.Texture2D.MipLevels = (UINT)std::max(1, m_definition.numMip);
 		D3D12_CPU_DESCRIPTOR_HANDLE h = m_renderer->GetStagingViewHeap().Allocate();
 		m_renderer->GetDevice()->CreateShaderResourceView(m_sliceCopy.Get(), &desc, h);
 		return h;
@@ -241,82 +248,82 @@ D3D12_CPU_DESCRIPTOR_HANDLE LatteTextureViewD3D12::CreateSRV(uint32 gpuSamplerSw
 	const bool baseIs3D = m_baseTexture->Is3DTexture();
 	if (baseIs3D)
 	{
-		if (dim != Latte::E_DIM::DIM_3D)
+		if (m_definition.dim != Latte::E_DIM::DIM_3D)
 			cemuLog_logDebugOnce(LogType::Force, "D3D12: Non-3D view of a 3D texture is not supported, binding the 3D texture instead");
 		desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D;
-		desc.Texture3D.MostDetailedMip = firstMip;
-		desc.Texture3D.MipLevels = numMip;
+		desc.Texture3D.MostDetailedMip = m_definition.firstMip;
+		desc.Texture3D.MipLevels = m_definition.numMip;
 	}
 	else
 	{
-		switch (dim)
+		switch (m_definition.dim)
 		{
 		case Latte::E_DIM::DIM_1D:
-			if (firstSlice == 0)
+			if (m_definition.firstSlice == 0)
 			{
 				desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1D;
-				desc.Texture1D.MostDetailedMip = firstMip;
-				desc.Texture1D.MipLevels = numMip;
+				desc.Texture1D.MostDetailedMip = m_definition.firstMip;
+				desc.Texture1D.MipLevels = m_definition.numMip;
 			}
 			else
 			{
 				desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE1DARRAY;
-				desc.Texture1DArray.MostDetailedMip = firstMip;
-				desc.Texture1DArray.MipLevels = numMip;
-				desc.Texture1DArray.FirstArraySlice = firstSlice;
+				desc.Texture1DArray.MostDetailedMip = m_definition.firstMip;
+				desc.Texture1DArray.MipLevels = m_definition.numMip;
+				desc.Texture1DArray.FirstArraySlice = m_definition.firstSlice;
 				desc.Texture1DArray.ArraySize = 1;
 			}
 			break;
 		case Latte::E_DIM::DIM_2D_ARRAY:
 			desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-			desc.Texture2DArray.MostDetailedMip = firstMip;
-			desc.Texture2DArray.MipLevels = numMip;
-			desc.Texture2DArray.FirstArraySlice = firstSlice;
-			desc.Texture2DArray.ArraySize = numSlice;
+			desc.Texture2DArray.MostDetailedMip = m_definition.firstMip;
+			desc.Texture2DArray.MipLevels = m_definition.numMip;
+			desc.Texture2DArray.FirstArraySlice = m_definition.firstSlice;
+			desc.Texture2DArray.ArraySize = m_definition.numSlice;
 			break;
 		case Latte::E_DIM::DIM_CUBEMAP:
-			if ((numSlice % 6) == 0 && m_baseTexture->GetDesc().Width == m_baseTexture->GetDesc().Height)
+			if ((m_definition.numSlice % 6) == 0 && m_baseTexture->GetDesc().Width == m_baseTexture->GetDesc().Height)
 			{
 				desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURECUBEARRAY;
-				desc.TextureCubeArray.MostDetailedMip = firstMip;
-				desc.TextureCubeArray.MipLevels = numMip;
-				desc.TextureCubeArray.First2DArrayFace = firstSlice;
-				desc.TextureCubeArray.NumCubes = numSlice / 6;
+				desc.TextureCubeArray.MostDetailedMip = m_definition.firstMip;
+				desc.TextureCubeArray.MipLevels = m_definition.numMip;
+				desc.TextureCubeArray.First2DArrayFace = m_definition.firstSlice;
+				desc.TextureCubeArray.NumCubes = m_definition.numSlice / 6;
 			}
 			else
 			{
-				cemuLog_logDebugOnce(LogType::Force, "D3D12: Cubemap view with {} slices is not cube compatible", numSlice);
+				cemuLog_logDebugOnce(LogType::Force, "D3D12: Cubemap view with {} slices is not cube compatible", m_definition.numSlice);
 				desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-				desc.Texture2DArray.MostDetailedMip = firstMip;
-				desc.Texture2DArray.MipLevels = numMip;
-				desc.Texture2DArray.FirstArraySlice = firstSlice;
-				desc.Texture2DArray.ArraySize = numSlice;
+				desc.Texture2DArray.MostDetailedMip = m_definition.firstMip;
+				desc.Texture2DArray.MipLevels = m_definition.numMip;
+				desc.Texture2DArray.FirstArraySlice = m_definition.firstSlice;
+				desc.Texture2DArray.ArraySize = m_definition.numSlice;
 			}
 			break;
 		case Latte::E_DIM::DIM_3D:
 			cemuLog_logDebugOnce(LogType::Force, "D3D12: 3D view of a non-3D texture is not supported");
 			desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-			desc.Texture2DArray.MostDetailedMip = firstMip;
-			desc.Texture2DArray.MipLevels = numMip;
-			desc.Texture2DArray.FirstArraySlice = firstSlice;
-			desc.Texture2DArray.ArraySize = numSlice;
+			desc.Texture2DArray.MostDetailedMip = m_definition.firstMip;
+			desc.Texture2DArray.MipLevels = m_definition.numMip;
+			desc.Texture2DArray.FirstArraySlice = m_definition.firstSlice;
+			desc.Texture2DArray.ArraySize = m_definition.numSlice;
 			break;
 		case Latte::E_DIM::DIM_2D:
 		case Latte::E_DIM::DIM_2D_MSAA:
 		default:
-			if (firstSlice == 0)
+			if (m_definition.firstSlice == 0)
 			{
 				desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-				desc.Texture2D.MostDetailedMip = firstMip;
-				desc.Texture2D.MipLevels = numMip;
+				desc.Texture2D.MostDetailedMip = m_definition.firstMip;
+				desc.Texture2D.MipLevels = m_definition.numMip;
 				desc.Texture2D.PlaneSlice = 0;
 			}
 			else
 			{
 				desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DARRAY;
-				desc.Texture2DArray.MostDetailedMip = firstMip;
-				desc.Texture2DArray.MipLevels = numMip;
-				desc.Texture2DArray.FirstArraySlice = firstSlice;
+				desc.Texture2DArray.MostDetailedMip = m_definition.firstMip;
+				desc.Texture2DArray.MipLevels = m_definition.numMip;
+				desc.Texture2DArray.FirstArraySlice = m_definition.firstSlice;
 				desc.Texture2DArray.ArraySize = 1;
 			}
 			break;
@@ -332,29 +339,29 @@ D3D12_CPU_DESCRIPTOR_HANDLE LatteTextureViewD3D12::GetRTV()
 {
 	if (m_rtv.ptr)
 		return m_rtv;
-	cemu_assert_debug(!m_baseTexture->isDepth);
+	cemu_assert_debug(!m_baseTexture->GetNativeDefinition().isDepth);
 	D3D12_RENDER_TARGET_VIEW_DESC desc{};
 	desc.Format = m_rtvFormat;
 	if (m_baseTexture->Is3DTexture())
 	{
 		desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE3D;
-		desc.Texture3D.MipSlice = firstMip;
-		desc.Texture3D.FirstWSlice = firstSlice;
-		desc.Texture3D.WSize = numSlice;
+		desc.Texture3D.MipSlice = m_definition.firstMip;
+		desc.Texture3D.FirstWSlice = m_definition.firstSlice;
+		desc.Texture3D.WSize = m_definition.numSlice;
 	}
 	else if (m_baseTexture->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D)
 	{
 		desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE1DARRAY;
-		desc.Texture1DArray.MipSlice = firstMip;
-		desc.Texture1DArray.FirstArraySlice = firstSlice;
-		desc.Texture1DArray.ArraySize = numSlice;
+		desc.Texture1DArray.MipSlice = m_definition.firstMip;
+		desc.Texture1DArray.FirstArraySlice = m_definition.firstSlice;
+		desc.Texture1DArray.ArraySize = m_definition.numSlice;
 	}
 	else
 	{
 		desc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2DARRAY;
-		desc.Texture2DArray.MipSlice = firstMip;
-		desc.Texture2DArray.FirstArraySlice = firstSlice;
-		desc.Texture2DArray.ArraySize = numSlice;
+		desc.Texture2DArray.MipSlice = m_definition.firstMip;
+		desc.Texture2DArray.FirstArraySlice = m_definition.firstSlice;
+		desc.Texture2DArray.ArraySize = m_definition.numSlice;
 		desc.Texture2DArray.PlaneSlice = 0;
 	}
 	m_rtv = m_renderer->GetStagingRTVHeap().Allocate();
@@ -367,23 +374,23 @@ D3D12_CPU_DESCRIPTOR_HANDLE LatteTextureViewD3D12::GetDSV()
 {
 	if (m_dsv.ptr)
 		return m_dsv;
-	cemu_assert_debug(m_baseTexture->isDepth);
+	cemu_assert_debug(m_baseTexture->GetNativeDefinition().isDepth);
 	D3D12_DEPTH_STENCIL_VIEW_DESC desc{};
 	desc.Format = m_dsvFormat;
 	desc.Flags = D3D12_DSV_FLAG_NONE;
 	if (m_baseTexture->GetDesc().Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE1D)
 	{
 		desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE1DARRAY;
-		desc.Texture1DArray.MipSlice = firstMip;
-		desc.Texture1DArray.FirstArraySlice = firstSlice;
-		desc.Texture1DArray.ArraySize = numSlice;
+		desc.Texture1DArray.MipSlice = m_definition.firstMip;
+		desc.Texture1DArray.FirstArraySlice = m_definition.firstSlice;
+		desc.Texture1DArray.ArraySize = m_definition.numSlice;
 	}
 	else
 	{
 		desc.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2DARRAY;
-		desc.Texture2DArray.MipSlice = firstMip;
-		desc.Texture2DArray.FirstArraySlice = firstSlice;
-		desc.Texture2DArray.ArraySize = numSlice;
+		desc.Texture2DArray.MipSlice = m_definition.firstMip;
+		desc.Texture2DArray.FirstArraySlice = m_definition.firstSlice;
+		desc.Texture2DArray.ArraySize = m_definition.numSlice;
 	}
 	m_dsv = m_renderer->GetStagingDSVHeap().Allocate();
 	m_renderer->GetDevice()->CreateDepthStencilView(m_baseTexture->GetResource(), &desc, m_dsv);

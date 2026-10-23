@@ -85,6 +85,7 @@ struct State
 	int64_t drawTotalNs = 0;
 	Slot current = Slot::Unaccounted;
 	uint32_t drawDepth = 0;
+	uint64_t operationSequence = 0, sourceFrame = 0, recordedSequence = 0, submittedSequence = 0, completedSequence = 0;
 	bool enabled = false;
 	bool detailEnabled = false;
 	std::array<int64_t, static_cast<size_t>(Detail::Count)> detailNs{};

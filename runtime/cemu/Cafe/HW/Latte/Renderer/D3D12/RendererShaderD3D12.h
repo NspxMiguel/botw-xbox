@@ -4,6 +4,8 @@
 // Ported from PrismFox67/Cemu-UWP; see runtime/cemu/VENDORED.md.
 
 #pragma once
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+class D3D12Renderer;
 
 #include "Cafe/HW/Latte/Renderer/RendererShader.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12ShaderCompiler.h"
@@ -25,6 +27,8 @@ class RendererShaderD3D12 : public RendererShader
 	};
 
   public:
+	LattePipeline::ResourceId recordingId;
+	D3D12Renderer *recordingOwner = nullptr;
 	static void Init();
 	static void Shutdown();
 

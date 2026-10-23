@@ -1267,8 +1267,10 @@ void D3D12PipelineCache::Clear()
 	m_lastPipeline.Clear();
 	// pipelines still being created are owned by their compile job until it finishes, they were never used by the GPU
 	for (auto &it : m_pipelines)
-		if (it.second->isValid())
-			m_renderer->ReleaseObjectDeferred(it.second->pso);
+	{
+		m_renderer->RetireResource(it.second->recordingId);
+		if (it.second->isValid()) m_renderer->ReleaseObjectDeferred(it.second->pso);
+	}
 	m_pipelines.clear();
 	for (auto &it : m_internalPipelines)
 		m_renderer->ReleaseObjectDeferred(it.second);

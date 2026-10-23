@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureD3D12.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 
@@ -16,8 +18,17 @@ class LatteTextureD3D12;
 class LatteTextureViewD3D12 : public LatteTextureView
 {
   public:
+	LattePipeline::ResourceId recordingId;
 	LatteTextureViewD3D12(D3D12Renderer *renderer, LatteTextureD3D12 *texture, Latte::E_DIM dim, Latte::E_GX2SURFFMT format, sint32 firstMip, sint32 mipCount, sint32 firstSlice, sint32 sliceCount);
 	~LatteTextureViewD3D12() override;
+	void ReleaseNative();
+	struct NativeDefinition
+	{
+		sint32 firstMip, numMip, firstSlice, numSlice;
+		Latte::E_DIM dim;
+		Latte::E_GX2SURFFMT format;
+	};
+	const NativeDefinition &GetNativeDefinition() const { return m_definition; }
 
 	LatteTextureD3D12 *GetBaseTexture() const
 	{
@@ -77,6 +88,7 @@ class LatteTextureViewD3D12 : public LatteTextureView
 	uint64 m_sliceCopyVersion = 0;
 
 	LatteDrawCache::VersionMemo m_shaderReadState;
+	const NativeDefinition m_definition;
 	D3D12Renderer *m_renderer;
 	LatteTextureD3D12 *m_baseTexture;
 	DXGI_FORMAT m_srvFormat;

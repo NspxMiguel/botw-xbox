@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+
 #include "Cafe/HW/Latte/LegacyShaderDecompiler/LatteDecompiler.h"
 #include "Cafe/HW/Latte/Core/LatteCachedFBO.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
@@ -17,8 +19,11 @@ class LatteTextureViewD3D12;
 class CachedFBOD3D12 : public LatteCachedFBO
 {
   public:
+	LattePipeline::ResourceId recordingId;
 	CachedFBOD3D12(D3D12Renderer *renderer, uint64 key);
 	~CachedFBOD3D12() override;
+	void CreateNative();
+	void ReleaseNative();
 
 	uint32 GetNumRTVs() const
 	{
@@ -61,6 +66,8 @@ class CachedFBOD3D12 : public LatteCachedFBO
 
   private:
 	D3D12Renderer *m_renderer;
+	LatteTextureViewD3D12 *m_colorViews[8]{};
+	LatteTextureViewD3D12 *m_depthView = nullptr;
 	uint32 m_numRTVs = 0;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_rtvs[8]{};
 	DXGI_FORMAT m_rtvFormats[8]{};

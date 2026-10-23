@@ -11,6 +11,8 @@
 
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
 
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -26,6 +28,7 @@ struct LatteDecompilerShader;
 
 struct D3D12PipelineInfo
 {
+	LattePipeline::ResourceId recordingId;
 	ComPtr<ID3D12PipelineState> pso; // written once by whichever thread creates it, then published through isReady
 	D3D_PRIMITIVE_TOPOLOGY topology = D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	bool usesBlendConstants = false;

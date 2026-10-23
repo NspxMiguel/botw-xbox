@@ -18,8 +18,9 @@
 
 LatteTextureD3D12::LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, MPTR physAddress, MPTR physMipAddress, Latte::E_GX2SURFFMT format, uint32 width, uint32 height, uint32 depth, uint32 pitch, uint32 mipLevels,
 									 uint32 swizzle, Latte::E_HWTILEMODE tileMode, bool isDepth)
-	: LatteTexture(dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth), m_renderer(renderer)
+	: LatteTexture(dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth), m_definition{width, height, format, physAddress, tileMode, isDepth}, m_renderer(renderer)
 {
+	recordingId = renderer->RegisterResource(this);
 	if (const auto *plan = d3d12_packs::active_plan; plan && d3d12_packs::overrides_textures)
 	{
 		const packs::TextureDescription original{width, height, depth, uint32(format), uint32(tileMode),
@@ -116,22 +117,27 @@ LatteTextureD3D12::LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, 
 
 	m_planeCount = m_formatInfo.hasStencil ? 2 : 1;
 
+	m_renderer->InitializeTexture(recordingId);
+}
+
+void LatteTextureD3D12::CreateNative()
+{
 	D3D12_HEAP_PROPERTIES heapProps = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
 	const D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON;
-	HRESULT hr = renderer->GetDevice()->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &m_desc, initialState, nullptr, IID_PPV_ARGS(&m_resource));
-	D3D12_Checkpoint(renderer->GetDevice(), "game texture created");
+	HRESULT hr = m_renderer->GetDevice()->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE, &m_desc, initialState, nullptr, IID_PPV_ARGS(&m_resource));
+	D3D12_Checkpoint(m_renderer->GetDevice(), "game texture created");
 	if (FAILED(hr))
 	{
-		cemuLog_log(LogType::Force, "D3D12: Failed to create texture {}x{}x{} fmt {:04x} ({}): {}", m_desc.Width, m_desc.Height, m_desc.DepthOrArraySize, (uint32)format, (uint32)m_desc.Format, D3D12_HResultToString(hr));
+		cemuLog_log(LogType::Force, "D3D12: Failed to create texture {}x{}x{} fmt {:04x} ({}): {}", m_desc.Width, m_desc.Height, m_desc.DepthOrArraySize, (uint32)m_definition.format, (uint32)m_desc.Format, D3D12_HResultToString(hr));
 		if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET)
-			renderer->HandleDeviceError(hr, "CreateCommittedResource (texture)");
+			m_renderer->HandleDeviceError(hr, "CreateCommittedResource (texture)");
 		else if (hr == E_OUTOFMEMORY)
 			D3D12SetMemoryPressure(2); // the frontend clears it again once memory use is back down
 									   // otherwise keep going without a host resource. All users check GetResource() and views become null descriptors
 	}
-	else if (renderer->IsDebugNamingEnabled())
+	else if (m_renderer->IsDebugNamingEnabled())
 	{
-		D3D12_SetDebugName(m_resource.Get(), fmt::format("tex_{:08x}_fmt{:04x}_tm{:x}", physAddress, (uint32)format, (uint32)tileMode));
+		D3D12_SetDebugName(m_resource.Get(), fmt::format("tex_{:08x}_fmt{:04x}_tm{:x}", m_definition.physAddress, (uint32)m_definition.format, (uint32)m_definition.tileMode));
 	}
 	m_lastTransition.Clear();
 	++m_stateVersion;
@@ -141,6 +147,12 @@ LatteTextureD3D12::LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, 
 LatteTextureD3D12::~LatteTextureD3D12()
 {
 	cemu_assert_debug(views.empty());
+	m_renderer->ReleaseTexture(recordingId);
+	m_renderer->RetireResource(recordingId);
+}
+
+void LatteTextureD3D12::ReleaseNative()
+{
 	m_renderer->NotifyTextureRelease(this);
 	m_renderer->ReleaseResourceDeferred(std::move(m_resource));
 }

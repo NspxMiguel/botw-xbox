@@ -14,6 +14,15 @@
 CachedFBOD3D12::CachedFBOD3D12(D3D12Renderer *renderer, uint64 key)
 	: LatteCachedFBO(key), m_renderer(renderer)
 {
+	recordingId = renderer->RegisterResource(this);
+	for (uint32 i = 0; i < 8; ++i) m_colorViews[i] = static_cast<LatteTextureViewD3D12 *>(colorBuffer[i].texture);
+	m_depthView = static_cast<LatteTextureViewD3D12 *>(depthBuffer.texture);
+	m_renderer->InitializeFramebuffer(recordingId);
+}
+
+void CachedFBOD3D12::CreateNative()
+{
+	auto *renderer = m_renderer;
 	uint64 h = 0xcbf29ce484222325ull;
 	auto mix = [&h](uint64 v) {
 		h ^= v;
@@ -21,7 +30,7 @@ CachedFBOD3D12::CachedFBOD3D12(D3D12Renderer *renderer, uint64 key)
 	};
 	for (uint32 i = 0; i < 8; i++)
 	{
-		auto *view = (LatteTextureViewD3D12 *)colorBuffer[i].texture;
+		auto *view = m_colorViews[i];
 		if (!view)
 		{
 			m_rtvs[i] = renderer->GetNullRTV();
@@ -31,7 +40,7 @@ CachedFBOD3D12::CachedFBOD3D12(D3D12Renderer *renderer, uint64 key)
 		}
 		if (view->GetRTVFormat() == DXGI_FORMAT_UNKNOWN)
 		{
-			cemuLog_logDebugOnce(LogType::Force, "D3D12: Texture format {:04x} cannot be used as a render target", (uint32)view->format);
+			cemuLog_logDebugOnce(LogType::Force, "D3D12: Texture format {:04x} cannot be used as a render target", (uint32)view->GetNativeDefinition().format);
 			m_rtvs[i] = renderer->GetNullRTV();
 			m_rtvFormats[i] = DXGI_FORMAT_UNKNOWN;
 			mix(0);
@@ -43,7 +52,7 @@ CachedFBOD3D12::CachedFBOD3D12(D3D12Renderer *renderer, uint64 key)
 		m_numRTVs = i + 1;
 		mix((uint64)m_rtvFormats[i] + 1);
 	}
-	auto *depthView = (LatteTextureViewD3D12 *)depthBuffer.texture;
+	auto *depthView = m_depthView;
 	if (depthView)
 	{
 		m_hasDSV = true;
@@ -56,17 +65,23 @@ CachedFBOD3D12::CachedFBOD3D12(D3D12Renderer *renderer, uint64 key)
 
 CachedFBOD3D12::~CachedFBOD3D12()
 {
+	m_renderer->ReleaseFramebuffer(recordingId);
+	m_renderer->RetireResource(recordingId);
+}
+
+void CachedFBOD3D12::ReleaseNative()
+{
 	m_renderer->NotifyFBORelease(this);
 }
 
 LatteTextureViewD3D12 *CachedFBOD3D12::GetColorView(uint32 index) const
 {
-	return (LatteTextureViewD3D12 *)colorBuffer[index].texture;
+	return m_colorViews[index];
 }
 
 LatteTextureViewD3D12 *CachedFBOD3D12::GetDepthView() const
 {
-	return (LatteTextureViewD3D12 *)depthBuffer.texture;
+	return m_depthView;
 }
 
 #endif // ENABLE_D3D12

@@ -27,6 +27,7 @@ class D3D12ImGuiRenderer
 
 	void *CreateTexture(const uint8 *rgba, sint32 width, sint32 height);
 	void DestroyTexture(void *texture);
+	void UploadTexture(void *texture, const uint8 *rgba, uint32 width, uint32 firstRow, uint32 rows, bool last);
 
 	void Render(ImDrawData *drawData, D3D12_CPU_DESCRIPTOR_HANDLE rtv, DXGI_FORMAT rtvFormat, uint32 targetWidth, uint32 targetHeight);
 
@@ -44,5 +45,5 @@ class D3D12ImGuiRenderer
 	std::unique_ptr<RendererShaderD3D12> m_ps;
 	ComPtr<ID3D12PipelineState> m_pipeline;
 	DXGI_FORMAT m_pipelineFormat = DXGI_FORMAT_UNKNOWN;
-	Texture *m_fontTexture = nullptr;
+	void *m_fontTexture = nullptr;
 };

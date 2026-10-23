@@ -13,6 +13,7 @@
 LatteTextureReadbackInfoD3D12::LatteTextureReadbackInfoD3D12(D3D12Renderer *renderer, LatteTextureView *textureView)
 	: LatteTextureReadbackInfo(textureView, textureView->firstMip), m_renderer(renderer)
 {
+	m_recordingId = m_renderer->RegisterResource(this);
 	auto *baseTexture = static_cast<LatteTextureD3D12 *>(textureView->baseTexture);
 	if (!baseTexture->GetResource() || baseTexture->IsAlternateFormat() || baseTexture->IsCompressedFormat())
 	{
@@ -27,22 +28,24 @@ LatteTextureReadbackInfoD3D12::LatteTextureReadbackInfoD3D12(D3D12Renderer *rend
 
 void LatteTextureReadbackInfoD3D12::StartTransfer()
 {
-	cemu_assert(m_textureView);
-	auto *baseTexture = static_cast<LatteTextureD3D12 *>(m_textureView->baseTexture);
-	cemu_assert_debug(baseTexture->dim != Latte::E_DIM::DIM_3D);
+	Dispatch(0);
+	m_textureView = nullptr;
+}
 
-	m_bufferOffset = m_renderer->m_readbackRing->Allocate(m_image_size, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-	m_renderer->TransitionTexture(baseTexture, m_firstMip, 1, m_firstSlice, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
+void LatteTextureReadbackInfoD3D12::RecordStart(LattePipeline::ResourceId texture, uint32 mip, uint32 slice, uint32 rowPitch, uint32 imageSize, uint32 width, uint32 height)
+{
+	auto *baseTexture = m_renderer->m_resources.Get<LatteTextureD3D12>(texture);
+
+	m_bufferOffset = m_renderer->m_readbackRing->Allocate(imageSize, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+	m_renderer->TransitionTexture(baseTexture, mip, 1, slice, 1, D3D12_RESOURCE_STATE_COPY_SOURCE);
 	m_renderer->FlushBarriers();
 
-	const uint32 sub = baseTexture->GetSubresourceIndex(m_firstMip, m_firstSlice, 0);
+	const uint32 sub = baseTexture->GetSubresourceIndex(mip, slice, 0);
 	D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout;
 	UINT numRows;
 	UINT64 rowSize, totalBytes;
 	m_renderer->GetDevice()->GetCopyableFootprints(&baseTexture->GetDesc(), sub, 1, 0, &layout, &numRows, &rowSize, &totalBytes);
 
-	const uint32 width = baseTexture->GetMipWidth(m_firstMip);
-	const uint32 height = baseTexture->GetMipHeight(m_firstMip);
 
 	D3D12_TEXTURE_COPY_LOCATION src{};
 	src.pResource = baseTexture->GetResource();
@@ -56,27 +59,25 @@ void LatteTextureReadbackInfoD3D12::StartTransfer()
 	dst.PlacedFootprint.Footprint.Width = std::min<uint32>(width, layout.Footprint.Width);
 	dst.PlacedFootprint.Footprint.Height = std::min<uint32>(height, layout.Footprint.Height);
 	dst.PlacedFootprint.Footprint.Depth = 1;
-	dst.PlacedFootprint.Footprint.RowPitch = m_rowPitch;
+	dst.PlacedFootprint.Footprint.RowPitch = rowPitch;
 	D3D12_BOX box{0, 0, 0, dst.PlacedFootprint.Footprint.Width, dst.PlacedFootprint.Footprint.Height, 1};
 	m_renderer->GetCommandList()->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
 
 	m_submissionId = m_renderer->GetRecordingSubmissionId();
 	m_renderer->m_hasRecordedWork = true;
-	m_textureView = nullptr;
 	// reduce readback latency by submitting soon
 	m_renderer->RequestSubmitSoon();
 }
 
-bool LatteTextureReadbackInfoD3D12::IsFinished()
+bool LatteTextureReadbackInfoD3D12::RecordFinished()
 {
 	if (m_submissionId > m_renderer->m_lastSubmittedFenceValue)
 		return false; // still in the command list that is being recorded
 	return m_renderer->GetCompletedSubmissionId() >= m_submissionId;
 }
 
-void LatteTextureReadbackInfoD3D12::ForceFinish()
+void LatteTextureReadbackInfoD3D12::RecordForceFinish()
 {
-	LatteProfiler::Add(LatteProfiler::Counter::ForcedReadbacks);
 	if (m_submissionId > m_renderer->m_lastSubmittedFenceValue)
 		m_renderer->SubmitCommandList(false);
 	m_renderer->WaitForSubmission(m_submissionId);
@@ -84,7 +85,56 @@ void LatteTextureReadbackInfoD3D12::ForceFinish()
 
 uint8 *LatteTextureReadbackInfoD3D12::GetData()
 {
-	return m_renderer->m_readbackRing->GetCPUPtr(m_bufferOffset);
+	Dispatch(3);
+	return m_replyData;
+}
+
+
+LatteTextureReadbackInfoD3D12::~LatteTextureReadbackInfoD3D12()
+{
+	m_renderer->RetireResource(m_recordingId);
+}
+
+bool LatteTextureReadbackInfoD3D12::IsFinished()
+{
+	Dispatch(1); return m_replyFinished;
+}
+void LatteTextureReadbackInfoD3D12::ForceFinish()
+{
+	LatteProfiler::Add(LatteProfiler::Counter::ForcedReadbacks);
+	Dispatch(2);
+}
+void LatteTextureReadbackInfoD3D12::Dispatch(uint32 action)
+{
+	m_renderer->m_pipeline.CheckFront();
+	D3D12Renderer::ReadbackPacket packet{};
+	packet.readback = m_recordingId; packet.action = action;
+	if (action == 0)
+	{
+		cemu_assert(m_textureView);
+		auto *texture = static_cast<LatteTextureD3D12 *>(m_textureView->baseTexture);
+		cemu_assert_debug(!texture->Is3DTexture());
+		packet.texture = texture->recordingId; packet.mip = m_firstMip; packet.slice = m_firstSlice;
+		packet.rowPitch = m_rowPitch; packet.imageSize = m_image_size;
+		packet.width = texture->GetMipWidth(m_firstMip); packet.height = texture->GetMipHeight(m_firstMip);
+	}
+	m_renderer->m_operations.Execute<D3D12Renderer::ReadbackPacket, &D3D12Renderer::readback_record>(m_renderer->m_pipeline, LattePipeline::Opcode::Readback, packet, *m_renderer);
+}
+
+void D3D12Renderer::readback_record(const ReadbackPacket &packet, const LattePipeline::Arena &)
+{
+	m_pipeline.CheckBack();
+	auto *readback = m_resources.Get<LatteTextureReadbackInfoD3D12>(packet.readback);
+	switch (packet.action)
+	{
+	case 0: readback->RecordStart(packet.texture, packet.mip, packet.slice, packet.rowPitch, packet.imageSize, packet.width, packet.height); break;
+	case 1: readback->m_replyFinished = readback->RecordFinished(); break;
+	case 2: readback->RecordForceFinish(); break;
+	case 3: readback->m_replyData = m_readbackRing->GetCPUPtr(readback->m_bufferOffset); break;
+	default: throw std::logic_error("Invalid Latte readback operation");
+	}
+	for (auto id : {packet.readback, packet.texture}) m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
+
 }
 
 #endif // ENABLE_D3D12
