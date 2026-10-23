@@ -263,7 +263,7 @@ int main() {
     exact(diagnose(layered_probe({filesystem_probe(folder), filesystem_probe(update)}), folder.string(),
                    Format::folder),
           {{"aoc/", IssueKind::optional}});
-    auto nus = root / "cdn";
+    auto nus = root / "install";
     std::string tmd(0xb04 + 3 * 0x30, '\0');
     auto put = [&](size_t at, uint64_t value, size_t n) {
         for (size_t i = 0; i < n; ++i)

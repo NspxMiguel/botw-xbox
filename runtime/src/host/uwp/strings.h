@@ -368,8 +368,8 @@ inline std::wstring_view text(Text key, bool pt) {
          {L".wud / .wux: disc image + game.key (or same basename .key / keys.txt) + otp.bin or common.key.",
           L".wud / .wux: imagem do disco + game.key (ou mesmo nome .key / keys.txt) + otp.bin ou "
           L"common.key."},
-         {L"NUS/CDN: title.tmd + title.tik + title.cert + every <id>.app (+ <id>.h3 for hashed contents).",
-          L"NUS/CDN: title.tmd + title.tik + title.cert + todos os <id>.app (+ <id>.h3 nos conteúdos com "
+         {L"Installable dump from your own console (Dumpling): title.tmd + title.tik + title.cert + every <id>.app (+ <id>.h3 for hashed contents).",
+          L"Dump instalável do seu próprio console (Dumpling): title.tmd + title.tik + title.cert + todos os <id>.app (+ <id>.h3 nos conteúdos com "
           L"hash)."},
          {L".wua: complete Cemu archive.", L".wua: arquivo completo do Cemu."},
          {L".zip / .7z: complete archive containing any form above.",
