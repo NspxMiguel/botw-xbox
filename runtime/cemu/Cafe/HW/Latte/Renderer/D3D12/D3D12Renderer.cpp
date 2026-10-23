@@ -6,6 +6,7 @@
 // BotWRecomp: iOS also globs this directory; keep non-D3D12 builds platform-neutral.
 #ifdef ENABLE_D3D12
 
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12FrameInterpolator.h"
@@ -478,6 +479,7 @@ void D3D12Renderer::ResetCommandList()
 
 void D3D12Renderer::SubmitCommandList(bool waitIdle)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Submit);
 	occlusionQuery_notifyEndCommandList();
 	FlushBarriers();
 	if (m_simSeriesS)
@@ -955,6 +957,7 @@ bool D3D12Renderer::AcquireBackbuffer(bool mainWindow)
 
 void D3D12Renderer::PresentSwapChain(bool mainWindow)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Unaccounted);
 	ServicePendingPresent(true);
 	D3D12SwapChain *swapChain = GetSwapChainObj(mainWindow);
 	if (!swapChain || !swapChain->IsValid())
@@ -1029,6 +1032,7 @@ void D3D12Renderer::ServicePendingPresent(bool force)
 		return;
 	if (!force && std::chrono::steady_clock::now() < m_pendingPresentAt)
 		return;
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Unaccounted);
 	D3D12SwapChain *swapChain = m_pendingPresentSwapChain;
 	m_pendingPresentSwapChain = nullptr;
 	if (!swapChain->Present(0))
@@ -1042,21 +1046,32 @@ void D3D12Renderer::UpdatePresentDiagnostics(D3D12SwapChain *swapChain, bool int
 	if (m_presentWindowStart == std::chrono::steady_clock::time_point{})
 	{
 		m_presentWindowStart = now;
+		m_presentLogStart = now;
+		LatteProfiler::Reset(now);
+		extern std::atomic<uint64> g_latteIdleNs;
+		g_latteIdleNs.exchange(0);
+		m_fenceWaitMs = 0;
 		swapChain->TakePresentStats();
 		swapChain->MeasureRefreshRate();
 		return;
 	}
+	++m_presentLogFrames; // Main swap chain calls count source game frames, not interpolated presents.
 	const double seconds = std::chrono::duration<double>(now - m_presentWindowStart).count();
 	if (seconds < 2.0)
 		return;
 	m_presentWindowStart = now;
 	const D3D12SwapChain::PresentStats stats = swapChain->TakePresentStats();
 	const double hz = swapChain->MeasureRefreshRate();
-	// Where a frame's time goes: blocked in Present is vsync/queue, fence waits are the GPU, the rest is the Latte thread.
-	++m_presentLogWindows;
+	// Keep the 2 s refresh-rate checks, but log and profile the same complete 10 s interval.
+	extern std::atomic<uint64> g_latteIdleNs;
+	m_presentLogIdleNs += g_latteIdleNs.exchange(0);
+	m_presentLogPresents += stats.presents;
+	m_presentLogBlockedMs += stats.blockedMs;
+	m_presentLogMaxBlockedMs = std::max(m_presentLogMaxBlockedMs, stats.maxBlockedMs);
+	m_presentLogFenceWaitMs += m_fenceWaitMs;
+	const double logSeconds = std::chrono::duration<double>(now - m_presentLogStart).count();
+	if (logSeconds >= 10.0)
 	{
-		extern std::atomic<uint64> g_latteIdleNs;
-		const double idleMs = g_latteIdleNs.exchange(0) / 1e6;
 		// This runs on the Latte thread: its CPU time against the wall clock shows preemption by other threads.
 		FILETIME created, exited, kernel, user;
 		double cpuMs = 0;
@@ -1066,11 +1081,18 @@ void D3D12Renderer::UpdatePresentDiagnostics(D3D12SwapChain *swapChain, bool int
 			cpuMs = m_latteCpuTime ? (total - m_latteCpuTime) / 1e4 : 0;
 			m_latteCpuTime = total;
 		}
-		if (m_presentLogWindows % 5 == 0)
-			cemuLog_log(LogType::Force, "D3D12: {:.1f} presents/s, Present blocked {:.1f} ms/frame (max {:.1f}), GPU fence wait {:.1f} ms/frame, Latte idle {:.0f}%, Latte CPU {:.0f}%, {} cores",
-				stats.presents / seconds, stats.presents ? stats.blockedMs / stats.presents : 0.0, stats.maxBlockedMs,
-				stats.presents ? m_fenceWaitMs / stats.presents : 0.0, idleMs / (seconds * 10), cpuMs / (seconds * 10),
-				std::thread::hardware_concurrency());
+		cemuLog_log(LogType::Force, "D3D12: {:.1f} presents/s, Present blocked {:.1f} ms/frame (max {:.1f}), GPU fence wait {:.1f} ms/frame, Latte idle {:.0f}%, Latte CPU {:.0f}%, {} cores",
+					m_presentLogPresents / logSeconds, m_presentLogPresents ? m_presentLogBlockedMs / m_presentLogPresents : 0.0, m_presentLogMaxBlockedMs,
+					m_presentLogPresents ? m_presentLogFenceWaitMs / m_presentLogPresents : 0.0, m_presentLogIdleNs / (logSeconds * 1e7),
+					cpuMs / (logSeconds * 10), std::thread::hardware_concurrency());
+		LatteProfiler::Report(now, logSeconds, m_presentLogFrames);
+		m_presentLogStart = now;
+		m_presentLogFrames = 0;
+		m_presentLogPresents = 0;
+		m_presentLogBlockedMs = 0;
+		m_presentLogMaxBlockedMs = 0;
+		m_presentLogFenceWaitMs = 0;
+		m_presentLogIdleNs = 0;
 	}
 	m_fenceWaitMs = 0;
 	if (!interpolationWanted)
@@ -1658,6 +1680,7 @@ void D3D12Renderer::texture_setLatteTexture(LatteTextureView *textureView, uint3
 
 void D3D12Renderer::texture_loadSlice(LatteTexture *hostTexture, sint32 width, sint32 height, sint32 depth, void *pixelData, sint32 sliceIndex, sint32 mipIndex, uint32 compressedImageSize)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::TextureLoad);
 	auto *tex = static_cast<LatteTextureD3D12 *>(hostTexture);
 	ID3D12Resource *resource = tex->GetResource();
 	if (!resource)
@@ -1702,6 +1725,8 @@ void D3D12Renderer::texture_loadSlice(LatteTexture *hostTexture, sint32 width, s
 		srcLoc.PlacedFootprint.Footprint.Depth = 1;
 		srcLoc.PlacedFootprint.Footprint.RowPitch = rowPitch;
 		m_cmdList->CopyTextureRegion(&dst, 0, 0, is3D ? (UINT)sliceIndex : 0, &srcLoc, nullptr);
+		// Payload bytes copied, excluding upload row padding; depth/stencil planes count separately.
+		LatteProfiler::Add(LatteProfiler::Counter::TextureBytes, (uint64)copyRowBytes * copyRows);
 	};
 
 	if (!fmt.hasStencil)
@@ -2025,11 +2050,13 @@ void D3D12Renderer::bufferCache_init(const sint32 bufferSize)
 
 void D3D12Renderer::bufferCache_upload(uint8 *buffer, sint32 size, uint32 bufferOffset)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::BufferSync);
 	D3D12UploadAllocation upload = AllocateUpload((uint64)size, 16);
 	memcpy(upload.cpuPtr, buffer, size);
 	TransitionResource(m_bufferCache.Get(), m_bufferCacheState, D3D12_RESOURCE_STATE_COPY_DEST);
 	FlushBarriers();
 	m_cmdList->CopyBufferRegion(m_bufferCache.Get(), bufferOffset, upload.resource, upload.offset, (UINT64)size);
+	LatteProfiler::Add(LatteProfiler::Counter::BufferBytes, size);
 	m_hasRecordedWork = true;
 }
 

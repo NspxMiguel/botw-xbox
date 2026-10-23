@@ -1,3 +1,7 @@
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
+
+#include <algorithm>
+
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Cafe/HW/Latte/Core/LatteOverlay.h"
 #include "WindowSystem.h"
@@ -120,4 +124,44 @@ void LattePerformanceMonitor_frameBegin()
 {
 	performanceMonitor.vk.numDrawBarriersPerFrame.reset();
 	performanceMonitor.vk.numBeginRenderpassPerFrame.reset();
+}
+
+void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frames)
+{
+	if (!s_state.enabled || !frames || seconds <= 0.0)
+		return;
+	Checkpoint(now);
+	constexpr size_t count = static_cast<size_t>(Slot::Count);
+	constexpr std::array<const char *, count> names{
+		"draw-other", "shader-pipeline", "texture-bind", "texture-load", "buffer-sync", "indices",
+		"uniforms", "descriptors", "render-targets", "submit", "pm4"};
+	std::array<size_t, count> order{};
+	int64_t coveredNs = 0;
+	for (size_t i = 0; i < count; ++i)
+	{
+		order[i] = i;
+		coveredNs += s_state.timeNs[i];
+	}
+	std::sort(order.begin(), order.end(), [](size_t a, size_t b) {
+		return s_state.timeNs[a] != s_state.timeNs[b] ? s_state.timeNs[a] > s_state.timeNs[b] : a < b;
+	});
+	const double msPerNsPerFrame = 1.0 / (1e6 * frames);
+	const auto ms = [&](Slot slot) { return s_state.timeNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };
+	const auto perFrame = [&](Counter counter) { return (double)s_state.counters[static_cast<size_t>(counter)] / frames; };
+	const double covered = std::clamp(coveredNs / (seconds * 1e9), 0.0, 1.0);
+	cemuLog_log(LogType::Force,
+				"Latte profile: {:.2f}s, {} game frames, {:.1f} draws/frame; ms/frame: draw-total {:.3f} (inclusive), "
+				"draw-other {:.3f}, shader-pipeline {:.3f}, texture-bind {:.3f}, texture-load {:.3f}, buffer-sync {:.3f}, "
+				"indices {:.3f}, uniforms {:.3f}, descriptors {:.3f}, render-targets {:.3f}, submit {:.3f}, pm4 {:.3f}; "
+				"top: {} {:.3f}, {} {:.3f}, {} {:.3f}; covered {:.1f}%, unaccounted {:.1f}% ({:.3f} ms/frame); "
+				"pipeline-miss/frame {:.2f}, texture-new/frame {:.2f}, texture-upload {:.0f} B/frame, buffer-upload {:.0f} B/frame",
+				seconds, frames, perFrame(Counter::Draws), s_state.drawTotalNs * msPerNsPerFrame,
+				ms(Slot::DrawOther), ms(Slot::ShaderPipeline), ms(Slot::TextureBinding), ms(Slot::TextureLoad), ms(Slot::BufferSync),
+				ms(Slot::Indices), ms(Slot::Uniforms), ms(Slot::Descriptors), ms(Slot::RenderTargets), ms(Slot::Submit), ms(Slot::Pm4),
+				names[order[0]], s_state.timeNs[order[0]] * msPerNsPerFrame,
+				names[order[1]], s_state.timeNs[order[1]] * msPerNsPerFrame,
+				names[order[2]], s_state.timeNs[order[2]] * msPerNsPerFrame,
+				covered * 100.0, (1.0 - covered) * 100.0, (1.0 - covered) * seconds * 1000.0 / frames,
+				perFrame(Counter::PipelineMisses), perFrame(Counter::TextureMisses), perFrame(Counter::TextureBytes), perFrame(Counter::BufferBytes));
+	Reset(now);
 }

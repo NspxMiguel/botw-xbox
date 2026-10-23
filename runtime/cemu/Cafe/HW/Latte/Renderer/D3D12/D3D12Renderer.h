@@ -431,7 +431,14 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	// interpolation presents twice per game frame, which halves the game's speed on a display under 100 Hz: measured every
 	// 2 s from the main swap chain (UpdatePresentDiagnostics), interpolation is paused while the display is that slow
 	double m_fenceWaitMs = 0;
-	uint32 m_presentLogWindows = 0;
+	// Present diagnostics and Latte profiling share this complete 10 s window.
+	std::chrono::steady_clock::time_point m_presentLogStart{};
+	uint64 m_presentLogFrames = 0;
+	uint64 m_presentLogPresents = 0;
+	double m_presentLogBlockedMs = 0;
+	double m_presentLogMaxBlockedMs = 0;
+	double m_presentLogFenceWaitMs = 0;
+	uint64 m_presentLogIdleNs = 0;
 	uint64 m_latteCpuTime = 0;
 	bool m_interpolationPaused = false;
 	// Xbox: vsynced presents run at 60 Hz while the HDMI mode is 120 Hz. Then both frames are presented without vsync and

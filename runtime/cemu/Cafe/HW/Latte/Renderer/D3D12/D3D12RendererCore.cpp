@@ -9,6 +9,7 @@
 // BotWRecomp: iOS also globs this directory; keep non-D3D12 builds platform-neutral.
 #ifdef ENABLE_D3D12
 
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12ShaderCompiler.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12PipelineCache.h"
@@ -115,6 +116,7 @@ void D3D12Renderer::draw_handleSpecialState5()
 
 bool D3D12Renderer::draw_prepareUniformVars(LatteDecompilerShader *shader, D3D12_GPU_VIRTUAL_ADDRESS &addressOut, uint32 &sizeOut)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Uniforms);
 	addressOut = 0;
 	sizeOut = 0;
 	if (shader->resourceMapping.uniformVarsBufferBindingPoint < 0)
@@ -289,6 +291,7 @@ void D3D12Renderer::draw_buildSamplerDesc(LatteDecompilerShader *shader, uint32 
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTableDesc &tableDesc)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
 	using namespace D3D12Const;
 	auto table = m_gpuViewHeap->AllocateTable(kStageTableSize);
 	for (uint32 i = 0; i < kMaxCBVsPerStage; i++)
@@ -361,6 +364,7 @@ void D3D12Renderer::draw_transitionInputTextures(LatteDecompilerShader *shader)
 
 void D3D12Renderer::draw_buildStageBindings(LatteDecompilerShader *shader, RendererShaderD3D12 *hostShader, const D3D12_GPU_VIRTUAL_ADDRESS uniformVarAddress, uint32 uniformVarSize, PreparedStageBindings &out)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
 	using namespace D3D12Const;
 	const Stage stage = D3D12StageFromLatte(shader->shaderType);
 	const D3D12BindingRemap &remap = hostShader->GetBindingRemap();
@@ -391,48 +395,51 @@ void D3D12Renderer::draw_buildStageBindings(LatteDecompilerShader *shader, Rende
 		tableDesc.cbvSize[reg] = std::min<uint32>(stageBindings.uniformBufferSize[i], D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
 	}
 
-	// textures + samplers
-	D3D12_SAMPLER_DESC *samplers = out.samplers;
-	for (uint32 i = 0; i < kMaxSamplersPerStage; i++)
 	{
-		auto &s = samplers[i];
-		s = {};
-		s.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-		s.AddressU = s.AddressV = s.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-		s.MaxAnisotropy = 1;
-		s.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-	}
-	out.samplerCount = std::max<uint32>(remap.srvCount, 1);
-	out.samplerTable = {};
-	const sint32 textureBase = mapping.getTextureBaseBindingPoint();
-	const sint32 textureCount = mapping.getTextureCount();
-	for (sint32 i = 0; i < textureCount && textureBase >= 0; i++)
-	{
-		const sint32 reg = remap.GetSRV(textureBase + i);
-		if (reg < 0)
-			continue;
-		const uint32 relativeTextureUnit = mapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
-		const Latte::E_DIM shaderDim = shader->textureUnitDim[relativeTextureUnit];
-		uint32 texUnitRegIndex;
-		LatteTextureViewD3D12 *view = _GetBoundTextureForShader(m_state.boundTexture, shader, relativeTextureUnit, texUnitRegIndex);
-		bool dimMismatch = false;
-		if (view)
+		LatteProfiler::Scope textureScope(LatteProfiler::Slot::TextureBinding);
+		// textures + samplers
+		D3D12_SAMPLER_DESC *samplers = out.samplers;
+		for (uint32 i = 0; i < kMaxSamplersPerStage; i++)
 		{
-			if (shaderDim == Latte::E_DIM::DIM_1D && view->dim != Latte::E_DIM::DIM_1D)
-				dimMismatch = true;
-			else if (shaderDim == Latte::E_DIM::DIM_2D && view->dim != Latte::E_DIM::DIM_2D && view->dim != Latte::E_DIM::DIM_2D_MSAA)
-				dimMismatch = true;
+			auto &s = samplers[i];
+			s = {};
+			s.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+			s.AddressU = s.AddressV = s.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			s.MaxAnisotropy = 1;
+			s.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
 		}
-		if (!view || dimMismatch)
+		out.samplerCount = std::max<uint32>(remap.srvCount, 1);
+		out.samplerTable = {};
+		const sint32 textureBase = mapping.getTextureBaseBindingPoint();
+		const sint32 textureCount = mapping.getTextureCount();
+		for (sint32 i = 0; i < textureCount && textureBase >= 0; i++)
 		{
-			tableDesc.srv[reg] = GetNullSRV(shaderDim);
+			const sint32 reg = remap.GetSRV(textureBase + i);
+			if (reg < 0)
+				continue;
+			const uint32 relativeTextureUnit = mapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
+			const Latte::E_DIM shaderDim = shader->textureUnitDim[relativeTextureUnit];
+			uint32 texUnitRegIndex;
+			LatteTextureViewD3D12 *view = _GetBoundTextureForShader(m_state.boundTexture, shader, relativeTextureUnit, texUnitRegIndex);
+			bool dimMismatch = false;
+			if (view)
+			{
+				if (shaderDim == Latte::E_DIM::DIM_1D && view->dim != Latte::E_DIM::DIM_1D)
+					dimMismatch = true;
+				else if (shaderDim == Latte::E_DIM::DIM_2D && view->dim != Latte::E_DIM::DIM_2D && view->dim != Latte::E_DIM::DIM_2D_MSAA)
+					dimMismatch = true;
+			}
+			if (!view || dimMismatch)
+			{
+				tableDesc.srv[reg] = GetNullSRV(shaderDim);
+			}
+			else
+			{
+				const uint32 word4 = LatteGPUState.contextRegister[texUnitRegIndex + 4];
+				tableDesc.srv[reg] = view->GetSRV(word4);
+			}
+			draw_buildSamplerDesc(shader, relativeTextureUnit, view, samplers[reg]);
 		}
-		else
-		{
-			const uint32 word4 = LatteGPUState.contextRegister[texUnitRegIndex + 4];
-			tableDesc.srv[reg] = view->GetSRV(word4);
-		}
-		draw_buildSamplerDesc(shader, relativeTextureUnit, view, samplers[reg]);
 	}
 
 	// transform feedback via UAV
@@ -445,6 +452,7 @@ void D3D12Renderer::draw_buildStageBindings(LatteDecompilerShader *shader, Rende
 
 void D3D12Renderer::draw_acquireSamplerTables(PreparedStageBindings *stages, uint32 count)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
 	// all tables of a draw have to come from the same generation of the sampler heap
 	for (int attempt = 0; attempt < 2; attempt++)
 	{
@@ -464,6 +472,7 @@ void D3D12Renderer::draw_acquireSamplerTables(PreparedStageBindings *stages, uin
 
 void D3D12Renderer::draw_applyRenderTargets()
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::RenderTargets);
 	CachedFBOD3D12 *fbo = m_state.activeFBO;
 	for (uint32 i = 0; i < 8; i++)
 	{

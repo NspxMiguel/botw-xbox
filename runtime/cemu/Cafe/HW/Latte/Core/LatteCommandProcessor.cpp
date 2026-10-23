@@ -1,3 +1,4 @@
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/OS/libs/gx2/GX2.h" // for write gatherer and special state. Get rid of dependency
 #include "Cafe/OS/libs/gx2/GX2_Event.h" // for notification callbacks
@@ -52,6 +53,7 @@ public:
 
 	void beginDrawPass()
 	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
 		m_drawPassActive = true;
 		m_drawcallContext.isFirst = true;
 		m_drawcallContext.vertexBufferDirtyMask = 0;
@@ -65,6 +67,7 @@ public:
 
 	void executeDraw(uint32 count, bool isAutoIndex, MPTR physIndices)
 	{
+		LatteProfiler::Add(LatteProfiler::Counter::Draws);
 		uint32 baseVertex = LatteGPUState.contextRegister[mmSQ_VTX_BASE_VTX_LOC];
 		uint32 baseInstance = LatteGPUState.contextRegister[mmSQ_VTX_START_INST_LOC];
 		uint32 numInstances = LatteGPUState.contextNew.VGT_DMA_NUM_INSTANCES.get_NUM_INSTANCES();
@@ -95,6 +98,7 @@ public:
 
 	void endDrawPass()
 	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
 		g_renderer->draw_endSequence();
 		m_drawPassActive = false;
 	}
@@ -174,6 +178,7 @@ uint32 LatteCP_readU32Deprc()
 	if ( TCL::TCLGPUReadRBWord(cmdWord) )
 		return cmdWord;
 	// Time the Latte thread waits for the game to submit commands (D3D12 present diagnostics report it).
+	LatteProfiler::Scope profileIdle(LatteProfiler::Slot::Unaccounted);
 	const auto idleStart = std::chrono::steady_clock::now();
 	struct IdleTimer
 	{
@@ -465,6 +470,7 @@ LatteCMDPtr LatteCP_itNumInstances(LatteCMDPtr cmd, uint32 nWords)
 
 LatteCMDPtr LatteCP_itWaitRegMem(LatteCMDPtr cmd, uint32 nWords)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Unaccounted);
 	cemu_assert_debug(nWords == 6);
 	uint32 word0 = LatteReadCMD();
 	uint32 word1 = LatteReadCMD();
@@ -633,6 +639,7 @@ LatteCMDPtr LatteCP_itEventWriteEOP(LatteCMDPtr cmd, uint32 nWords)
 
 LatteCMDPtr LatteCP_itMemSemaphore(LatteCMDPtr cmd, uint32 nWords)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Unaccounted);
 	cemu_assert_debug(nWords == 2);
 	MPTR semaphorePhysicalAddress = LatteReadCMD();
 	uint32 semaphoreControl = LatteReadCMD();
@@ -741,6 +748,7 @@ LatteCMDPtr LatteCP_itSetPredication(LatteCMDPtr cmd, uint32 nWords)
 
 LatteCMDPtr LatteCP_itDrawIndex2(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
 	cemu_assert_debug(nWords == 5);
 	uint32 ukn1 = LatteReadCMD();
 	MPTR physIndices = LatteReadCMD();
@@ -755,6 +763,7 @@ LatteCMDPtr LatteCP_itDrawIndex2(LatteCMDPtr cmd, uint32 nWords, DrawPassContext
 
 LatteCMDPtr LatteCP_itDrawIndexAuto(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
 	cemu_assert_debug(nWords == 2);
 	uint32 count = LatteReadCMD();
 	uint32 ukn = LatteReadCMD();
@@ -778,6 +787,7 @@ MPTR _tempIndexArrayMPTR = MPTR_NULL;
 
 LatteCMDPtr LatteCP_itDrawImmediate(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
 	uint32 count = LatteReadCMD();
 	uint32 ukn1 = LatteReadCMD();
 	// reserve array for index data	
@@ -976,6 +986,7 @@ LatteCMDPtr LatteCP_itHLESwapScanBuffer(LatteCMDPtr cmd, uint32 nWords)
 
 LatteCMDPtr LatteCP_itHLEWaitForFlip(LatteCMDPtr cmd, uint32 nWords)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Unaccounted);
 	catchOpenGLError();
 	cemu_assert_debug(nWords == 1);
 	MPTR reserved1 = LatteReadCMD(); // reserved
@@ -1477,6 +1488,7 @@ void LatteCP_processCommandBuffer(DrawPassContext& drawPassCtx)
 
 void LatteCP_ProcessRingbuffer()
 {
+	LatteProfiler::ThreadScope profileThread;
 	sint32 timerRecheck = 0; // estimates how much CP processing time has elapsed based on the executed commands, if the value exceeds CP_TIMER_RECHECK then _handleTimers() is called
 	uint32be tmpBuffer[128];
 	while (true)
