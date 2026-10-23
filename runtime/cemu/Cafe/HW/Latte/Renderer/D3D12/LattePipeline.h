@@ -375,9 +375,11 @@ class Arena
 		if (bytes.size() > m_capacity)
 			return false;
 		const uint64_t read = m_consumed.load(std::memory_order_acquire);
-		uint64_t start = (m_written + 15) & ~uint64_t{15};
-		if (start % m_capacity + bytes.size() > m_capacity)
-			start += m_capacity - start % m_capacity;
+		const uint64_t offset = m_written % m_capacity;
+		const uint64_t alignedOffset = (offset + 15) & ~uint64_t{15};
+		// Alignment belongs to the physical buffer, not the absolute cursor:
+		// a configured capacity need not be a multiple of sixteen bytes.
+		const uint64_t start = m_written + ((alignedOffset + bytes.size() > m_capacity) ? m_capacity - offset : alignedOffset - offset);
 		if (start + bytes.size() - read > m_capacity)
 			return false;
 		if (!bytes.empty())

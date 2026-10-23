@@ -212,6 +212,15 @@ static void ArenaTests()
 	assert(arena.Read(third).back() == std::byte{0x42});
 	arena.Retire(arena.End());
 	arena.ResetEmpty();
+	Arena oddArena(65);
+	for (size_t i = 0; i < 1000; ++i)
+	{
+		const size_t size = i % 3 == 0 ? 17 : 32;
+		Span span;
+		assert(oddArena.Copy(std::span{bytes}.first(size), span));
+		assert(reinterpret_cast<uintptr_t>(oddArena.Read(span).data()) % 16 == 0);
+		oddArena.Retire(oddArena.End());
+	}
 	std::array<std::byte, 65> tooLarge{};
 	assert(!arena.Copy(tooLarge, first));
 }
