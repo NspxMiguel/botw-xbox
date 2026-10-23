@@ -10,6 +10,9 @@
 #include <condition_variable>
 #include <exception>
 #include <functional>
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
 
 // Platform-neutral handoff contracts, also exercised by the host tests.
 namespace LattePipeline
@@ -663,6 +666,20 @@ class Event
 	}
 	void Wait(uint64_t epoch)
 	{
+		// Short producer/consumer gaps should not pay a kernel wakeup. This is
+		// bounded and uses processor pause hints; genuinely idle workers sleep.
+		for (unsigned spin = 0; spin < 256; ++spin)
+		{
+			if (Epoch() != epoch)
+				return;
+#if defined(__x86_64__) || defined(_M_X64)
+			_mm_pause();
+#elif defined(__aarch64__)
+			asm volatile("yield");
+#else
+			std::atomic_signal_fence(std::memory_order_seq_cst);
+#endif
+		}
 		std::unique_lock lock(m_mutex);
 		m_waiting.fetch_add(1, std::memory_order_seq_cst);
 		m_cv.wait_for(lock, std::chrono::milliseconds(1), [&] { return Epoch() != epoch; });
@@ -692,7 +709,7 @@ struct Completion
 struct PipelineTiming
 {
 	uint64_t backBusyNs = 0, backIdleNs = 0;
-	uint64_t backpressureNs = 0, replyWaitNs = 0, highWater = 0;
+	uint64_t backpressureNs = 0, replyWaitNs = 0, highWater = 0, completionMessages = 0;
 };
 
 class Stream
@@ -860,7 +877,9 @@ class Stream
 			std::memcpy(packet.payload.data(), &value, sizeof(T));
 			packet.record = [](void *target, const Packet &p, const Arena &arena) { (static_cast<Owner *>(target)->*Record)(p.As<T>(), arena); };
 		};
-		if (context.Queued())
+		// Mode 1 consumes the same immutable packet immediately on this actor.
+		// Ring cursor publication is useful only when another actor consumes it.
+		if (m_threaded)
 		{
 			auto *slot = m_ring.TryWrite();
 			if (!slot)
@@ -868,20 +887,12 @@ class Stream
 				const auto start = Clock::now();
 				do
 				{
-					if (m_threaded)
-					{
-						const auto epoch = m_space.Epoch();
-						Poll();
-						CheckFailure();
-						slot = m_ring.TryWrite();
-						if (!slot)
-							m_space.Wait(epoch);
-					}
-					else
-					{
-						Drain(context, owner);
-						slot = m_ring.TryWrite();
-					}
+					const auto epoch = m_space.Epoch();
+					Poll();
+					CheckFailure();
+					slot = m_ring.TryWrite();
+					if (!slot)
+						m_space.Wait(epoch);
 				} while (!slot);
 				m_frontPipelineTiming.backpressureNs += Ns(start);
 			}
@@ -890,16 +901,14 @@ class Stream
 			m_ring.PublishWrite();
 			m_lastPublished = header.sequence;
 			m_frontPipelineTiming.highWater = std::max(m_frontPipelineTiming.highWater, occupancy);
-			if (m_threaded)
-				m_work.Signal();
-			else
-				Drain(context, owner);
+			m_work.Signal();
 		}
 		else
 		{
-			Packet packet;
-			prepare(packet);
-			Consume(context, packet, owner);
+			// Preserve an immutable value while avoiding ring encoding, decoding
+			// and indirect dispatch when both actors are this thread.
+			const T snapshot = value;
+			ConsumeOperation(context, header, m_arena.End(), [&] { (owner.*Record)(snapshot, m_arena); });
 			if (m_handler || reply)
 				Accept(std::move(m_result));
 			else
@@ -912,6 +921,7 @@ class Stream
 		Completion completion;
 		while (m_completions.Pop(completion))
 		{
+			++m_frontPipelineTiming.completionMessages;
 			Accept(std::move(completion));
 			m_space.Signal();
 		}
@@ -1121,7 +1131,7 @@ class Stream
 	}
 	void PublishProgress()
 	{
-		if (m_backTickets.submitted == m_notifiedTickets.submitted && m_backTickets.completed == m_notifiedTickets.completed && m_backCompletedFence == m_notifiedFence && m_retiredResources.empty())
+		if (m_backTickets.recorded == m_notifiedTickets.recorded && m_backTickets.submitted == m_notifiedTickets.submitted && m_backTickets.completed == m_notifiedTickets.completed && m_backCompletedFence == m_notifiedFence && m_retiredResources.empty())
 			return;
 		// Idle fence progress is coalescible. Never block a UI handoff on this
 		// informational message when the front is paused/not polling.
@@ -1137,6 +1147,7 @@ class Stream
 			slot->backIdleNs = m_backPipelineTiming.backIdleNs;
 			m_notifiedTickets = m_backTickets;
 			m_completions.PublishWrite();
+			m_unreported = 0;
 			m_space.Signal();
 		}
 	}
@@ -1151,6 +1162,13 @@ class Stream
 		m_ring.ReleaseRead();
 		if (m_threaded)
 		{
+			// Ordinary operations only need a monotonic consumed prefix. Keep
+			// data-bearing results lossless, and publish progress in batches or
+			// at an empty queue so Finish/capacity waits cannot strand a tail.
+			const bool result = m_result.replyRequested || m_result.kind || !m_result.bytes.empty() ||
+								!m_result.retiredResources.empty() || std::any_of(m_result.words.begin(), m_result.words.end(), [](uint64_t word) { return word != 0; });
+			if (!result && ++m_unreported < 32 && !m_ring.Empty())
+				return true;
 			while (!m_completions.TryWrite())
 			{
 				if (m_exit.load())
@@ -1159,6 +1177,11 @@ class Stream
 				if (!m_completions.TryWrite())
 					m_space.Wait(epoch);
 			}
+			if (!result)
+				m_result.kind = UINT32_MAX;
+			m_notifiedTickets = m_backTickets;
+			m_notifiedFence = m_backCompletedFence;
+			m_unreported = 0;
 			*m_completions.TryWrite() = std::move(m_result);
 			m_completions.PublishWrite();
 			m_space.Signal();
@@ -1172,24 +1195,27 @@ class Stream
 	template <class Owner>
 	void Consume(Context &context, const Packet &packet, Owner &owner)
 	{
+		ConsumeOperation(context, packet.header, packet.arenaEnd, [&] { packet.record(&owner, packet, m_arena); });
+	}
+	template <class Record>
+	void ConsumeOperation(Context &context, const Header &header, uint64_t arenaEnd, Record record)
+	{
 		const auto start = m_threaded ? Clock::now() : Clock::time_point{};
 		NativeScope scope(*this, context);
-		m_activeHeader = packet.header;
-		const bool resultNeeded = m_threaded || m_handler || (packet.header.reserved & 1);
+		m_activeHeader = header;
+		const bool resultNeeded = m_threaded || m_handler || (header.reserved & 1);
 		if (resultNeeded)
 			m_result = {};
-		packet.record(&owner, packet, m_arena);
-		m_backTickets.Record(packet.header.sequence);
-		m_arena.Retire(packet.arenaEnd);
+		record();
+		m_backTickets.Record(header.sequence);
+		m_arena.Retire(arenaEnd);
 		if (resultNeeded)
 		{
 			m_result.retiredResources = std::move(m_retiredResources);
-			m_result.replyRequested = (packet.header.reserved & 1) != 0;
-			m_result.sequence = packet.header.sequence;
+			m_result.replyRequested = (header.reserved & 1) != 0;
+			m_result.sequence = header.sequence;
 			m_result.completedFence = m_backCompletedFence;
-			m_notifiedFence = m_backCompletedFence;
 			m_result.tickets = m_backTickets;
-			m_notifiedTickets = m_backTickets;
 			if (m_threaded)
 				m_backPipelineTiming.backBusyNs += Ns(start);
 			m_result.backBusyNs = m_backPipelineTiming.backBusyNs;
@@ -1217,6 +1243,7 @@ class Stream
 	std::atomic<bool> m_pauseRequested{false};
 	bool m_paused = false;
 	uint64_t m_pauseTarget = 0;
+	unsigned m_unreported = 0;
 	uint64_t m_lastPublished = 0;
 	bool m_stopped = false, m_threaded = false;
 };

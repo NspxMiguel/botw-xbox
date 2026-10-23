@@ -1,6 +1,7 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Core/LatteIndices.h"
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
+#include "Cafe/HW/Latte/Core/LatteContentIndex.h"
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
 
 #include <array>
@@ -142,14 +143,14 @@ int main()
 	LatteIndices_invalidateAll(g_renderer.get());
 
 	// Four colliding keys coexist; the fifth evicts the least recently used.
-	std::vector<std::array<uint16, 4>> candidates(4096);
+	std::vector<std::array<uint16, 4>> candidates(16384);
 	const LatteDrawCache::IndexKey key{reinterpret_cast<uintptr_t>(indices.data()), 4, uint32(LatteIndexType::U16_BE), uint32(LattePrimitiveMode::TRIANGLES), UINT32_MAX};
 	std::vector<const void *> colliding;
 	for (auto &candidate : candidates)
 	{
 		auto other = key;
 		other.address = reinterpret_cast<uintptr_t>(candidate.data());
-		if (other.Slot(64) == key.Slot(64))
+		if (other.Slot(LatteDrawCache::kSmallIndexEntries / LatteDrawCache::kIndexCacheWays) == key.Slot(LatteDrawCache::kSmallIndexEntries / LatteDrawCache::kIndexCacheWays))
 		{
 			candidate.fill(_swapEndianU16(uint16(7 + colliding.size())));
 			colliding.push_back(candidate.data());

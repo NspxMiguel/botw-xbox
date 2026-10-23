@@ -79,8 +79,8 @@ continue using the same native helpers and lifetime rules.
 
 | Boundary | Reason / behavior |
 | --- | --- |
-| First texture/FBO/index/UI allocation and the first query heap | Recorded reply supplies allocation success, formats or opaque identity needed by front. Existing query heaps do not add another create wait. |
-| Native/logical adapter release | Release is recorded before front destroys or reuses the adapter. Native COM/upload retirement still uses GPU fences. Release does not recursively apply guest cache callbacks from inside a logical destructor. |
+| First texture/FBO/UI allocation and the first query heap | Recorded reply supplies allocation success, formats or opaque identity needed by front. Existing query heaps do not add another create wait. Index IDs are allocated on front and created/uploaded in order without a reply. |
+| Native/logical adapter release | Release is recorded before front destroys or reuses the adapter. Index release transfers destruction to the recorder and needs no front wait. Native COM/upload retirement still uses GPU fences. Release does not recursively apply guest cache callbacks from inside a logical destructor. |
 | Explicit `Flush` / submit / `WaitForIdle` | Worker performs the existing submit/fence behavior before acknowledging. PM4 wait, semaphore, draw-done and timestamp call sites retain their existing ordering. |
 | Query polling | At most one asynchronous poll per logical query. Reverse results are matched by ID/generation and begin/reset epoch. Front publishes only completed fragment sums. |
 | Forced query flush | Existing native submission/fence wait, followed by an owned batch of finished query sums before front resumes the forced-finish loop. A recorded ticket alone is insufficient. |
@@ -189,7 +189,7 @@ started, no extra build tree was created, and no changes were pushed.
 
 Use the same Plateau checkpoint, native 1080p, FSR 3.1 NativeAA and Remaster packs.
 Capture mode 0, then 1, then 2 after shaders/loading stabilize. Mode 0 is the
-reference (~42 presents/s and ~21.7 ms/frame on the supplied baseline). Require
+reference; the later fixed Plateau baseline is 46 presents/s (profiler off). Require
 identical image output, attempted/recorded draw and query counts, streamout bytes,
 readback data, and index/descriptor/root-CBV cache behavior before trusting speed.
 
@@ -209,6 +209,162 @@ streamout dependencies, screenshot plus recorder/HUD, TV/DRC swaps, resize and p
 close. Stress pause/resume, quick menu, title/cache unload, shutdown with queued
 work, tiny ring/arena settings and device removal. Verify pending presents still
 meet deadlines when guest command ingress stops, and that no pending ticket or
-guest semaphore waits forever. Keep mode 2 opt-in until those checks pass. Removing
-coarse waits, tuning batching/capacity and increasing frame latency are phase-5
-work, not evidence established by this host implementation.
+guest semaphore waits forever. Keep mode 2 opt-in until those checks pass. The console-regression changes below
+remove index round trips and batch progress; they do not increase frame latency
+or establish console performance or image parity.
+
+
+## Console regressions
+
+The supplied Plateau measurements were 46 presents/s before, 38 in mode 0,
+35 in mode 1 and 7.5 in mode 2, with profiling disabled. The profiled mode-0
+comparison was 22.008 -> 27.781 ms inclusive draw time. These are input measurements,
+not results from the repaired build. The task's appended status confirms that the
+attempted mode-2 profile measured another installed version; no valid mode-2
+console profile was available during this repair.
+
+### Baseline and index reuse
+
+The actual merge base with `xbox/port` is `aaff582`, whose index cache is unchanged
+in the original pipeline branch. However, the supplied before profile contains
+round-5 counters and comes from `a2ff93c` (`xbox/latte-perf5`). That commit was never
+an ancestor of this branch. The comparison therefore mixed two cache
+implementations: 256 four-way entries here versus 2,048 small plus 256 large
+entries and exact content-validated relocation reuse in round 5. This is why the
+before report has `index-relocated` hits and the old mode-0 report does not.
+Round 5's own commit records 46.1 versus 46.0 presents/s with profiling off;
+its profiled cache improvement alone cannot explain the entire 38 fps regression.
+
+This repair integrates round 5's index banks, full-byte-validated content hints,
+texture-stage descriptor/sampler reuse, reusable prepared-stage storage, paired
+profiler-scope reduction and PM4 ingress batching. Hash equality is never enough
+for reuse. Existing mutation, restart, stale-hint, deliberate hash-collision,
+associativity and native SIMD tests remain required. The small/large cache bounds
+are the baseline's 24 MiB input plus 36 MiB converted output, excluding allocator
+capacity.
+
+`latte_index_stream_bench.cpp` adds the missing repeated-stream gate: 1,024
+independent small streams, selected below the restored bank's associativity,
+5,000 draws/frame for 100 frames after warmup, including guest wait invalidation.
+It runs the production `LatteIndices.cpp` with host renderer allocation stubs and
+requires at least 99% hits. The old branch fails with **0% hits and 500,000
+misses**; the repair passes with **100% hits and zero misses**. Time fell from
+0.3510 to 0.0770 ms/5,000 draws. This is a capacity regression reproducer, not a
+reconstruction of the game's exact index stream or an Xbox timing estimate.
+
+### Direct path: buffer sync, indices and uniforms
+
+Mode 0 previously constructed backend packets even for vertex/uniform buffer
+bindings, viewport/scissor/FBO updates, sequence begin/end and common native
+operations. Vertex bindings additionally copied through the staging arena.
+Buffer uploads copied guest bytes into the CPU transport arena and then into the
+native upload ring. Index misses allocated a logical adapter/registry entry,
+requested a create reply, decoded into scratch, staged another copy and copied
+again into coherent upload memory. Uniform preparation similarly copied scratch
+through the arena before checking the existing uniform cache, with extra nested
+profiling scopes. These costs occurred despite the draw itself using the direct
+recorder.
+
+Mode 0 now calls native helpers for bindings, buffer uploads, sequence boundaries,
+and common copy/clear/submit operations. Index conversion writes directly to the
+original coherent native allocation and upload is a no-op apart from byte counters;
+it allocates no logical index ID and requests no reply. Uniform preparation and
+cache comparison read the CPU scratch directly, with no transport allocation,
+copy, retirement or extra nested scope. Native readback callbacks still run at
+completion changes outside recording scopes, including the deferred callback path
+for an operation that submits. Modes 1/2 retain immutable owned snapshots.
+
+The old `create-reply` counter counted logical resource creation even in mode 0,
+where there was no worker round trip. It now counts actual threaded create waits
+centrally. Mode 0 and mode 1 have zero such waits, and index creation adds none in
+mode 2.
+
+The reported **6,187,154 upload B/frame** is not 6 MB of buffer-cache sync:
+`UploadBytes` counts all native `AllocateUpload` requests (including 256-byte
+padded transient shader uniforms, texture uploads, internal/UI work and buffer
+uploads), plus copied converted index bytes. `BufferBytes` counts only the
+**113,385 raw buffer-cache bytes/frame**. `StageBytes` copies do not increment
+`UploadBytes`. Many of those native uploads existed before the pipeline counter;
+the excess index misses add conversion/upload traffic, and mode 0 unnecessarily
+staged indices and uniforms as well. The old report cannot partition the 6.2 MB
+exactly. New `index` and `uniform` byte fields beside `upload` expose that split;
+index bytes count coherent decoder writes in mode 0 too, and uniform bytes count
+actual padded allocation misses, not uniform-cache hits.
+
+### Synchronous packet path and worker stalls
+
+Mode 1 still prepares and consumes immutable draw values, but consumes a local
+snapshot through the same recording/lifetime helper instead of encoding it into a
+ring, publishing cursors, copying it back and indirectly dispatching it on the
+same thread. Native commands, resource pinning and arena retirement are preserved.
+The existing optimized 5,000-draw host benchmark enforces both wall and thread-CPU
+median overhead <= 1 ms/frame, using nine paired samples after warmup:
+
+| Workload | Before paired wall / CPU overhead | After paired wall / CPU overhead | After maximum wall overhead |
+| --- | ---: | ---: | ---: |
+| Repeated bindings | 0.8316 / 0.8330 ms | 0.7865 / 0.7816 ms | 0.8399 ms |
+| Changing bindings | 0.9687 / 0.9595 ms | 0.8980 / 0.8962 ms | 0.9207 ms |
+
+An exploratory sample exceeded 1 ms for changing bindings before the typed local
+snapshot optimization. The final measurements above were taken after Ninja
+exited; there was no competing Ninja build during that measurement.
+
+Mode 2 previously waited on each index create **and** release. Front now allocates
+the logical ID and conversion scratch without a recorded reply. Ordered create,
+upload and draw packets resolve the native allocation on back. Ordered release
+frees its fence-deferred native allocation, retires its generation and destroys
+the adapter on back after the final CPU use; front never deletes a queued adapter.
+Allocation failure fails the worker stream instead of publishing a null native
+allocation to a draw. Other replies remain at actual control/result/lifecycle
+boundaries, including present and GPU-visible synchronization.
+
+Ordinary reverse acknowledgments are coalesced to one per 32 consumed operations,
+or the empty-queue tail. Explicit replies, scalar/byte results, query/readback
+results, profiles and reclaimed generations remain lossless. Progress notifications
+advance only when actually published; a partial batch cannot strand `Finish` or a
+capacity wait. Event waits use 256 bounded processor-pause polls before the
+existing armed, epoch-checked timed sleep. Busy consumers avoid repeated kernel
+sleep/wake cycles; idle workers still sleep and service deadlines.
+
+`latte_worker_bench.cpp` exercises production transport, registry and owned arena
+bytes with 1,707 index misses and 5,000 draws/frame for ten frames. Native D3D12
+allocations/fences are modeled. It verifies draw/upload totals, uploaded values,
+ordered destruction and generation recycling; front synchronizes only at the frame
+boundary in the asynchronous case. Compiling the same workload against the old
+header with the old create/release reply policy provides the host comparison:
+
+| Worker churn | Before | After |
+| --- | ---: | ---: |
+| Wall time / 5,000 draws | 19.5231 ms | 2.3174 ms |
+| Index create/release replies / frame | 3,414 | 0 |
+| Reply wait / frame (includes final frame drain) | 15.6250 ms | 0.0644 ms |
+| Capacity wait / frame | 0.0688 ms | 0.0237 ms |
+
+### Validation and remaining console check
+
+The updated worker workload passes ASan/UBSan and TSan as well as the existing
+worker suite. A new deterministic batching test holds a 512-operation burst,
+requires at most 18 reverse messages, retrieves an exact reply inside the burst,
+and checks the final consumed prefix. Existing tiny-ring/reverse-saturation,
+shutdown, failure, exclusive handoff, query/result ticket and ownership tests pass.
+
+Logs in the existing build tree:
+
+- `build/latte-console-before-index.log`, `latte-console-before-pipeline.log`:
+  pre-repair repeated-index and packet-handoff measurements.
+- `build/latte-console-final-pipeline.log`: ASan/UBSan and TSan transport,
+  asynchronous index lifetime workload, batch and existing worker coverage.
+- `build/latte-console-final-regression.log`: full profiler/cache/index/descriptor/
+  root-CBV/texture-stage/PM4 suites, including Rosetta x86 SIMD, relocation and
+  repeated-stream gate.
+- `build/latte-console-final-benchmark.log`, `latte-console-final-worker-before.log`,
+  `latte-console-final-worker-after.log`: optimized final host measurements above.
+- `build/latte-console-build-final.log`: successful requested
+  `nice ninja -C build/local-uwp-game -j4` build/link after waiting for the
+  machine-wide Ninja slot.
+
+No extra build tree, console deployment, dev server or simulator was used. Host
+stub timings do not measure native D3D12 buffer-sync or uniform GPU allocations.
+A fresh console package must still establish mode 0 within 2% of the 46 presents/s
+baseline, mode 1 <= 1 ms/frame overhead, mode-2 throughput and visual/query/readback
+parity. These console thresholds are **not verified by host tests**.

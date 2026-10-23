@@ -570,6 +570,7 @@ void D3D12Renderer::SubmitCommandList_record(bool waitIdle)
 void D3D12Renderer::ProcessFinishedSubmissions()
 {
 	m_pipeline.CheckBack();
+	const uint64 previous = m_completedFenceValue;
 	const uint64 completed = GetCompletedSubmissionId();
 	m_uploadRing->Retire(completed);
 	m_gpuViewHeap->Retire(completed);
@@ -577,8 +578,11 @@ void D3D12Renderer::ProcessFinishedSubmissions()
 	m_deferredReleaser.Retire(completed);
 	m_resources.Retire(m_operations.Progress().recorded, completed,
 					   m_operations.Running() ? &m_operations.RetiredResources() : nullptr);
-	if (!m_pipeline.Threaded() && !m_operations.Recording())
-		ApplyFrontCompletions();
+	if (!m_pipeline.Threaded() && !m_operations.Recording() && completed != previous)
+	{
+		m_frontCompleted = completed;
+		LatteTextureReadback_UpdateFinishedTransfers(false);
+	}
 }
 
 void D3D12Renderer::BindRootSignatureAndHeaps()
@@ -1775,13 +1779,8 @@ void D3D12Renderer::renderTarget_setViewport(float x, float y, float width, floa
 	if (memcmp(&vp, &m_frontState.viewport, sizeof(vp)) == 0)
 		return;
 	m_frontState.viewport = vp;
-	if (m_pipeline.Queued())
-		return;
-	BackendPacket packet{};
-	packet.kind = BackendPacket::Kind::Viewport;
-	static_assert(sizeof(vp) <= sizeof(packet.words));
-	memcpy(packet.words, &vp, sizeof(vp));
-	ExecuteBackend(LattePipeline::Opcode::Bind, packet);
+	if (!m_pipeline.Queued())
+		renderTarget_setViewport_record(vp);
 }
 
 void D3D12Renderer::renderTarget_setScissor(sint32 scissorX, sint32 scissorY, sint32 scissorWidth, sint32 scissorHeight)
@@ -1790,18 +1789,13 @@ void D3D12Renderer::renderTarget_setScissor(sint32 scissorX, sint32 scissorY, si
 	if (memcmp(&r, &m_frontState.scissor, sizeof(r)) == 0)
 		return;
 	m_frontState.scissor = r;
-	if (m_pipeline.Queued())
-		return;
-	BackendPacket packet{};
-	packet.kind = BackendPacket::Kind::Scissor;
-	memcpy(packet.words, &r, sizeof(r));
-	ExecuteBackend(LattePipeline::Opcode::Bind, packet);
+	if (!m_pipeline.Queued())
+		renderTarget_setScissor_record(r);
 }
 
 LatteCachedFBO *D3D12Renderer::rendertarget_createCachedFBO(uint64 key)
 {
 	m_pipeline.BeginOperation();
-	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	return new CachedFBOD3D12(this, key);
 }
 
@@ -1826,10 +1820,11 @@ void D3D12Renderer::rendertarget_bindFramebufferObject(LatteCachedFBO *cfbo)
 	m_frontState.activeFBO = static_cast<CachedFBOD3D12 *>(cfbo);
 	if (m_pipeline.Queued())
 		return;
-	BackendPacket packet{};
-	packet.kind = BackendPacket::Kind::BindFramebuffer;
-	packet.resources[0] = cfbo ? m_frontState.activeFBO->recordingId : LattePipeline::ResourceId{};
-	ExecuteBackend(LattePipeline::Opcode::Bind, packet);
+	if (m_state.activeFBO != cfbo)
+	{
+		m_state.activeFBO = static_cast<CachedFBOD3D12 *>(cfbo);
+		m_state.renderTargetsDirty = true;
+	}
 }
 
 /* --- textures --- */
@@ -1857,7 +1852,6 @@ LatteTexture *D3D12Renderer::texture_createTextureEx(Latte::E_DIM dim, MPTR phys
 													 uint32 swizzle, Latte::E_HWTILEMODE tileMode, bool isDepth)
 {
 	m_pipeline.BeginOperation();
-	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	return new LatteTextureD3D12(this, dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth);
 }
 
@@ -2184,7 +2178,6 @@ void D3D12Renderer::texture_copyImageSubData_record(LatteTexture *src, sint32 sr
 
 LatteTextureReadbackInfo *D3D12Renderer::texture_createReadback(LatteTextureView *textureView)
 {
-	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	auto *result = new LatteTextureReadbackInfoD3D12(this, textureView);
 	if (result->GetImageSize() == 0)
 	{
@@ -2241,6 +2234,11 @@ void D3D12Renderer::bufferCache_upload(uint8 *buffer, sint32 size, uint32 buffer
 	m_pipeline.CheckFront();
 	if (size <= 0)
 		return;
+	if (!m_pipeline.Queued())
+	{
+		bufferCache_upload_record(buffer, static_cast<uint32>(size), bufferOffset);
+		return;
+	}
 	uint32 copied = 0;
 	while (copied < static_cast<uint32>(size))
 	{
@@ -2302,14 +2300,13 @@ void D3D12Renderer::bufferCache_copyStreamoutToMainBuffer_record(uint32 srcOffse
 void D3D12Renderer::buffer_bindVertexBuffers(std::span<BindBufferParam> bindings)
 {
 	m_pipeline.CheckFront();
+	if (!m_pipeline.Queued())
+	{
+		buffer_bindVertexBuffers_record(bindings);
+		return;
+	}
 	for (const auto &b : bindings)
 		m_frontBindings.vertices[b.index] = {b.bindOffset, b.bindSize, b.stride, true};
-	if (m_pipeline.Queued())
-		return;
-	BackendPacket packet{};
-	packet.kind = BackendPacket::Kind::BindVertices;
-	packet.bytes = StageBytes(bindings.data(), bindings.size_bytes());
-	ExecuteBackend(LattePipeline::Opcode::Bind, packet);
 }
 
 void D3D12Renderer::buffer_bindVertexBuffers_record(std::span<const BindBufferParam> bindings)
@@ -2335,16 +2332,11 @@ void D3D12Renderer::buffer_bindUniformBuffer(LatteConst::ShaderType shaderType, 
 {
 	cemu_assert_debug(bufferIndex < LATTE_NUM_MAX_UNIFORM_BUFFERS);
 	m_pipeline.CheckFront();
-	m_frontBindings.uniforms[(uint32)D3D12StageFromLatte(shaderType)][bufferIndex] = {offset, size};
-	if (m_pipeline.Queued())
-		return;
-	BackendPacket packet{};
-	packet.kind = BackendPacket::Kind::BindUniform;
-	packet.words[0] = static_cast<uint32>(D3D12StageFromLatte(shaderType));
-	packet.words[1] = bufferIndex;
-	packet.words[2] = offset;
-	packet.words[3] = size;
-	ExecuteBackend(LattePipeline::Opcode::Bind, packet);
+	const auto stage = static_cast<uint32>(D3D12StageFromLatte(shaderType));
+	if (!m_pipeline.Queued())
+		buffer_bindUniformBuffer_record(stage, bufferIndex, offset, size);
+	else
+		m_frontBindings.uniforms[stage][bufferIndex] = {offset, size};
 }
 
 void D3D12Renderer::buffer_bindUniformBuffer_record(uint32 stageIndex, uint32 bufferIndex, uint32 offset, uint32 size)
@@ -2403,46 +2395,56 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12Renderer::GetAlignedUniformBufferAddress(uint32 c
 
 Renderer::IndexAllocation D3D12Renderer::indexData_reserveIndexMemory(uint32 size)
 {
-	m_pipeline.BeginOperation();
+	if (!m_pipeline.Queued())
+	{
+		auto *allocation = m_indexAllocator->Allocate(size, 4);
+		return allocation ? IndexAllocation{allocation->cpuPtr, allocation} : IndexAllocation{};
+	}
+	// IDs and conversion scratch belong to front. Ordered creation and upload
+	// need no allocation-success round trip before a draw can be published.
 	auto resource = std::make_unique<IndexResource>();
 	if (m_indexDecodeScratch.size() < size)
 		m_indexDecodeScratch.resize(size);
-
 	resource->size = size;
 	resource->id = RegisterResource(resource.get());
 	BackendPacket packet{};
 	packet.kind = BackendPacket::Kind::IndexCreate;
 	packet.resources[0] = resource->id;
 	packet.words[0] = size;
-	const auto reply = ExecuteBackend(LattePipeline::Opcode::Create, packet);
-	if (!reply.words[0])
-	{
-		RetireResource(resource->id);
-		return {nullptr, nullptr};
-	}
-	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	auto *result = resource.release();
+	ExecuteBackend(LattePipeline::Opcode::Create, packet);
 	return {m_indexDecodeScratch.data(), result};
 }
 
 void D3D12Renderer::indexData_releaseIndexMemory(IndexAllocation &allocation)
 {
-	m_pipeline.BeginOperation();
+	if (!m_pipeline.Queued())
+	{
+		m_indexAllocator->Free(static_cast<D3D12UploadHeapAllocator::Allocation *>(allocation.rendererInternal));
+		allocation = {};
+		return;
+	}
 	auto *resource = static_cast<IndexResource *>(allocation.rendererInternal);
 	if (!resource)
 		return;
 	BackendPacket packet{};
 	packet.kind = BackendPacket::Kind::IndexRelease;
 	packet.resources[0] = resource->id;
+	// The recorder deletes the adapter only after its final queued use. Native
+	// upload storage remains fence-retired by the allocator.
 	ExecuteBackend(LattePipeline::Opcode::Release, packet);
-	RetireResource(resource->id);
-	delete resource;
 	allocation = {};
 }
 
 void D3D12Renderer::indexData_uploadIndexMemory(IndexAllocation &allocation)
 {
-	m_pipeline.BeginOperation();
+	if (!m_pipeline.Queued())
+	{
+		const auto size = static_cast<D3D12UploadHeapAllocator::Allocation *>(allocation.rendererInternal)->size;
+		LatteProfiler::Add(LatteProfiler::Counter::UploadBytes, size);
+		LatteProfiler::Add(LatteProfiler::Counter::IndexUploadBytes, size);
+		return; // Coherent write-combined memory was filled by the decoder.
+	}
 	auto *resource = static_cast<IndexResource *>(allocation.rendererInternal);
 	uint32 copied = 0;
 	while (copied < resource->size)
@@ -2456,7 +2458,6 @@ void D3D12Renderer::indexData_uploadIndexMemory(IndexAllocation &allocation)
 		ExecuteBackend(LattePipeline::Opcode::IndexUpload, packet);
 		copied += bytes;
 	}
-	// Only the converted bytes in the immutable transport arena survive upload.
 	allocation.mem = nullptr;
 }
 
@@ -2554,7 +2555,7 @@ void D3D12Renderer::HandleScreenshotRequest(LatteTextureView *texView, bool padV
 
 void D3D12Renderer::texture_clearColorSlice(LatteTexture *hostTexture, sint32 sliceIndex, sint32 mipIndex, float r, float g, float b, float a)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		texture_clearColorSlice_record(hostTexture, sliceIndex, mipIndex, r, g, b, a);
 		return;
@@ -2574,7 +2575,7 @@ void D3D12Renderer::texture_clearColorSlice(LatteTexture *hostTexture, sint32 sl
 
 void D3D12Renderer::texture_clearDepthSlice(LatteTexture *hostTexture, uint32 sliceIndex, sint32 mipIndex, bool clearDepth, bool clearStencil, float depthValue, uint32 stencilValue)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		texture_clearDepthSlice_record(hostTexture, sliceIndex, mipIndex, clearDepth, clearStencil, depthValue, stencilValue);
 		return;
@@ -2594,7 +2595,7 @@ void D3D12Renderer::texture_clearDepthSlice(LatteTexture *hostTexture, uint32 sl
 
 void D3D12Renderer::texture_copyImageSubData(LatteTexture *src, sint32 srcMip, sint32 effectiveSrcX, sint32 effectiveSrcY, sint32 srcSlice, LatteTexture *dst, sint32 dstMip, sint32 effectiveDstX, sint32 effectiveDstY, sint32 dstSlice, sint32 effectiveCopyWidth, sint32 effectiveCopyHeight, sint32 srcDepth)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		texture_copyImageSubData_record(src, srcMip, effectiveSrcX, effectiveSrcY, srcSlice, dst, dstMip, effectiveDstX, effectiveDstY, dstSlice, effectiveCopyWidth, effectiveCopyHeight, srcDepth);
 		return;
@@ -2620,7 +2621,7 @@ void D3D12Renderer::texture_copyImageSubData(LatteTexture *src, sint32 srcMip, s
 
 void D3D12Renderer::bufferCache_copy(uint32 srcOffset, uint32 dstOffset, uint32 size)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		bufferCache_copy_record(srcOffset, dstOffset, size);
 		return;
@@ -2636,7 +2637,7 @@ void D3D12Renderer::bufferCache_copy(uint32 srcOffset, uint32 dstOffset, uint32 
 
 void D3D12Renderer::bufferCache_copyStreamoutToMainBuffer(uint32 srcOffset, uint32 dstOffset, uint32 size)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		bufferCache_copyStreamoutToMainBuffer_record(srcOffset, dstOffset, size);
 		return;
@@ -2652,7 +2653,7 @@ void D3D12Renderer::bufferCache_copyStreamoutToMainBuffer(uint32 srcOffset, uint
 
 void D3D12Renderer::streamout_rendererFinishDrawcall()
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		streamout_rendererFinishDrawcall_record();
 		return;
@@ -2665,7 +2666,7 @@ void D3D12Renderer::streamout_rendererFinishDrawcall()
 
 void D3D12Renderer::SubmitCommandList(bool waitIdle)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		SubmitCommandList_record(waitIdle);
 		return;
@@ -2679,7 +2680,7 @@ void D3D12Renderer::SubmitCommandList(bool waitIdle)
 
 void D3D12Renderer::Flush(bool waitIdle)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		Flush_record(waitIdle);
 		return;
@@ -2693,7 +2694,7 @@ void D3D12Renderer::Flush(bool waitIdle)
 
 void D3D12Renderer::NotifyLatteCommandProcessorIdle()
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		NotifyLatteCommandProcessorIdle_record();
 		return;
@@ -2706,7 +2707,7 @@ void D3D12Renderer::NotifyLatteCommandProcessorIdle()
 
 void D3D12Renderer::SwapBuffers(bool swapTV, bool swapDRC)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		SwapBuffers_record(swapTV, swapDRC);
 		return;
@@ -2727,7 +2728,7 @@ void D3D12Renderer::SwapBuffers(bool swapTV, bool swapDRC)
 
 void D3D12Renderer::ClearColorbuffer(bool padView)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		ClearColorbuffer_record(padView);
 		return;
@@ -2741,7 +2742,7 @@ void D3D12Renderer::ClearColorbuffer(bool padView)
 
 void D3D12Renderer::DrawEmptyFrame(bool mainWindow)
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		DrawEmptyFrame_record(mainWindow);
 		return;
@@ -2760,7 +2761,7 @@ void D3D12Renderer::DrawEmptyFrame(bool mainWindow)
 
 void D3D12Renderer::occlusionQuery_flush()
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		occlusionQuery_flush_record();
 		return;
@@ -2773,7 +2774,7 @@ void D3D12Renderer::occlusionQuery_flush()
 
 void D3D12Renderer::occlusionQuery_updateState()
 {
-	if (m_operations.Recording())
+	if (!m_pipeline.Queued() || m_operations.Recording())
 	{
 		occlusionQuery_updateState_record();
 		return;
@@ -2788,7 +2789,8 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 {
 	m_pipeline.CheckFront();
 	using Kind = BackendPacket::Kind;
-	const bool needsReply = opcode == LattePipeline::Opcode::Create || opcode == LattePipeline::Opcode::Release ||
+	const bool needsReply = (opcode == LattePipeline::Opcode::Create && packet.kind != Kind::IndexCreate) ||
+							(opcode == LattePipeline::Opcode::Release && packet.kind != Kind::IndexRelease) ||
 							opcode == LattePipeline::Opcode::Present || opcode == LattePipeline::Opcode::Shutdown ||
 							opcode == LattePipeline::Opcode::Readback || opcode == LattePipeline::Opcode::Submit ||
 							packet.kind == Kind::UIAcquire || packet.kind == Kind::UIRender || packet.kind == Kind::BeginFrame ||
@@ -2797,6 +2799,8 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 	LattePipeline::Completion reply;
 	if (needsReply)
 	{
+		if (m_pipeline.Threaded() && opcode == LattePipeline::Opcode::Create)
+			LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 		m_operations.Wait(sequence);
 		reply = m_operations.TakeReply(sequence);
 	}
@@ -2954,7 +2958,8 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 	case BackendPacket::Kind::IndexCreate: {
 		auto *index = m_resources.Get<IndexResource>(packet.resources[0]);
 		index->native = m_indexAllocator->Allocate(packet.words[0], 4);
-		m_operations.Result().words[0] = index->native != nullptr;
+		if (!index->native)
+			throw std::runtime_error("Latte native index allocation failed");
 		break;
 	}
 	case BackendPacket::Kind::IndexUpload: {
@@ -2962,11 +2967,16 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		const auto bytes = arena.Read(packet.bytes);
 		memcpy(index->native->cpuPtr + packet.words[0], bytes.data(), bytes.size());
 		LatteProfiler::Add(LatteProfiler::Counter::UploadBytes, bytes.size());
+		LatteProfiler::Add(LatteProfiler::Counter::IndexUploadBytes, bytes.size());
 		break;
 	}
-	case BackendPacket::Kind::IndexRelease:
-		m_indexAllocator->Free(m_resources.Get<IndexResource>(packet.resources[0])->native);
+	case BackendPacket::Kind::IndexRelease: {
+		auto *index = m_resources.Get<IndexResource>(packet.resources[0]);
+		m_indexAllocator->Free(index->native);
+		m_resources.Release(packet.resources[0]);
+		delete index;
 		break;
+	}
 	case BackendPacket::Kind::BufferInit:
 		bufferCache_init_record(packet.words[0], packet.words[1]);
 		break;
@@ -2996,7 +3006,7 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		LatteProfiler::Reset(LatteProfiler::Clock::now());
 		m_reportFrames = 0;
 	}
-	if (packet.kind != BackendPacket::Kind::UIRelease && packet.kind != BackendPacket::Kind::RegistryRetire)
+	if (packet.kind != BackendPacket::Kind::UIRelease && packet.kind != BackendPacket::Kind::RegistryRetire && packet.kind != BackendPacket::Kind::IndexRelease)
 		for (auto id : packet.resources)
 			m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
 }
@@ -3009,8 +3019,9 @@ void D3D12Renderer::ApplyFrontCompletions()
 	m_applyingCompletions = true;
 	try
 	{
-		m_operations.Poll();
-		const auto completed = m_operations.CompletedFence();
+		if (m_pipeline.Threaded())
+			m_operations.Poll();
+		const auto completed = m_pipeline.Threaded() ? m_operations.CompletedFence() : m_completedFenceValue;
 		if (completed != m_frontCompleted || m_frontReadbacksReady)
 		{
 			m_frontCompleted = completed;
@@ -3213,7 +3224,6 @@ void *D3D12Renderer::CreateUITexture(const uint8 *rgba, sint32 width, sint32 hei
 	packet.words[0] = width;
 	packet.words[1] = height;
 	const auto reply = ExecuteBackend(LattePipeline::Opcode::Create, packet);
-	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	void *texture = reinterpret_cast<void *>(reply.words[0]);
 	if (!texture || width <= 0 || height <= 0)
 		return texture;

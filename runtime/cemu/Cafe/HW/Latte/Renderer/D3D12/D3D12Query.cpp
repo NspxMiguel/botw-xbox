@@ -187,7 +187,6 @@ LatteQueryObject *D3D12Renderer::occlusionQuery_create()
 		packet.kind = BackendPacket::Kind::QueryHeap;
 		ExecuteBackend(LattePipeline::Opcode::Create, packet);
 		m_frontQueryHeapReady = true;
-		LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	}
 	LatteQueryObjectD3D12 *query;
 	if (cached.empty())

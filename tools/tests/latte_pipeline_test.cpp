@@ -680,8 +680,50 @@ static void WorkerTests()
 	std::cout << "Latte worker: tiny rings, ordered replies, concurrent generations, handoff, full-ring shutdown, reverse saturation, cancellation, idle sleep and device failure passed\n";
 }
 
+struct BatchedRecorder
+{
+	std::atomic<bool> entered{false}, hold{true};
+	uint64_t next = 0;
+	void Record(const uint64_t &value, const Arena &)
+	{
+		entered.store(true);
+		while (hold.load())
+			std::this_thread::yield();
+		assert(value == next++);
+	}
+};
+
+static void BatchingTests()
+{
+	setenv("CEMU_LATTE_PIPELINE", "2", 1);
+	Context context;
+	Stream stream(1024, 256);
+	BatchedRecorder recorder;
+	stream.Start(context, recorder, [] {}, [] {});
+	uint64_t replySequence = 0;
+	for (uint64_t i = 0; i < 512; ++i)
+	{
+		const auto sequence = stream.Execute<uint64_t, &BatchedRecorder::Record>(context, Opcode::Draw, i, recorder, i == 255);
+		if (i == 255)
+			replySequence = sequence;
+	}
+	while (!recorder.entered.load())
+		std::this_thread::yield();
+	recorder.hold.store(false);
+	stream.Wait(replySequence);
+	assert(stream.TakeReply(replySequence).sequence == replySequence);
+	stream.Finish();
+	assert(stream.Progress().recorded == 512);
+	assert(stream.Metrics().completionMessages <= 18);
+	stream.Stop(context, recorder);
+	assert(recorder.next == 512);
+	unsetenv("CEMU_LATTE_PIPELINE");
+	std::cout << "Latte batched progress: 512 operations, exact reply and final partial batch passed\n";
+}
+
 int main()
 {
+	BatchingTests();
 	WorkerTests();
 	OwnershipTests();
 	RingTests();

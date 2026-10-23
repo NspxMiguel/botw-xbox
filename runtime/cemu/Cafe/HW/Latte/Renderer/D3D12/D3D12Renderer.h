@@ -14,6 +14,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureD3D12.h"
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12TextureStage.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12DrawPacket.h"
 #include "util/math/vector2.h"
 
@@ -387,6 +388,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void draw_prepareStage(LatteDecompilerShader *shader, LattePipeline::StageBlock &out);
 	void draw_record(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena);
 	void draw_recordUniformBytes(D3D12Const::Stage stage, std::span<const std::byte> bytes, D3D12_GPU_VIRTUAL_ADDRESS &addressOut, uint32 &sizeOut);
+	std::span<const std::byte> draw_buildUniformVars(LatteDecompilerShader *shader);
 	LattePipeline::Span draw_snapshotUniformVars(LatteDecompilerShader *shader);
 
 	struct ReadbackPacket
@@ -776,6 +778,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	};
 	SamplerDescCacheEntry m_samplerDescCache[3][LATTE_NUM_MAX_TEX_UNITS];
 
+	PreparedStageBindings m_preparedStages[3];
+	D3D12TextureStageCache m_textureStageCache[3];
 	std::vector<uint8> m_uniformScratch; // CPU side staging for uniform var blocks
 
 	// imgui

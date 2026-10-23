@@ -145,6 +145,7 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 		if (cached.generation == LatteTextureViewLookupCache::GetGeneration() &&
 			cached.depthCompare == isDepthSampler && memcmp(&cached.words, &texRegister, sizeof(texRegister)) == 0)
 		{
+			LatteProfiler::Add(LatteProfiler::Counter::TextureLookupHits);
 			textureView = cached.view;
 			physMipAddr = cached.physMipAddr;
 			swizzle = cached.swizzle;
@@ -153,6 +154,7 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 		}
 		else
 		{
+			LatteProfiler::Add(LatteProfiler::Counter::TextureLookupMisses);
 			const uint64 lookupGeneration = LatteTextureViewLookupCache::GetGeneration();
 			physMipAddr = (texRegister.word3.get_MIP_ADDRESS() << 8);
 
@@ -292,7 +294,14 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 		// call for the usual already-checked texture. Forced invalidation still wins.
 		auto *checkedTexture = textureView->baseTexture;
 		const bool needsContentCheck = checkedTexture->forceInvalidate || checkedTexture->lastDataUpdateFrameCounter != LatteGPUState.frameCounter;
-		if ((needsContentCheck && LatteTC_HasTextureChanged(checkedTexture)) || swizzleChanged)
+		bool contentChanged = false;
+		if (needsContentCheck)
+		{
+			LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::TextureContent);
+			LatteProfiler::Add(LatteProfiler::Counter::TextureContentChecks);
+			contentChanged = LatteTC_HasTextureChanged(checkedTexture);
+		}
+		if (contentChanged || swizzleChanged)
 		{
 			debug_printf("Reload texture 0x%08x res %dx%d memRange %08x-%08x SwizzleChange: %s\n", textureView->baseTexture->physAddress, textureView->baseTexture->width, textureView->baseTexture->height, textureView->baseTexture->texDataPtrLow, textureView->baseTexture->texDataPtrHigh, swizzleChanged ? "yes" : "no");
 			// update swizzle / changed mip address
@@ -310,6 +319,8 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 		LatteTexture* baseTexture = textureView->baseTexture;
 		if (baseTexture->reloadFromDynamicTextures)
 		{
+			LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::TextureAliases);
+			LatteProfiler::Add(LatteProfiler::Counter::TextureAliasRefreshes);
 			LatteTexture_UpdateCacheFromDynamicTextures(baseTexture);
 			baseTexture->reloadFromDynamicTextures = false;
 		}
@@ -353,6 +364,7 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 void LatteTexture_updateTextures()
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::TextureBinding);
+	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::TextureResolve);
 	LatteGPUState.textureBindCounter++;
 	// pixel shader
 	LatteDecompilerShader* pixelShader = LatteSHRC_GetActivePixelShader();
