@@ -446,10 +446,21 @@ D3D12Ffx::D3D12Ffx(D3D12Renderer &renderer) : impl(std::make_unique<Impl>(render
 	const char *overrideValue = std::getenv("BOTW_UPSCALER");
 	if (fsr3::select(fsr3::console.load(), false, overrideValue ? overrideValue : "", true, true).path != fsr3::Path::Fsr31)
 		return;
-	s.loader = LoadLibraryExW(L"amd_fidelityfx_loader_dx12.dll", nullptr,
-							  LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+	// Store apps load their own DLLs with LoadPackagedLibrary; LoadLibraryExW is the desktop fallback.
+	// The loader opens the effect DLLs itself with LoadLibrary, which the app container may refuse:
+	// load them first so its lookups find modules that are already mapped.
+	for (const wchar_t *effect : {L"amd_fidelityfx_upscaler_dx12.dll", L"amd_fidelityfx_framegeneration_dx12.dll"})
+		if (!LoadPackagedLibrary(effect, 0))
+			LOG("FidelityFX: %ls not preloaded (error %lu)", effect, GetLastError());
+	s.loader = LoadPackagedLibrary(L"amd_fidelityfx_loader_dx12.dll", 0);
+	const DWORD packagedError = s.loader ? 0 : GetLastError();
+	if (!s.loader)
+		s.loader = LoadLibraryExW(L"amd_fidelityfx_loader_dx12.dll", nullptr,
+								  LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
 	if (!s.loader)
 	{
+		LOG("FidelityFX: loader DLL not loaded (LoadPackagedLibrary error %lu, LoadLibraryExW error %lu)",
+			packagedError, GetLastError());
 		s.Fail("optional loader/dependency missing");
 		return;
 	}

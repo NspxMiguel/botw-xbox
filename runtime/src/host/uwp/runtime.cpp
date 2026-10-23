@@ -176,11 +176,13 @@ void start_runtime(void *window, int width, int height) {
             height = automatic.output_height;
         }
         const float display_scale = std::min(width / 1280.f, height / 720.f);
+        // Up to 1080p output, native rendering measured free on Series X (the Latte CPU thread is the limit,
+        // 46 presents/s at 1.0 and at 1.5); upscale only above that, where GPU cost is real.
+        const bool upscale_output = automatic.path != fsr3::Path::Off && height > 1080;
         if (requested_scale <= 0 && !(std::isfinite(preferences.scale) && preferences.scale > 0) &&
             quality == fsr::Quality::Auto)
-            g_render_scale =
-                std::clamp(display_scale / (automatic.path == fsr3::Path::Off ? 1.f : automatic.ratio), 0.5f,
-                           hardware_max_render_scale());
+            g_render_scale = std::clamp(display_scale / (upscale_output ? automatic.ratio : 1.f), 0.5f,
+                                        hardware_max_render_scale());
 #endif
         LOG("output %dx%d, render scale %.2f", width, height, g_render_scale);
         latte::create_renderer(window, width, height); // W2: IUnknown CoreWindow, not NSView.
