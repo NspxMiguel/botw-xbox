@@ -5,21 +5,37 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
+#include <string_view>
 
 namespace fsr {
 // Stable persisted values reserved for w17 FSR 3.1. Resolve unsupported modes explicitly.
 enum class Upscaler : int { Auto = 0, Off = 1, Spatial = 2, Temporal = 3 };
 enum class FrameGeneration : int { Auto = 0, Off = 1, Fsr31 = 2 };
 enum class Quality : int { Auto = 0, UltraQuality = 1, Quality = 2, Balanced = 3, Performance = 4 };
+// Upscaling is opt-in: Auto (the stored default) and Off render native with no FSR.
 constexpr Upscaler effective_upscaler(Upscaler requested) {
-    return requested == Upscaler::Off ? Upscaler::Off : Upscaler::Spatial;
+    return requested == Upscaler::Auto || requested == Upscaler::Off ? Upscaler::Off : Upscaler::Spatial;
 }
 constexpr FrameGeneration effective_frame_generation(FrameGeneration) { return FrameGeneration::Off; }
 constexpr bool should_upscale(Upscaler requested, int iw, int ih, int ow, int oh) {
     return effective_upscaler(requested) == Upscaler::Spatial && iw > 0 && ih > 0 && ow >= iw && oh >= ih &&
            (ow > iw || oh > ih);
 }
-inline std::atomic<Upscaler> upscaler{Upscaler::Spatial};
+inline std::atomic<Upscaler> upscaler{Upscaler::Off};
+// The player's choice as an fsr3::select override; BOTW_UPSCALER (testing) wins.
+inline std::string_view upscaler_override() {
+    if (const char *value = std::getenv("BOTW_UPSCALER"))
+        return value;
+    switch (upscaler.load()) {
+    case Upscaler::Spatial:
+        return "fsr1";
+    case Upscaler::Temporal:
+        return "fsr3";
+    default:
+        return "off";
+    }
+}
 inline std::atomic<FrameGeneration> frame_generation{FrameGeneration::Off};
 constexpr float ratio(Quality quality) {
     switch (quality) {

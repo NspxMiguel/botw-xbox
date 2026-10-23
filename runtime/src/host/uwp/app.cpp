@@ -2329,6 +2329,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                   setup_label(uwp::Text::render_scale) + L": " +
                       std::to_wstring(render_scale_choice).substr(0, 3) + L"× — " +
                       setup_label(uwp::Text::scale_restart),
+                  setup_label(uwp::Text::upscaler) + L": " +
+                      (preferences.upscaler == int(fsr::Upscaler::Spatial)    ? std::wstring(L"FSR 1")
+                       : preferences.upscaler == int(fsr::Upscaler::Temporal) ? std::wstring(L"FSR 3.1")
+                                                                              : setup_label(uwp::Text::upscaler_off)) +
+                      L" — " + setup_label(uwp::Text::scale_restart),
                   setup_label(uwp::Text::fps) + L": " + std::to_wstring(preferences.fps),
                   setup_label(uwp::Text::mods),
                   setup_label(uwp::Text::volume) + L": " + std::to_wstring(preferences.volume) + L"%",
@@ -2392,9 +2397,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             std::lock_guard lock(uwp::quick_menu.mutex);
             auto &q = uwp::quick_menu;
             if (pressed & uwp::up)
-                q.focus = (q.focus + 7) % 8;
+                q.focus = (q.focus + 8) % 9;
             if (pressed & uwp::down)
-                q.focus = (q.focus + 1) % 8;
+                q.focus = (q.focus + 1) % 9;
             focus = q.focus;
         }
         if (!(pressed & (uwp::a | uwp::left | uwp::right)))
@@ -2409,16 +2414,22 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             ApplicationData::Current().LocalSettings().Values().Insert(L"renderScale",
                                                                        box_value(render_scale_choice));
         } else if (focus == 3) {
+            // Off -> FSR 1 -> FSR 3.1 -> Off; upscaling is opt-in and applies at the next launch.
+            preferences.upscaler = preferences.upscaler == int(fsr::Upscaler::Spatial)    ? int(fsr::Upscaler::Temporal)
+                                   : preferences.upscaler == int(fsr::Upscaler::Temporal) ? int(fsr::Upscaler::Off)
+                                                                                          : int(fsr::Upscaler::Spatial);
+            save_preferences();
+        } else if (focus == 4) {
             preferences.fps = preferences.fps == 30 ? 60 : 30;
             save_preferences();
-        } else if (focus == 4 && activate)
+        } else if (focus == 5 && activate)
             return_home(true);
-        else if (focus == 5) {
+        else if (focus == 6) {
             preferences.volume = std::clamp(preferences.volume + (pressed & uwp::left ? -10 : 10), 0, 100);
             save_preferences();
-        } else if (focus == 6 && activate) {
-            capture_screenshot();
         } else if (focus == 7 && activate) {
+            capture_screenshot();
+        } else if (focus == 8 && activate) {
             quit = true;
             uwp::quick_menu.requested = false;
             CoreApplication::Exit();

@@ -168,9 +168,9 @@ void start_runtime(void *window, int width, int height) {
                              : fsr::select_scale(width, height, hardware_max_render_scale() <= 1.5f, quality,
                                                  preferences.scale);
 #ifdef BOTW_HAS_FFX
-        const char *override_value = std::getenv("BOTW_UPSCALER");
+        fsr::upscaler.store(preferences.upscaler); // The renderer reads it before settings::apply().
         const auto automatic = fsr3::select(fsr3::console.load(), sim_series_s::settings().enabled,
-                                            override_value ? override_value : "", true, true, height);
+                                            fsr::upscaler_override(), true, true, height);
         if (height > automatic.output_height) {
             width = std::max(1, width * automatic.output_height / height);
             height = automatic.output_height;

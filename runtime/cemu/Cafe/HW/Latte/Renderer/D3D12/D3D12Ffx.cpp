@@ -4,6 +4,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureD3D12.h"
+#include "../../../../../../src/fsr.h"
 #include "../../../../../../src/fsr3_policy.h"
 #include "../../../../../../src/fsr3_history.h"
 #include "../../../../../../src/log.h"
@@ -468,8 +469,7 @@ D3D12Ffx::D3D12Ffx(D3D12Renderer &renderer) : impl(std::make_unique<Impl>(render
 {
 #ifdef BOTW_HAS_FFX
 	auto &s = *impl;
-	const char *overrideValue = std::getenv("BOTW_UPSCALER");
-	if (fsr3::select(fsr3::console.load(), false, overrideValue ? overrideValue : "", true, true).path != fsr3::Path::Fsr31)
+	if (fsr3::select(fsr3::console.load(), false, fsr::upscaler_override(), true, true).path != fsr3::Path::Fsr31)
 		return;
 #ifdef BOTW_FFX_STATIC
 	s.available = true;

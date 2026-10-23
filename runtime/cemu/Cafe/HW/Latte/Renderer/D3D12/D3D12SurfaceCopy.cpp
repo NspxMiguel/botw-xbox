@@ -114,16 +114,12 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	// DRC and downscales keep their existing output path.
 	sint32 inputWidth, inputHeight;
 	view->baseTexture->GetEffectiveSize(inputWidth, inputHeight, view->firstMip);
-	const char *overrideValue = std::getenv("BOTW_UPSCALER");
-	auto requested = fsr::upscaler.load();
+	const std::string_view overrideValue = fsr::upscaler_override();
+	// Off unless the player (or BOTW_UPSCALER) picked FSR 1 or FSR 3.1.
+	const auto requested = overrideValue == "off" ? fsr::Upscaler::Off : fsr::Upscaler::Spatial;
 #ifdef BOTW_HAS_FFX
-	const auto selection = fsr3::select(fsr3::console.load(), false, overrideValue ? overrideValue : "", true, true);
-	requested = selection.path == fsr3::Path::Off ? fsr::Upscaler::Off : fsr::Upscaler::Auto;
+	const auto selection = fsr3::select(fsr3::console.load(), false, overrideValue, true, true);
 #endif
-	if (overrideValue && std::string_view(overrideValue) == "off")
-		requested = fsr::Upscaler::Off;
-	else if (overrideValue && (std::string_view(overrideValue) == "fsr1" || std::string_view(overrideValue) == "fsr3"))
-		requested = fsr::Upscaler::Spatial;
 	bool fsr = !padView && !m_fsrFailed &&
 			   fsr::should_upscale(requested, inputWidth, inputHeight, imageWidth, imageHeight);
 #ifdef BOTW_FFX_STATIC
