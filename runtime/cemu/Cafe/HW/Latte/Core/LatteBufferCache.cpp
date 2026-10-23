@@ -1,3 +1,4 @@
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "util/ChunkedHeap/ChunkedHeap.h"
 #include "util/helpers/fspinlock.h"
@@ -1531,6 +1532,7 @@ void LatteBufferCache_removeSingleNodeFromTree(BufferCacheNode* node)
 
 BufferCacheNode* LatteBufferCache_reserveRange(MPTR physAddress, uint32 size)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::BufferSync);
 	MPTR rangeStart = physAddress - (physAddress % CACHE_PAGE_SIZE);
 	MPTR rangeEnd = (physAddress + size + CACHE_PAGE_SIZE_M1) & ~CACHE_PAGE_SIZE_M1;
 
@@ -1561,6 +1563,7 @@ BufferCacheNode* LatteBufferCache_reserveRange(MPTR physAddress, uint32 size)
 
 uint32 LatteBufferCache_retrieveDataInCache(MPTR physAddress, uint32 size)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::BufferSync);
 	auto range = LatteBufferCache_reserveRange(physAddress, size);
 	range->flagInUse();
 
@@ -1586,6 +1589,7 @@ void LatteBufferCache_copyStreamoutDataToCache(MPTR physAddress, uint32 size, ui
 
 void LatteBufferCache_invalidate(MPTR physAddress, uint32 size)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::BufferSync);
 	if (size == 0)
 		return;
 	if (physAddress >= 0xFFFFF000)
@@ -1603,6 +1607,7 @@ void LatteBufferCache_invalidate(MPTR physAddress, uint32 size)
 // optimized version of LatteBufferCache_invalidate() if physAddress points to the beginning of a page
 void LatteBufferCache_invalidatePage(MPTR physAddress)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::BufferSync);
 	cemu_assert_debug((physAddress & CACHE_PAGE_SIZE_M1) == 0);
 	BufferCacheNode* node = g_gpuBufferCache.GetRange(physAddress);
 	if (node)
@@ -1711,6 +1716,7 @@ void LatteBufferCache_notifyDCFlush(MPTR address, uint32 size)
 
 void LatteBufferCache_processDCFlushQueue()
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::BufferSync);
 	if (s_DCFlushQueue->Empty()) // quick check to avoid locking if there is no work to do
 		return;
 	g_spinlockDCFlushQueue.lock();

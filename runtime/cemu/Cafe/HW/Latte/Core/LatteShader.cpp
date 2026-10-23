@@ -1,3 +1,4 @@
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/Core/LatteShaderAssembly.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
@@ -1159,6 +1160,7 @@ void LatteSHRC_CleanupShaderStateCache()
 
 void LatteSHRC_UpdateActiveShaders()
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::ShaderPipeline);
 	// check if geometry shader is used
 	auto gsMode = LatteGPUState.contextNew.VGT_GS_MODE.get_MODE();
 

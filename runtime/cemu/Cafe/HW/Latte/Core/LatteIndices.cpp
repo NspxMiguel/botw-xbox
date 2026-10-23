@@ -1,3 +1,4 @@
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
@@ -646,6 +647,7 @@ void LatteIndices_alternativeCalculateIndexMax(const void* indexData, LatteIndex
 
 void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32 count, LattePrimitiveMode primitiveMode, uint32& indexMax, Renderer::INDEX_TYPE& renderIndexType, uint32& outputCount, Renderer::IndexAllocation& indexAllocation)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Indices);
 	// what this should do:
 	// [x] use fast SIMD-based index decoding
 	// [x] unpack QUAD indices to triangle indices

@@ -1,3 +1,4 @@
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 
 #include "Cafe/HW/Latte/Core/Latte.h"
@@ -151,6 +152,7 @@ LatteTextureView* LatteMRT::GetDepthAttachment()
 
 void LatteMRT::ApplyCurrentState()
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::RenderTargets);
 	uint64 key = 0;
 	LatteTextureView* fboLookupView = NULL;
 	for (sint32 i = 0; i < 8; i++)
@@ -438,6 +440,7 @@ Latte::E_GX2SURFFMT LatteMRT::GetDepthBufferFormat(const LatteContextRegister& l
 
 bool LatteMRT::UpdateCurrentFBO()
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::RenderTargets);
 	catchOpenGLError();
 	sLatteRenderTargetState.rtUpdateListCount = 0;
 	// combine color buffer mask with pixel output mask from pixel shader

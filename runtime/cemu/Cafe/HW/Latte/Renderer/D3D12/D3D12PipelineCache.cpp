@@ -6,6 +6,7 @@
 // BotWRecomp: iOS also globs this directory; keep non-D3D12 builds platform-neutral.
 #ifdef ENABLE_D3D12
 
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12PipelineCache.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Format.h"
@@ -1357,11 +1358,14 @@ static bool IsLikelyOneOffTarget(CachedFBOD3D12 *fbo)
 D3D12PipelineInfo *D3D12PipelineCache::GetOrCreate(const LatteFetchShader *fetchShader, LatteDecompilerShader *vertexShader, LatteDecompilerShader *geometryShader, LatteDecompilerShader *pixelShader,
 												   CachedFBOD3D12 *fbo, const LatteContextRegister &lcr, Renderer::INDEX_TYPE indexType)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::ShaderPipeline);
 	const uint64 hash = CalculateHash(fetchShader, vertexShader, geometryShader, pixelShader, fbo, lcr, indexType);
 	auto it = m_pipelines.find(hash);
 	if (it != m_pipelines.end())
 		return it->second.get();
 
+	// Count every in-memory lookup miss, including retries while shaders are pending.
+	LatteProfiler::Add(LatteProfiler::Counter::PipelineMisses);
 	const bool async = GetConfig().async_compile;
 	// Smooth: the game's shaders are compiled on the shader threads as soon as they're created. Compiling one on the
 	// render thread on its first draw (PreponeCompilation) hitched for tens to hundreds of ms on the Xbox when a new

@@ -1,3 +1,4 @@
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LatteShader.h"
@@ -38,6 +39,7 @@ void LatteTextureLoader_UpdateTextureSliceData(LatteTexture* tex, uint32 sliceIn
 
 void LatteTexture_ReloadData(LatteTexture* tex)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::TextureLoad);
 	tex->reloadCount++;
 	for(sint32 mip=0; mip<tex->mipLevels; mip++)
 	{
@@ -74,6 +76,7 @@ void LatteTexture_ReloadData(LatteTexture* tex)
 
 LatteTextureView* LatteTexture_CreateTexture(Latte::E_DIM dim, MPTR physAddress, MPTR physMipAddress, Latte::E_GX2SURFFMT format, uint32 width, uint32 height, uint32 depth, uint32 pitch, uint32 mipLevels, uint32 swizzle, Latte::E_HWTILEMODE tileMode, bool isDepth)
 {
+	LatteProfiler::Add(LatteProfiler::Counter::TextureMisses);
 	const auto tex = g_renderer->texture_createTextureEx(dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth);
 
 	// init slice/mip info array
@@ -293,6 +296,7 @@ void LatteTexture_updateTexturesForStage(LatteDecompilerShader* shaderContext, u
 // also sets LatteGPUState.requiresTextureBarrier to true if texture barrier is required
 void LatteTexture_updateTextures()
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::TextureBinding);
 	LatteGPUState.textureBindCounter++;
 	// pixel shader
 	LatteDecompilerShader* pixelShader = LatteSHRC_GetActivePixelShader();
