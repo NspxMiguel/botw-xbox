@@ -110,10 +110,23 @@ class Remote : public Source {
         offline_ = false;
         Page out;
         if (source_ == SourceId::gamebanana) {
-            auto response = get(gamebanana_url(page, query));
-            auto parsed = parse_gamebanana(response);
-            out.cards = parse_gamebanana_cards(response);
-            out.more = !parsed.complete && page * 15 < parsed.count;
+            if (page == 1 && query.empty())
+                out = featured_cards(*this, cat);
+            try {
+                auto response = get(gamebanana_url(page, query));
+                auto parsed = parse_gamebanana(response);
+                for (auto &c : parse_gamebanana_cards(response)) {
+                    if (query.empty() && std::any_of(out.cards.begin(), out.cards.end(),
+                                                     [&](auto &featured) { return featured.id == c.id; }))
+                        continue;
+                    out.cards.push_back(std::move(c));
+                }
+                out.more = !parsed.complete && page * 15 < parsed.count;
+            } catch (const std::exception &) {
+                if (out.cards.empty())
+                    throw;
+                out.error = "Catalog unavailable";
+            }
         } else {
             if (page > 1)
                 return out;
@@ -138,6 +151,14 @@ class Remote : public Source {
             auto info =
                 parse_gamebanana_detail(get("https://gamebanana.com/apiv11/Mod/" + c.id + "/ProfilePage"));
             c.description = info.description;
+            if (!info.title.empty())
+                c.title = info.title;
+            if (!info.author.empty())
+                c.author = info.author;
+            if (!info.title.empty())
+                c.category = info.category;
+            c.downloads_count = info.downloads_count;
+            c.likes = info.likes;
             c.version = info.version;
             c.date = info.date;
             if (!info.images.empty())
@@ -362,6 +383,14 @@ std::vector<Card> parse_gamebanana_cards(std::string_view text) {
 Card parse_gamebanana_detail(std::string_view text) {
     auto root = json::parse(text);
     Card c;
+    c.id = std::to_string(number(root["_idRow"]));
+    c.title = plain_text(root["_sName"].string(), 160);
+    c.author = plain_text(root["_aSubmitter"]["_sName"].string(), 120);
+    c.source = "GameBanana";
+    c.category = category(root["_aRootCategory"]["_sName"].string() + " " +
+                          root["_aCategory"]["_sName"].string() + " " + c.title);
+    c.downloads_count = number(root["_nDownloadCount"]);
+    c.likes = number(root["_nLikeCount"]);
     c.description = plain_text(root["_sText"].string());
     c.version = root["_sVersion"].string();
     if (number(root["_tsDateUpdated"]))
@@ -520,6 +549,51 @@ std::unique_ptr<Source> make_source(SourceId id, Fetch fetch, fs::path root, std
     if (id == SourceId::local)
         return std::make_unique<Local>(std::move(removable));
     return std::make_unique<Remote>(id, std::move(fetch), std::move(root), refresh);
+}
+Page featured_cards(Source &source, Category cat) {
+    Page out;
+    for (auto id : featured_gamebanana_ids) {
+        try {
+            Card card;
+            card.id = id;
+            card.source = "GameBanana";
+            card = source.files(std::move(card));
+            if (card.title.empty() || card.author.empty())
+                continue;
+            card.featured = true;
+            if (matches(card, "", cat))
+                out.cards.push_back(std::move(card));
+        } catch (const std::exception &) {
+            // Optional recommendations never fail the catalog. Platform cancellation still propagates.
+        }
+    }
+    return out;
+}
+size_t preferred_file(const Card &card, int layout) {
+    size_t selected = 0;
+    int best = -1;
+    for (size_t i = 0; i < card.downloads.size(); ++i) {
+        auto name = lower(card.downloads[i].name);
+        bool xbox = name.find("xbox") != name.npos;
+        int score = (xbox == (layout == 1) ? 2 : 0) + (name.find("jp") == name.npos ? 1 : 0);
+        if (score > best) {
+            best = score;
+            selected = i;
+        }
+    }
+    return selected;
+}
+bool should_offer_translation(bool portuguese, bool asked_before, const std::vector<Card> &installed) {
+    if (!portuguese || asked_before)
+        return false;
+    return std::none_of(installed.begin(), installed.end(), [](const Card &card) {
+        if (card.source == "GameBanana" && card.id == ptbr_translation_id)
+            return true;
+        // Console/USB installs from before store receipts also count, even when disabled.
+        auto id = lower(card.installed_id);
+        return id == "file:ptbr_oficial_xbox_western" || id == "file:ptbr_oficial_116d4" ||
+               id == "file:ptbr_jp" || id == "file:ptbr_jp_xbox_western";
+    });
 }
 void finish_install(const fs::path &directory, const std::function<void()> &commit) {
     try {

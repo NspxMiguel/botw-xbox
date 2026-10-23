@@ -1440,6 +1440,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     continue;
                 }
                 preferences.auto_launch = choice == 0;
+                co_await offer_translation();
+                if (quit)
+                    co_return;
                 co_await setup_work([&] { uwp::setup::write_text(local, L"setup_done.txt", "1\n"); });
                 if (!setup_error.empty())
                     continue;

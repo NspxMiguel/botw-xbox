@@ -85,6 +85,32 @@ confirmation and load-order changes. Changes are saved immediately for next boot
 The initial remote catalog is bounded to four GameBanana pages per search;
 installed identities outside those pages are checked separately for updates.
 
+Explore starts with a **Featured / Destaques** row when the search is empty.
+`featured_gamebanana_ids` in `store.h` is the small, ordered list of GameBanana
+mod IDs (initially `717162`, the community Brazilian Portuguese translation).
+Cards, author credits and files come from the existing GameBanana transport and
+response cache. Unavailable featured entries are silently skipped; duplicates
+in the regular catalog are suppressed. Entries only link to the author's
+GameBanana page and downloads: no archives are mirrored, bundled or redistributed.
+
+Details initially select a filename containing `xbox` for Xbox labels
+(`preferences.layout == 1`), or a filename without it for Nintendo labels (`0`).
+Within that layout, filenames without `jp` take priority. The first file wins
+equal scores; players can always change the file on the detail screen.
+
+At the end of setup, after the auto-launch question, Portuguese console UIs
+offer the translation once if it is not already installed. Store receipts and
+the four known manually installed PT-BR folder names are recognized, including
+disabled installs. The offer credits the API's author and GameBanana. Only
+metadata is fetched before consent; **Yes / Sim** uses the normal store
+download/extraction/receipt path, chooses the player's layout and enables the
+installed mod. **Not now / Agora não** (also B) downloads nothing. The
+`ptbrTranslationAsked` LocalSettings key stores either answer before any archive
+download, so setup never asks again, even if installation fails or is cancelled.
+Missing metadata skips the offer without recording an answer. Failed or cancelled
+installs can be retried manually from Explore. The EN offer is translated for
+consistency but is gated off for non-Portuguese console UIs.
+
 ### Archive backend limitation
 
 ZIP works in the default Xbox build. `archive_install.cpp` also provides a

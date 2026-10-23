@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include "gamebanana.h"
+#include <array>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -8,6 +9,10 @@
 #include <string>
 #include <vector>
 namespace mods::store {
+inline constexpr std::string_view ptbr_translation_id = "717162";
+// Featured entries only link to the author's GameBanana page and downloads;
+// their files are never mirrored or bundled with the launcher.
+inline constexpr std::array featured_gamebanana_ids{ptbr_translation_id};
 enum class Category { all, graphics, performance, language, textures, gameplay, audio, fixes, tools };
 enum class SourceId { all, gamebanana, graphics, link, local };
 struct Card {
@@ -17,7 +22,7 @@ struct Card {
     Category category = Category::gameplay;
     uint64_t size = 0, downloads_count = 0, likes = 0;
     std::string installed_id, installed_version, installed_date;
-    bool enabled = false, locked = false;
+    bool enabled = false, locked = false, featured = false;
     size_t order = 0, total = 0;
     bool update() const;
 };
@@ -56,6 +61,9 @@ class Source {
 };
 std::unique_ptr<Source> make_source(SourceId, Fetch, std::filesystem::path mods_root,
                                     std::vector<std::filesystem::path> removable = {}, bool refresh = false);
+Page featured_cards(Source &, Category = Category::all);
+size_t preferred_file(const Card &, int layout);
+bool should_offer_translation(bool portuguese, bool asked_before, const std::vector<Card> &installed);
 void finish_install(const std::filesystem::path &directory, const std::function<void()> &commit);
 void save_receipt(const std::filesystem::path &directory, const Card &);
 void read_receipt(const std::filesystem::path &directory, Card &);
