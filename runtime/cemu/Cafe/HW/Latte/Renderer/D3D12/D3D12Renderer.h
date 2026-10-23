@@ -43,7 +43,6 @@ namespace WindowSystem
 struct WindowHandleInfo;
 }
 
-
 class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 {
 	friend class LatteQueryObjectD3D12;
