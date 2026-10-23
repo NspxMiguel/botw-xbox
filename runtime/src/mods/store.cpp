@@ -210,15 +210,17 @@ class Local : public Source {
         if (page > 1)
             return out;
         for (auto root : roots_) {
-            if (fs::is_directory(root / "mods"))
-                root /= "mods";
+            // UWP denies direct file access to removable drives outside the StorageFolder broker; such a
+            // drive lists nothing here instead of failing the whole catalog.
             std::error_code ec;
+            if (fs::is_directory(root / "mods", ec))
+                root /= "mods";
             for (auto &e : fs::directory_iterator(root, ec)) {
-                if (e.is_symlink())
+                if (e.is_symlink(ec))
                     continue;
-                bool directory = e.is_directory() && (fs::is_directory(e.path() / "content") ||
-                                                      fs::is_directory(e.path() / "aoc") ||
-                                                      fs::is_regular_file(e.path() / "rules.txt"));
+                bool directory = e.is_directory(ec) && (fs::is_directory(e.path() / "content", ec) ||
+                                                        fs::is_directory(e.path() / "aoc", ec) ||
+                                                        fs::is_regular_file(e.path() / "rules.txt", ec));
                 auto ext = lower(path_string(e.path().extension()));
                 if (!directory && ext != ".zip" && ext != ".7z" && ext != ".rar")
                     continue;
@@ -228,7 +230,7 @@ class Local : public Source {
                 c.source = "USB";
                 c.category = category(c.title);
                 if (!directory) {
-                    c.size = e.file_size();
+                    c.size = e.file_size(ec);
                     c.downloads = {{c.title, c.id, "", c.size}};
                 }
                 if (directory && fs::is_regular_file(e.path() / "rules.txt"))
@@ -342,8 +344,9 @@ std::vector<Card> parse_gamebanana_cards(std::string_view text) {
             c.date = std::to_string(number(v["_tsDateUpdated"]));
         auto &media = v["_aPreviewMedia"]["_aImages"];
         for (auto &im : media.array()) {
+            // The 220 px thumbnail is WebP, which the console's WIC cannot decode; the original is JPG/PNG.
             auto file = im["_sFile220"].string();
-            if (file.empty())
+            if (file.empty() || file.ends_with(".webp"))
                 file = im["_sFile"].string();
             auto url = im["_sBaseUrl"].string() + "/" + file;
             if (url.starts_with("https://")) {
@@ -365,7 +368,7 @@ Card parse_gamebanana_detail(std::string_view text) {
         c.date = std::to_string(number(root["_tsDateUpdated"]));
     for (auto &im : root["_aPreviewMedia"]["_aImages"].array()) {
         auto file = im["_sFile"].string();
-        if (file.empty())
+        if (file.empty() || file.ends_with(".webp"))
             file = im["_sFile220"].string();
         auto url = im["_sBaseUrl"].string() + "/" + file;
         if (url.starts_with("https://")) {

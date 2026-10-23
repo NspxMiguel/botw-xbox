@@ -346,9 +346,9 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 ui_feedback();
             if (setup_active) {
                 e.Handled(true);
-                LOG("setup key %d (pad=%d focus=%d)", int(key), int(bool(pad)), home.focus);
-                // Real pads use the repeat/edge sampler below; virtual keys also support remote input.
-                if (pad && (key == VirtualKey::GamepadA || key == VirtualKey::GamepadB ||
+                // Pad and remote buttons both reach the poll's repeat/edge sampler (remote taps are latched there);
+                // handling them here too moved the focus twice per press.
+                if ((key == VirtualKey::GamepadA || key == VirtualKey::GamepadB ||
                             key == VirtualKey::GamepadX ||
                             key == VirtualKey::GamepadDPadUp || key == VirtualKey::GamepadDPadDown ||
                             key == VirtualKey::GamepadDPadLeft || key == VirtualKey::GamepadDPadRight))
@@ -2675,8 +2675,6 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch())
                             .count();
                     pressed = setup_repeat.update(buttons, uwp::up | uwp::down | uwp::left | uwp::right, now);
-                    if (pressed)
-                        LOG("setup pressed 0x%x (focus=%d rows=%zu)", pressed, home.focus, home.rows.size());
                     if ((pressed & uwp::x) && setup_detect && !setup_busy) {
                         accepted_forms = !accepted_forms;
                         setup_action = -5;
