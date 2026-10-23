@@ -6,6 +6,7 @@
 #pragma once
 
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
+#include "Cafe/HW/Latte/Core/LatteDrawCache.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Format.h"
 
@@ -83,10 +84,21 @@ class LatteTextureD3D12 : public LatteTexture
 	}
 	void SetSubresourceState(uint32 subresource, D3D12_RESOURCE_STATES state)
 	{
+		m_lastTransition.Clear();
 		m_states[subresource] = state;
 	}
 	bool AllSubresourcesInState(D3D12_RESOURCE_STATES state) const;
 	void SetAllSubresourceStates(D3D12_RESOURCE_STATES state);
+
+	using TransitionKey = std::array<uint32_t, 5>;
+	bool ReuseTransition(const TransitionKey &key) const
+	{
+		return m_lastTransition.Find(key) != nullptr;
+	}
+	void RememberTransition(const TransitionKey &key)
+	{
+		m_lastTransition.Store(key, true);
+	}
 
 	// the D3D12 state textures are kept in when they are not being written to
 	static constexpr D3D12_RESOURCE_STATES kShaderReadState = (D3D12_RESOURCE_STATES)((UINT)D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | (UINT)D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -95,6 +107,7 @@ class LatteTextureD3D12 : public LatteTexture
 	LatteTextureView *CreateView(Latte::E_DIM dim, Latte::E_GX2SURFFMT format, sint32 firstMip, sint32 mipCount, sint32 firstSlice, sint32 sliceCount) override;
 
   private:
+	LatteDrawCache::ExactCache<TransitionKey, bool> m_lastTransition;
 	uint64 m_contentVersion = 1;
 	D3D12Renderer *m_renderer;
 	ComPtr<ID3D12Resource> m_resource;

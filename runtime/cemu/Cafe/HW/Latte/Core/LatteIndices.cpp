@@ -1,6 +1,8 @@
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Core/LatteConst.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
+#include "Cafe/HW/Latte/Core/LatteIndices.h"
+#include "Cafe/HW/Latte/Core/LatteDrawCache.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
 #include "Common/cpu_features.h"
@@ -17,17 +19,19 @@ struct
 	{
 		// input data
 		const void* lastPtr;
-		uint32 lastCount;
-		LattePrimitiveMode lastPrimitiveMode;
-		LatteIndexType lastIndexType;
+		LatteDrawCache::IndexKey key;
 		uint64 lastUsed;
+		size_t inputSize;
+		LatteDrawCache::ContentSnapshot content;
 		// output
 		uint32 indexMax;
 		Renderer::INDEX_TYPE renderIndexType;
 		uint32 outputCount;
 		Renderer::IndexAllocation indexAllocation;
 	};
-	std::array<CacheEntry, 8> entry;
+	// D3D12: direct-mapped small entries (at most 4 MiB of CPU shadows), plus
+	// eight transient LRU entries for larger inputs and the other backends.
+	std::array<CacheEntry, 72> entry;
 	uint64 currentUsageCounter{0};
 }LatteIndexCache{};
 
@@ -35,24 +39,44 @@ void LatteIndices_invalidate(const void* memPtr, uint32 size)
 {
 	for(auto& entry : LatteIndexCache.entry)
 	{
-		if (entry.lastPtr >= memPtr && (entry.lastPtr < ((uint8*)memPtr + size)) )
+		if (entry.lastPtr && LatteDrawCache::RangesOverlap((uintptr_t)entry.lastPtr, entry.inputSize, (uintptr_t)memPtr, size))
 		{
 			if(entry.lastPtr != nullptr)
 				g_renderer->indexData_releaseIndexMemory(entry.indexAllocation);
 			entry.lastPtr = nullptr;
-			entry.lastCount = 0;
 		}
 	}
 }
 
-void LatteIndices_invalidateAll()
+void LatteIndices_invalidateOnWait()
 {
+	// D3D12 allocations remain owned by entries, independently of submissions. Hits
+	// compare all guest bytes; other backends retain the original wait invalidation.
+	if (g_renderer->GetType() != RendererAPI::D3D12)
+	{
+		LatteIndices_invalidateAll();
+		return;
+	}
+	for (size_t i = 64; i < LatteIndexCache.entry.size(); ++i)
+	{
+		auto &entry = LatteIndexCache.entry[i];
+		if (entry.lastPtr)
+			g_renderer->indexData_releaseIndexMemory(entry.indexAllocation);
+		entry.lastPtr = nullptr;
+		entry.content.Clear();
+	}
+}
+
+void LatteIndices_invalidateAll(Renderer *renderer)
+{
+	if (!renderer)
+		renderer = g_renderer.get();
 	for(auto& entry : LatteIndexCache.entry)
 	{
 		if (entry.lastPtr != nullptr)
-			g_renderer->indexData_releaseIndexMemory(entry.indexAllocation);
+			renderer->indexData_releaseIndexMemory(entry.indexAllocation);
+		entry.content.Clear();
 		entry.lastPtr = nullptr;
-		entry.lastCount = 0;
 	}
 }
 
@@ -653,15 +677,37 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	// [x] unpack QUAD indices to triangle indices
 	// [x] calculate min and max index, be careful about primitive restart index
 	// [x] decode data directly into coherent memory buffer?
-	// [ ] better cache implementation, allow to cache across frames
+	// [x] bounded D3D12 reuse across frames with complete content validation
 
-	// reuse from cache if data didn't change
-	auto cacheEntry = std::find_if(LatteIndexCache.entry.begin(), LatteIndexCache.entry.end(), [indexData, count, primitiveMode, indexType](const auto& entry)
+	const uint32 primitiveRestartIndex = LatteGPUState.contextNew.VGT_MULTI_PRIM_IB_RESET_INDX.get_RESTART_INDEX();
+	const size_t inputSize = indexType == LatteIndexType::AUTO ? 0 : size_t(count) * ((indexType == LatteIndexType::U16_BE || indexType == LatteIndexType::U16_LE) ? 2 : 4);
+	const bool validateContent = g_renderer->GetType() == RendererAPI::D3D12;
+	const uint32 indexOutputSize = LatteIndices_calculateIndexOutputSize(primitiveMode, indexType, count);
+	if (indexOutputSize == 0)
 	{
-		return entry.lastPtr == indexData && entry.lastCount == count && entry.lastPrimitiveMode == primitiveMode && entry.lastIndexType == indexType;
+		outputCount = count;
+		indexMax = std::max(count, 1u) - 1;
+		renderIndexType = Renderer::INDEX_TYPE::NONE;
+		indexAllocation = {};
+		return;
+	}
+	const bool persistent = validateContent && inputSize <= 64 * 1024 && indexOutputSize <= 96 * 1024;
+	const LatteDrawCache::IndexKey key{(uintptr_t)indexData, count, (uint32)indexType, (uint32)primitiveMode, primitiveRestartIndex};
+	auto begin = LatteIndexCache.entry.begin() + 64;
+	auto end = LatteIndexCache.entry.end();
+	if (persistent)
+	{
+		// Address/count/mode/type/restart are compared below; collisions only replace entries.
+		const size_t slot = key.Slot(64);
+		begin = LatteIndexCache.entry.begin() + slot;
+		end = begin + 1;
+	}
+	auto cacheEntry = std::find_if(begin, end, [&](const auto &entry) {
+		return entry.lastPtr && entry.key == key && (!validateContent || entry.content.Matches(indexData, inputSize));
 	});
-	if (cacheEntry != LatteIndexCache.entry.end())
+	if (cacheEntry != end)
 	{
+		LatteProfiler::Add(LatteProfiler::Counter::IndexHits);
 		indexMax = cacheEntry->indexMax;
 		renderIndexType = cacheEntry->renderIndexType;
 		outputCount = cacheEntry->outputCount;
@@ -669,6 +715,7 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		cacheEntry->lastUsed = LatteIndices_GetNextUsageIndex();
 		return;
 	}
+	LatteProfiler::Add(LatteProfiler::Counter::IndexMisses);
 
 	outputCount = 0;
 	if (indexType == LatteIndexType::AUTO)
@@ -680,18 +727,6 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	else
 		cemu_assert_debug(false);
 
-	uint32 primitiveRestartIndex = LatteGPUState.contextNew.VGT_MULTI_PRIM_IB_RESET_INDX.get_RESTART_INDEX();
-
-	// calculate index output size
-	uint32 indexOutputSize = LatteIndices_calculateIndexOutputSize(primitiveMode, indexType, count);
-	if (indexOutputSize == 0)
-	{
-		outputCount = count;
-		indexMax = std::max(count, 1u)-1;
-		renderIndexType = Renderer::INDEX_TYPE::NONE;
-		indexAllocation = {};
-		return; // no indices
-	}
 	// query index buffer from renderer
 	indexAllocation = g_renderer->indexData_reserveIndexMemory(indexOutputSize);
 	void* indexOutputPtr = indexAllocation.mem;
@@ -848,18 +883,18 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	g_renderer->indexData_uploadIndexMemory(indexAllocation);
 	performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += indexOutputSize;
 	// get least recently used cache entry
-	auto lruEntry = std::min_element(LatteIndexCache.entry.begin(), LatteIndexCache.entry.end(), [](const auto& a, const auto& b)
-	{
+	auto lruEntry = std::min_element(begin, end, [](const auto &a, const auto &b) {
 		return a.lastUsed < b.lastUsed;
 	});
 	// invalidate previous allocation
 	if(lruEntry->lastPtr != nullptr)
 		g_renderer->indexData_releaseIndexMemory(lruEntry->indexAllocation);
 	// update cache
+	if (validateContent)
+		lruEntry->content.Assign(indexData, inputSize);
+	lruEntry->inputSize = inputSize;
+	lruEntry->key = key;
 	lruEntry->lastPtr = indexData;
-	lruEntry->lastCount = count;
-	lruEntry->lastPrimitiveMode = primitiveMode;
-	lruEntry->lastIndexType = indexType;
 	lruEntry->indexMax = indexMax;
 	lruEntry->renderIndexType = renderIndexType;
 	lruEntry->outputCount = outputCount;

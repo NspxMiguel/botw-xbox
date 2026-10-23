@@ -16,7 +16,7 @@ by actual presents.
 The exact profiler format (fmt placeholders) is:
 
 ```text
-Latte profile: {:.2f}s, {} game frames, {:.1f} draws/frame; ms/frame: draw-total {:.3f} (inclusive), draw-other {:.3f}, shader-pipeline {:.3f}, texture-bind {:.3f}, texture-load {:.3f}, buffer-sync {:.3f}, indices {:.3f}, uniforms {:.3f}, descriptors {:.3f}, render-targets {:.3f}, submit {:.3f}, pm4 {:.3f}, draw-state {:.3f}, pipeline-bind {:.3f}, vertex-buffers {:.3f}, root-signature {:.3f}, render-state {:.3f}, draw-call {:.3f}; top: {} {:.3f}, {} {:.3f}, {} {:.3f}; covered {:.1f}%, unaccounted {:.1f}% ({:.3f} ms/frame); pipeline-miss/frame {:.2f}, texture-new/frame {:.2f}, texture-upload {:.0f} B/frame, buffer-upload {:.0f} B/frame
+Latte profile: {:.2f}s, {} game frames, {:.1f} draws/frame; ms/frame: draw-total {:.3f} (inclusive), draw-other {:.3f}, shader-pipeline {:.3f}, texture-bind {:.3f}, texture-load {:.3f}, buffer-sync {:.3f}, indices {:.3f}, uniforms {:.3f}, descriptors {:.3f}, render-targets {:.3f}, submit {:.3f}, pm4 {:.3f}, draw-state {:.3f}, pipeline-bind {:.3f}, vertex-buffers {:.3f}, root-signature {:.3f}, render-state {:.3f}, draw-call {:.3f}; top: {} {:.3f}, {} {:.3f}, {} {:.3f}; covered {:.1f}%, unaccounted {:.1f}% ({:.3f} ms/frame); pipeline-miss/frame {:.2f}, texture-new/frame {:.2f}, texture-upload {:.0f} B/frame, buffer-upload {:.0f} B/frame; descriptor-hit/frame {:.1f}, descriptor-fast/frame {:.1f}, descriptor-miss/frame {:.1f}; dynamic-state-hit/frame {:.1f}, dynamic-state-miss/frame {:.1f}; transition-hit/frame {:.1f}, transition-miss/frame {:.1f}; index-hit/frame {:.1f}, index-miss/frame {:.1f}; fbo-hit/frame {:.1f}, fbo-miss/frame {:.1f}, pipeline-state-hit/frame {:.1f}; submit/frame {:.2f}, submit-empty/frame {:.2f}
 ```
 
 The slot names are fixed; the six draw breakdown fields extend the original
@@ -86,3 +86,57 @@ build/tests/latte_profiler_test
 clang++ -std=c++20 -Wall -Wextra -Werror -Wno-unused-private-field -DENABLE_D3D12 -Itools/tests/d3d12_stubs -Iruntime/cemu tools/tests/latte_descriptor_heap_test.cpp runtime/cemu/Cafe/HW/Latte/Renderer/D3D12/D3D12DescriptorHeaps.cpp -o build/tests/latte_descriptor_heap_test
 build/tests/latte_descriptor_heap_test
 ```
+
+## Round-2 cache counters
+
+All new counters use the same source-frame divisor and report the average over
+one profile window, not a separate per-present log. Compute hit rate as
+`hit / (hit + miss)` from these per-frame values (when the denominator is nonzero).
+
+| Counter | Meaning |
+| --- | --- |
+| `descriptor-hit/frame` | Reused CBV/SRV/UAV stage tables, including internal passes. |
+| `descriptor-fast/frame` | Subset of descriptor hits resolved by the per-stage value comparison before building/hashing the full key. |
+| `descriptor-miss/frame` | Newly allocated/written stage tables; each takes one bulk `CopyDescriptors` call, plus a UAV creation when needed. |
+| `dynamic-state-hit/frame`, `dynamic-state-miss/frame` | Viewport/scissor translation checks against raw register words and actual/effective target dimensions. These count helper calls, not native D3D12 binds. |
+| `transition-hit/frame`, `transition-miss/frame` | Texture range/state requests answered by the last-range shortcut or sent through subresource inspection, respectively. Misses can still produce zero barriers. Write content versions always advance, even on hits. |
+| `index-hit/frame`, `index-miss/frame` | Reused converted index allocations versus conversions/uploads. Implicit draws needing no generated indices are excluded from both. |
+| `fbo-hit/frame`, `fbo-miss/frame` | D3D12 attachment-set reuse before FBO hash/list lookup. Native binding comparison still runs. |
+| `pipeline-state-hit/frame` | PSO lookup bypassed because all relevant register words, shader/fetch identities, format hash and index type matched the preceding successful lookup. |
+| `submit/frame` | Actual submitted command lists, including explicit synchronization requests. |
+| `submit-empty/frame` | Subset with no recorded work flag and no pending barriers, checked after query fragments are closed. Diagnostic only: it is not permission to drop a submit carrying an ordering/fence obligation. |
+
+The descriptor fast path is invalidated by both view-ring and staging heap
+generations. It survives native root-signature invalidation because immutable
+descriptor contents remain usable within their allocation epoch; root arguments
+are still rebound by the existing native binding state. Pipeline lookup state is
+cleared by `D3D12PipelineCache::Clear`.
+
+D3D12 converted indices use 64 direct-mapped persistent slots with exact
+`(address, count, type, primitive mode, restart index)` keys and full CPU shadows.
+Retained inputs are at most 64 KiB and converted output at most 96 KiB per slot
+(4 MiB of input shadows and 6 MiB of live output payload at capacity, excluding
+allocator granularity). Full byte comparison detects middle-only changes; a
+first/last-byte hash would not meet that requirement. Eight transient LRU slots
+handle larger inputs; they and legacy-backend entries are released on guest
+waits. Explicit overlap invalidation releases any intersecting input range.
+Renderer destruction releases persistent allocations through the owning renderer,
+including when the global renderer pointer has already been reset.
+
+Host checks for the new helpers and the production index-cache/conversion code
+with a minimal renderer stand-in (no GPU):
+
+```sh
+clang++ -std=c++20 -O2 -Wall -Wextra -Werror -fsanitize=address,undefined -Iruntime/cemu tools/tests/latte_draw_cache_test.cpp -o build/tests/latte_draw_cache_test
+build/tests/latte_draw_cache_test
+clang++ -std=c++20 -O1 -g -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare -Wno-unused-variable -fsanitize=address,undefined -Itools/tests/latte_stubs -Iruntime/cemu tools/tests/latte_indices_test.cpp runtime/cemu/Cafe/HW/Latte/Core/LatteIndices.cpp -o build/tests/latte_indices_test
+build/tests/latte_indices_test
+```
+
+The index integration test compiles the real `LatteIndices.cpp`. It exercises
+cross-wait reuse, full-content mutation, primitive restart, partial overlap,
+bucket collisions, oversized input/output retirement, auto indices, explicit
+renderer cleanup and the legacy wait boundary. Sanitizers check CPU bounds and
+allocation cleanup; native GPU fence behavior still requires device validation.
+See [latte-perf2.md](latte-perf2.md) for the change report and unmeasured savings
+estimates, and [latte-pipelining.md](latte-pipelining.md) for the thread-split design.

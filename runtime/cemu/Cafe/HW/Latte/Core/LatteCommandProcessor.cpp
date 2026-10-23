@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
+#include "Cafe/HW/Latte/Core/LatteDrawCache.h"
 #include "Cafe/HW/Latte/ISA/RegDefines.h"
 #include "Cafe/OS/libs/gx2/GX2.h" // for write gatherer and special state. Get rid of dependency
 #include "Cafe/OS/libs/gx2/GX2_Event.h" // for notification callbacks
@@ -162,9 +163,9 @@ void LatteCP_processCommandBuffer(DrawPassContext& drawPassCtx);
 // called whenever the GPU runs out of commands or hits a wait condition (semaphores, HLE waits)
 void LatteCP_signalEnterWait()
 {
-	// based on the assumption that games won't do a rugpull and swap out buffer data in the middle of an uninterrupted sequence of drawcalls,
-	// we only flush caches when the GPU goes idle or has to wait for any operation
-	LatteIndices_invalidateAll();
+	// Legacy backends discard indices on guest waits. D3D12 retains bounded entries
+	// and compares complete input bytes before every reuse, including after a wait.
+	LatteIndices_invalidateOnWait();
 }
 
 /*
@@ -379,12 +380,7 @@ LatteCMDPtr LatteCP_itSetRegistersGeneric(LatteCMDPtr cmd, uint32 nWords)
 		}
 		else
 		{
-			sint32 i = 0;
-			while (i < nWords)
-			{
-				outputReg[i] = cmd[i];
-				i++;
-			}
+			LatteDrawCache::StoreBigEndianWords<false>(outputReg, cmd, nWords);
 			cmd += nWords;
 		}
 	}
@@ -433,14 +429,7 @@ bool LatteCP_itSetRegistersGeneric2(LatteCMDPtr cmd, uint32 nWords, TRegRangeCal
 		}
 		else
 		{
-			sint32 i = 0;
-			while (i < nWords)
-			{
-				uint32 v = cmd[i];
-				hasRegChange |= (outputReg[i] != v);
-				outputReg[i] = v;
-				i++;
-			}
+			hasRegChange = LatteDrawCache::StoreBigEndianWords<true>(outputReg, cmd, nWords);
 			cmd += nWords;
 		}
 	}

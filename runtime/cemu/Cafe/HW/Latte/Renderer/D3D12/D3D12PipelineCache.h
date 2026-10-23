@@ -9,6 +9,8 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/ISA/LatteReg.h"
 
+#include "Cafe/HW/Latte/Core/LatteDrawCache.h"
+
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -98,6 +100,7 @@ class D3D12PipelineCache
 	bool PreparePipeline(const LatteFetchShader *fetchShader, LatteDecompilerShader *vertexShader, LatteDecompilerShader *geometryShader, LatteDecompilerShader *pixelShader,
 						 CachedFBOD3D12 *fbo, const LatteContextRegister &lcr, Renderer::INDEX_TYPE indexType, D3D12PipelineCompileJob &job);
 
+	LatteDrawCache::ExactCache<std::array<uint64_t, 28>, D3D12PipelineInfo *> m_lastPipeline;
 	D3D12Renderer *m_renderer;
 	std::unordered_map<uint64, std::shared_ptr<D3D12PipelineInfo>> m_pipelines;
 	std::shared_ptr<D3D12PipelineCompileQueue> m_compileQueue;

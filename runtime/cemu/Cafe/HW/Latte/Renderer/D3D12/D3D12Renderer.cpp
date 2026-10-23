@@ -81,6 +81,7 @@ std::vector<D3D12Renderer::AdapterInfo> D3D12Renderer::GetAdapters()
 D3D12Renderer::D3D12Renderer()
 	: Renderer(RendererAPI::D3D12)
 {
+	LatteRenderTarget_invalidateCachedState();
 	CreateDevice();
 
 	m_stagingViewHeap = std::make_unique<D3D12StagingDescriptorHeap>(m_device.Get(), D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4096, "StagingViews");
@@ -128,6 +129,7 @@ D3D12Renderer::D3D12Renderer()
 
 D3D12Renderer::~D3D12Renderer()
 {
+	LatteIndices_invalidateAll(this);
 	// Shutdown() is expected to have been called already
 	if (m_device)
 		WaitForIdle();
@@ -481,6 +483,9 @@ void D3D12Renderer::SubmitCommandList(bool waitIdle)
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Submit);
 	occlusionQuery_notifyEndCommandList();
+	LatteProfiler::Add(LatteProfiler::Counter::Submissions);
+	if (!m_hasRecordedWork && m_pendingBarriers.empty())
+		LatteProfiler::Add(LatteProfiler::Counter::EmptySubmissions);
 	FlushBarriers();
 	if (m_simSeriesS)
 		m_simSeriesS->EndSegment();
@@ -723,6 +728,13 @@ void D3D12Renderer::TransitionTexture(LatteTextureD3D12 *texture, uint32 firstMi
 		firstSlice = 0;
 		sliceCount = 1;
 	}
+	const LatteTextureD3D12::TransitionKey key{firstMip, mipCount, firstSlice, sliceCount, (uint32)newState};
+	if (texture->ReuseTransition(key))
+	{
+		LatteProfiler::Add(LatteProfiler::Counter::TransitionHits);
+		return;
+	}
+	LatteProfiler::Add(LatteProfiler::Counter::TransitionMisses);
 	const uint32 planeCount = texture->GetPlaneCount();
 	// whole resource transition if possible
 	if (firstMip == 0 && mipCount == texture->GetMipCount() && firstSlice == 0 && sliceCount == texture->GetArraySize())
@@ -731,9 +743,13 @@ void D3D12Renderer::TransitionTexture(LatteTextureD3D12 *texture, uint32 firstMi
 		if (texture->AllSubresourcesInState(first))
 		{
 			if (first == newState)
+			{
+				texture->RememberTransition(key);
 				return;
+			}
 			m_pendingBarriers.push_back(D3D12_TransitionBarrier(texture->GetResource(), first, newState));
 			texture->SetAllSubresourceStates(newState);
+			texture->RememberTransition(key);
 			return;
 		}
 	}
@@ -752,6 +768,7 @@ void D3D12Renderer::TransitionTexture(LatteTextureD3D12 *texture, uint32 firstMi
 			}
 		}
 	}
+	texture->RememberTransition(key);
 }
 
 void D3D12Renderer::TransitionTextureAll(LatteTextureD3D12 *texture, D3D12_RESOURCE_STATES newState)
