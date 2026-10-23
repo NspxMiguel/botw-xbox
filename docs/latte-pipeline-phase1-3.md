@@ -1,5 +1,8 @@
 # Latte pipeline, phases 1–3
 
+This is the phase-1–3 completion record. See [Phase 4](latte-pipeline-phase4.md)
+for the opt-in recording worker, current mode selection and validation status.
+
 The D3D12 consumer is still synchronous and runs on the Latte command thread.
 `CEMU_LATTE_PIPELINE=0` is the default and retains the reference draw implementation.
 `CEMU_LATTE_PIPELINE=1` prepares immutable draws, publishes operations into the
