@@ -137,6 +137,9 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
         setenv("CEMU_LATTE_PROFILE", "1", 1);
 #endif
     }
+    // LocalState/latte-pipeline.txt selects the queued Latte recording path (CEMU_LATTE_PIPELINE=1).
+    if (std::filesystem::exists(std::filesystem::path(user) / "latte-pipeline.txt"))
+        _putenv_s("CEMU_LATTE_PIPELINE", "1");
     try {
         mem::init();
         dispatch::init();
