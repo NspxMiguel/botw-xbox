@@ -142,7 +142,8 @@ void *D3D12ImGuiRenderer::CreateTexture(const uint8 *, sint32 width, sint32 heig
 
 void D3D12ImGuiRenderer::DestroyTexture(void *texture)
 {
-	if (!texture) return;
+	if (!texture)
+		return;
 	const auto id = LattePipeline::FromOpaqueId(texture);
 	auto *tex = m_renderer->m_resources.Get<Texture>(id);
 	m_renderer->m_resources.Release(id);
@@ -276,7 +277,8 @@ void D3D12ImGuiRenderer::Render(ImDrawData *drawData, D3D12_CPU_DESCRIPTOR_HANDL
 			if (texId != boundTexture && srvReg >= 0)
 			{
 				auto *tex = texId ? m_renderer->m_resources.Get<Texture>(LattePipeline::FromOpaqueId(texId)) : nullptr;
-				if (tex) m_renderer->m_resources.Use(LattePipeline::FromOpaqueId(texId), m_renderer->m_operations.ActiveHeader().sequence, m_renderer->GetRecordingSubmissionId());
+				if (tex)
+					m_renderer->m_resources.Use(LattePipeline::FromOpaqueId(texId), m_renderer->m_operations.ActiveHeader().sequence, m_renderer->GetRecordingSubmissionId());
 				D3D12StageTableDesc table;
 				table.srv[srvReg] = tex ? tex->srv : D3D12_CPU_DESCRIPTOR_HANDLE{};
 				cmd->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), m_renderer->WriteStageTable(table, D3D12Const::Stage::Pixel));
@@ -292,7 +294,6 @@ void D3D12ImGuiRenderer::Render(ImDrawData *drawData, D3D12_CPU_DESCRIPTOR_HANDL
 	m_renderer->m_hasRecordedWork = true;
 }
 
-
 void D3D12ImGuiRenderer::UploadTexture(void *texture, const uint8 *rgba, uint32 width, uint32 firstRow, uint32 rows, bool last)
 {
 	const auto id = LattePipeline::FromOpaqueId(texture);
@@ -301,10 +302,16 @@ void D3D12ImGuiRenderer::UploadTexture(void *texture, const uint8 *rgba, uint32 
 	const uint32 rowBytes = width * 4;
 	const uint32 rowPitch = AlignUp<uint32>(rowBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
 	auto upload = m_renderer->AllocateUpload(static_cast<uint64>(rowPitch) * rows, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-	for (uint32 row = 0; row < rows; ++row) memcpy(upload.cpuPtr + static_cast<size_t>(row) * rowPitch, rgba + static_cast<size_t>(row) * rowBytes, rowBytes);
-	D3D12_TEXTURE_COPY_LOCATION dst{}; dst.pResource = tex->resource.Get(); dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-	D3D12_TEXTURE_COPY_LOCATION src{}; src.pResource = upload.resource; src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-	src.PlacedFootprint.Offset = upload.offset; src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, width, rows, 1, rowPitch};
+	for (uint32 row = 0; row < rows; ++row)
+		memcpy(upload.cpuPtr + static_cast<size_t>(row) * rowPitch, rgba + static_cast<size_t>(row) * rowBytes, rowBytes);
+	D3D12_TEXTURE_COPY_LOCATION dst{};
+	dst.pResource = tex->resource.Get();
+	dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	D3D12_TEXTURE_COPY_LOCATION src{};
+	src.pResource = upload.resource;
+	src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+	src.PlacedFootprint.Offset = upload.offset;
+	src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, width, rows, 1, rowPitch};
 	m_renderer->FlushBarriers();
 	auto *commands = m_renderer->GetCommandList();
 	commands->CopyTextureRegion(&dst, 0, firstRow, 0, &src, nullptr);

@@ -29,16 +29,28 @@ class Context
 	{
 		Check(m_front, "front");
 #if defined(NDEBUG) && !defined(_DEBUG)
-		if (!m_checks) return;
+		if (!m_checks)
+			return;
 #endif
-		if (m_backActive) { std::fputs("Latte pipeline: front access from recorder\n", stderr); std::abort(); }
+		if (m_backActive)
+		{
+			std::fputs("Latte pipeline: front access from recorder\n", stderr);
+			std::abort();
+		}
 	}
 	void CheckBack() const
 	{
 		Check(m_back, "back");
 	}
-	void EnterRecording() { CheckBack(); m_backActive = true; }
-	void LeaveRecording() { m_backActive = false; }
+	void EnterRecording()
+	{
+		CheckBack();
+		m_backActive = true;
+	}
+	void LeaveRecording()
+	{
+		m_backActive = false;
+	}
 	uint64_t BeginOperation()
 	{
 		CheckFront();
@@ -117,7 +129,6 @@ inline ResourceId FromOpaqueId(void *id)
 	return {static_cast<uint32_t>(bits), static_cast<uint32_t>(bits >> 32)};
 }
 
-
 // CPU consumption and GPU completion are independent lifetime requirements.
 class Registry
 {
@@ -136,7 +147,8 @@ class Registry
 	}
 	ResourceId Insert(void *object)
 	{
-		if (!object) return {};
+		if (!object)
+			return {};
 		// Creation/retirement may coordinate allocation. Lookup and pinning on
 		// the draw path never take this lock, and entry addresses never move.
 		std::lock_guard lock(m_allocationMutex);
@@ -144,13 +156,20 @@ class Registry
 		const auto count = m_count.load(std::memory_order_relaxed);
 		if (m_free.empty())
 		{
-			if (count == m_capacity) throw std::runtime_error("Latte resource registry exhausted");
+			if (count == m_capacity)
+				throw std::runtime_error("Latte resource registry exhausted");
 			slot = count;
 		}
-		else { slot = m_free.back(); m_free.pop_back(); }
+		else
+		{
+			slot = m_free.back();
+			m_free.pop_back();
+		}
 		auto &e = m_entries[slot];
-		e.object = object; e.lastSequence = e.lastFence = 0;
-		if (slot == count) m_count.store(count + 1, std::memory_order_release);
+		e.object = object;
+		e.lastSequence = e.lastFence = 0;
+		if (slot == count)
+			m_count.store(count + 1, std::memory_order_release);
 		return {slot, e.generation};
 	}
 	void *Resolve(ResourceId id) const
@@ -214,13 +233,24 @@ class Registry
 
 // Fixed immutable front-owned blocks. Slot replacement is legal only after
 // consumption; equality is always checked (a hash alone never establishes a hit).
-template<class T> struct ByteEqual
+template <class T>
+struct ByteEqual
 {
-	bool operator()(const T &a, const T &b) const { return std::memcmp(&a, &b, sizeof(T)) == 0; }
+	bool operator()(const T &a, const T &b) const
+	{
+		return std::memcmp(&a, &b, sizeof(T)) == 0;
+	}
 };
-template<class T, size_t Capacity = 4, class Equal = ByteEqual<T>> class StateBlocks
+template <class T, size_t Capacity = 4, class Equal = ByteEqual<T>>
+class StateBlocks
 {
-	struct Entry { T value{}; uint64_t sequence = 0; uint32_t generation = 0; };
+	struct Entry
+	{
+		T value{};
+		uint64_t sequence = 0;
+		uint32_t generation = 0;
+	};
+
   public:
 	ResourceId Intern(const T &value, uint64_t sequence, uint64_t consumed)
 	{
@@ -236,7 +266,10 @@ template<class T, size_t Capacity = 4, class Equal = ByteEqual<T>> class StateBl
 			auto &entry = m_entries[i];
 			if (entry.sequence <= consumed && entry.generation != UINT32_MAX)
 			{
-				entry.value = value; entry.sequence = sequence; ++entry.generation; m_last = i;
+				entry.value = value;
+				entry.sequence = sequence;
+				++entry.generation;
+				m_last = i;
 				return {static_cast<uint32_t>(i), entry.generation};
 			}
 		}
@@ -248,6 +281,7 @@ template<class T, size_t Capacity = 4, class Equal = ByteEqual<T>> class StateBl
 			throw std::logic_error("Stale Latte immutable state block");
 		return m_entries[id.slot].value;
 	}
+
   private:
 	std::array<Entry, Capacity> m_entries{};
 	size_t m_last = 0;
@@ -268,28 +302,42 @@ class Ring
 	T *TryWrite()
 	{
 		const uint64_t write = m_producer.load(std::memory_order_relaxed);
-		if (write - m_consumer.load(std::memory_order_acquire) == m_capacity) return nullptr;
+		if (write - m_consumer.load(std::memory_order_acquire) == m_capacity)
+			return nullptr;
 		return &m_slots[Index(write)];
 	}
-	void PublishWrite() { m_producer.store(m_producer.load(std::memory_order_relaxed) + 1, std::memory_order_release); }
+	void PublishWrite()
+	{
+		m_producer.store(m_producer.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+	}
 	const T *Peek() const
 	{
 		const uint64_t read = m_consumer.load(std::memory_order_relaxed);
-		if (read == m_producer.load(std::memory_order_acquire)) return nullptr;
+		if (read == m_producer.load(std::memory_order_acquire))
+			return nullptr;
 		return &m_slots[Index(read)];
 	}
-	void ReleaseRead() { m_consumer.store(m_consumer.load(std::memory_order_relaxed) + 1, std::memory_order_release); }
+	void ReleaseRead()
+	{
+		m_consumer.store(m_consumer.load(std::memory_order_relaxed) + 1, std::memory_order_release);
+	}
 	bool Push(const T &value)
 	{
 		auto *slot = TryWrite();
-		if (!slot) return false;
-		*slot = value; PublishWrite(); return true;
+		if (!slot)
+			return false;
+		*slot = value;
+		PublishWrite();
+		return true;
 	}
 	bool Pop(T &value)
 	{
 		const auto *slot = Peek();
-		if (!slot) return false;
-		value = *slot; ReleaseRead(); return true;
+		if (!slot)
+			return false;
+		value = *slot;
+		ReleaseRead();
+		return true;
 	}
 	bool Empty() const
 	{
@@ -298,7 +346,10 @@ class Ring
 
   private:
 	static_assert(std::atomic<uint64_t>::is_always_lock_free);
-	size_t Index(uint64_t cursor) const { return (m_capacity & (m_capacity - 1)) == 0 ? cursor & (m_capacity - 1) : cursor % m_capacity; }
+	size_t Index(uint64_t cursor) const
+	{
+		return (m_capacity & (m_capacity - 1)) == 0 ? cursor & (m_capacity - 1) : cursor % m_capacity;
+	}
 	const uint64_t m_capacity;
 	std::unique_ptr<T[]> m_slots;
 	alignas(64) std::atomic<uint64_t> m_producer{0};
@@ -464,14 +515,26 @@ class Stream
 	Stream(size_t capacity = 1024, size_t arenaBytes = 16 * 1024 * 1024) : m_ring(capacity), m_arena(arenaBytes)
 	{
 	}
-	bool Recording() const { return m_consuming; }
-	const Header &ActiveHeader() const { return m_activeHeader; }
+	bool Recording() const
+	{
+		return m_consuming;
+	}
+	const Header &ActiveHeader() const
+	{
+		return m_activeHeader;
+	}
 	Arena &Staging()
 	{
 		return m_arena;
 	}
-	void Submitted(uint64_t sequence) { m_tickets.Submit(sequence); }
-	void Completed(uint64_t sequence) { m_tickets.Complete(sequence); }
+	void Submitted(uint64_t sequence)
+	{
+		m_tickets.Submit(sequence);
+	}
+	void Completed(uint64_t sequence)
+	{
+		m_tickets.Complete(sequence);
+	}
 	const Tickets &Progress() const
 	{
 		return m_tickets;
@@ -493,7 +556,11 @@ class Stream
 		if (context.Queued())
 		{
 			auto *slot = m_ring.TryWrite();
-			while (!slot) { Drain(context, owner); slot = m_ring.TryWrite(); }
+			while (!slot)
+			{
+				Drain(context, owner);
+				slot = m_ring.TryWrite();
+			}
 			prepare(*slot);
 			m_ring.PublishWrite();
 			Drain(context, owner);
@@ -512,8 +579,15 @@ class Stream
 		context.CheckBack();
 		while (const auto *packet = m_ring.Peek())
 		{
-			try { Consume(context, *packet, owner); }
-			catch (...) { m_ring.ReleaseRead(); throw; }
+			try
+			{
+				Consume(context, *packet, owner);
+			}
+			catch (...)
+			{
+				m_ring.ReleaseRead();
+				throw;
+			}
 			m_ring.ReleaseRead();
 		}
 	}

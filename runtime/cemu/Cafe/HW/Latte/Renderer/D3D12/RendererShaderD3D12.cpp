@@ -144,7 +144,8 @@ RendererShaderD3D12::RendererShaderD3D12(ShaderType type, uint64 baseHash, uint6
 
 RendererShaderD3D12::~RendererShaderD3D12()
 {
-	if (recordingOwner) recordingOwner->RetireResource(recordingId);
+	if (recordingOwner)
+		recordingOwner->RetireResource(recordingId);
 	// make sure no compiler thread still references this object
 	s_shaderD3D12ThreadPool.m_queueMutex.lock();
 	auto &q = s_shaderD3D12ThreadPool.m_queue;

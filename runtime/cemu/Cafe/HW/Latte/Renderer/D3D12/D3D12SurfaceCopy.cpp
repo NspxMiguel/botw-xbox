@@ -105,23 +105,37 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	auto *view = static_cast<LatteTextureViewD3D12 *>(texView);
 	auto *vs = static_cast<RendererShaderD3D12 *>(shader->GetVertexShader());
 	auto *ps = static_cast<RendererShaderD3D12 *>(shader->GetFragmentShader());
-	for (auto *native : {vs, ps}) if (!native->recordingId) { native->recordingId = RegisterResource(native); native->recordingOwner = this; }
+	for (auto *native : {vs, ps})
+		if (!native->recordingId)
+		{
+			native->recordingId = RegisterResource(native);
+			native->recordingOwner = this;
+		}
 	sint32 inputWidth, inputHeight;
 	view->baseTexture->GetEffectiveSize(inputWidth, inputHeight, view->GetNativeDefinition().firstMip);
 	const std::string_view overrideValue = fsr::upscaler_override();
 	// Off unless the player (or BOTW_UPSCALER) picked FSR 1 or FSR 3.1.
 	const auto requested = overrideValue == "off" ? fsr::Upscaler::Off : fsr::Upscaler::Spatial;
 	OutputPacket packet{};
-	packet.view = view->recordingId; packet.vertexShader = vs->recordingId; packet.pixelShader = ps->recordingId;
+	packet.view = view->recordingId;
+	packet.vertexShader = vs->recordingId;
+	packet.pixelShader = ps->recordingId;
 	packet.uniforms[0] = shader->FillUniformBlockBuffer(*texView, {imageWidth, imageHeight}, padView);
 	packet.uniforms[1] = shader->FillUniformBlockBuffer(*texView, {inputWidth, inputHeight}, padView);
-	packet.imageX = imageX; packet.imageY = imageY; packet.imageWidth = imageWidth; packet.imageHeight = imageHeight;
-	packet.inputWidth = inputWidth; packet.inputHeight = inputHeight; packet.upscaler = static_cast<uint32>(requested);
+	packet.imageX = imageX;
+	packet.imageY = imageY;
+	packet.imageWidth = imageWidth;
+	packet.imageHeight = imageHeight;
+	packet.inputWidth = inputWidth;
+	packet.inputHeight = inputHeight;
+	packet.upscaler = static_cast<uint32>(requested);
 #ifdef BOTW_FFX_STATIC
 	const auto selection = fsr3::select(fsr3::console.load(), false, overrideValue, true, true);
 	packet.nativeAA = fsr3::native_aa(selection.path, inputWidth, inputHeight, imageWidth, imageHeight);
 #endif
-	packet.linear = useLinearTexFilter; packet.padView = padView; packet.clearBackground = clearBackground;
+	packet.linear = useLinearTexFilter;
+	packet.padView = padView;
+	packet.clearBackground = clearBackground;
 	m_operations.Execute<OutputPacket, &D3D12Renderer::output_record>(m_pipeline, LattePipeline::Opcode::Present, packet, *this);
 	ApplyFrontCompletions();
 }
@@ -132,13 +146,15 @@ void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipelin
 	const bool padView = packet.padView, clearBackground = packet.clearBackground, useLinearTexFilter = packet.linear;
 	const auto imageX = packet.imageX, imageY = packet.imageY, imageWidth = packet.imageWidth, imageHeight = packet.imageHeight;
 	const auto inputWidth = packet.inputWidth, inputHeight = packet.inputHeight;
-	if (!AcquireBackbuffer(!padView)) return;
+	if (!AcquireBackbuffer(!padView))
+		return;
 	auto *swapChain = GetSwapChainObj(!padView);
 	auto *view = m_resources.Get<LatteTextureViewD3D12>(packet.view);
 	auto *vs = m_resources.Get<RendererShaderD3D12>(packet.vertexShader);
 	auto *ps = m_resources.Get<RendererShaderD3D12>(packet.pixelShader);
 	auto *pso = m_pipelineCache->GetInternalPipeline(vs, ps, D3D12SwapChain::kFormat, DXGI_FORMAT_UNKNOWN, false, false);
-	if (!pso) return;
+	if (!pso)
+		return;
 	const auto requested = static_cast<fsr::Upscaler>(packet.upscaler);
 	bool fsr = !padView && !m_fsrFailed && fsr::should_upscale(requested, inputWidth, inputHeight, imageWidth, imageHeight);
 	fsr = fsr || (!padView && !m_fsrFailed && packet.nativeAA);
@@ -206,7 +222,6 @@ void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipelin
 	m_hasRecordedWork = true;
 	for (auto id : {packet.view, packet.vertexShader, packet.pixelShader, view->GetBaseTexture()->recordingId})
 		m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
-
 }
 
 void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *sourceTexture, sint32 srcMip, sint32 srcSlice, LatteTexture *destinationTexture, sint32 dstMip, sint32 dstSlice, sint32 width, sint32 height)
@@ -228,13 +243,20 @@ void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *so
 		return;
 	}
 	cemu_assert_debug(srcTex != dstTex);
-	BackendPacket packet{}; packet.kind = BackendPacket::Kind::SurfaceCopy;
-	packet.resources[0] = srcTex->recordingId; packet.resources[1] = dstTex->recordingId;
-	packet.words[0] = srcMip; packet.words[1] = srcSlice; packet.words[2] = dstMip; packet.words[3] = dstSlice;
-	packet.words[4] = effectiveCopyWidth; packet.words[5] = effectiveCopyHeight;
+	BackendPacket packet{};
+	packet.kind = BackendPacket::Kind::SurfaceCopy;
+	packet.resources[0] = srcTex->recordingId;
+	packet.resources[1] = dstTex->recordingId;
+	packet.words[0] = srcMip;
+	packet.words[1] = srcSlice;
+	packet.words[2] = dstMip;
+	packet.words[3] = dstSlice;
+	packet.words[4] = effectiveCopyWidth;
+	packet.words[5] = effectiveCopyHeight;
 	m_surfaceCopyRecorded = false;
 	ExecuteBackend(LattePipeline::Opcode::Copy, packet);
-	if (m_surfaceCopyRecorded) LatteTexture_TrackTextureGPUWrite(dstTex, dstSlice, dstMip, LatteTexture_getNextUpdateEventCounter());
+	if (m_surfaceCopyRecorded)
+		LatteTexture_TrackTextureGPUWrite(dstTex, dstSlice, dstMip, LatteTexture_getNextUpdateEventCounter());
 }
 
 void D3D12Renderer::surfaceCopy_record(const BackendPacket &packet)

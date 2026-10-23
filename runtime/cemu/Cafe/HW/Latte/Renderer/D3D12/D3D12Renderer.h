@@ -198,7 +198,11 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	{
 		return m_debugMode;
 	}
-	LattePipeline::ResourceId RegisterResource(void *object) { m_pipeline.CheckFront(); return m_resources.Insert(object); }
+	LattePipeline::ResourceId RegisterResource(void *object)
+	{
+		m_pipeline.CheckFront();
+		return m_resources.Insert(object);
+	}
 	void InitializeTexture(LattePipeline::ResourceId id);
 	void InitializeFramebuffer(LattePipeline::ResourceId id);
 	void ReleaseTexture(LattePipeline::ResourceId id);
@@ -350,7 +354,11 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	{
 		bool skipDrawSequence = false, streamoutEnabled = false;
 		uint32 verticesPerInstance = 0;
-		struct { bool enabled = false; uint32 ringBufferOffset = 0; } streamoutBuffer[LATTE_NUM_STREAMOUT_BUFFER];
+		struct
+		{
+			bool enabled = false;
+			uint32 ringBufferOffset = 0;
+		} streamoutBuffer[LATTE_NUM_STREAMOUT_BUFFER];
 		LatteTextureViewD3D12 *boundTexture[LATTE_CEMU_GS_TEX_UNIT_BASE + LATTE_NUM_MAX_TEX_UNITS]{};
 		CachedFBOD3D12 *activeFBO = nullptr;
 		D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
@@ -369,14 +377,17 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void draw_recordUniformBytes(D3D12Const::Stage stage, std::span<const std::byte> bytes, D3D12_GPU_VIRTUAL_ADDRESS &addressOut, uint32 &sizeOut);
 	LattePipeline::Span draw_snapshotUniformVars(LatteDecompilerShader *shader);
 
-
 	struct ReadbackPacket
 	{
 		LattePipeline::ResourceId readback, texture;
 		uint32 action = 0, mip = 0, slice = 0, rowPitch = 0, imageSize = 0, width = 0, height = 0;
 	};
 	void readback_record(const ReadbackPacket &packet, const LattePipeline::Arena &arena);
-	struct QueryPacket { LattePipeline::ResourceId query; uint32 action = 0; };
+	struct QueryPacket
+	{
+		LattePipeline::ResourceId query;
+		uint32 action = 0;
+	};
 	void query_record(const QueryPacket &packet, const LattePipeline::Arena &arena);
 	void occlusionQuery_createHeap_record();
 	struct OutputPacket
@@ -407,7 +418,35 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 			DrawEmptyFrame,
 			occlusionQuery_flush,
 			occlusionQuery_updateState,
-			RegistryRetire, UICreate, UIUpload, UIRelease, UIRender, UIAcquire, Screenshot, EndSequence, ServicePresent, BeginFrame, ShutdownDrain, QueryHeap, BindVertices, BindUniform, BindFramebuffer, Viewport, Scissor, TextureCreate, FramebufferCreate, TextureRelease, ViewRelease, FramebufferRelease, SurfaceCopy, BufferUpload, IndexCreate, IndexUpload, IndexRelease, TexturePlane, BufferInit,
+			RegistryRetire,
+			UICreate,
+			UIUpload,
+			UIRelease,
+			UIRender,
+			UIAcquire,
+			Screenshot,
+			EndSequence,
+			ServicePresent,
+			BeginFrame,
+			ShutdownDrain,
+			QueryHeap,
+			BindVertices,
+			BindUniform,
+			BindFramebuffer,
+			Viewport,
+			Scissor,
+			TextureCreate,
+			FramebufferCreate,
+			TextureRelease,
+			ViewRelease,
+			FramebufferRelease,
+			SurfaceCopy,
+			BufferUpload,
+			IndexCreate,
+			IndexUpload,
+			IndexRelease,
+			TexturePlane,
+			BufferInit,
 		};
 		Kind kind{};
 		LattePipeline::ResourceId resources[2]{};
@@ -442,9 +481,9 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	bool m_presentInterpolation = false;
 	void RecordBackend(const BackendPacket &packet, const LattePipeline::Arena &arena);
 	void ExecuteBackend(LattePipeline::Opcode opcode, const BackendPacket &packet);
-	void texture_clearColorSlice_record(LatteTexture * hostTexture, sint32 sliceIndex, sint32 mipIndex, float r, float g, float b, float a);
-	void texture_clearDepthSlice_record(LatteTexture * hostTexture, uint32 sliceIndex, sint32 mipIndex, bool clearDepth, bool clearStencil, float depthValue, uint32 stencilValue);
-	void texture_copyImageSubData_record(LatteTexture * src, sint32 srcMip, sint32 effectiveSrcX, sint32 effectiveSrcY, sint32 srcSlice, LatteTexture * dst, sint32 dstMip, sint32 effectiveDstX, sint32 effectiveDstY, sint32 dstSlice, sint32 effectiveCopyWidth, sint32 effectiveCopyHeight, sint32 srcDepth);
+	void texture_clearColorSlice_record(LatteTexture *hostTexture, sint32 sliceIndex, sint32 mipIndex, float r, float g, float b, float a);
+	void texture_clearDepthSlice_record(LatteTexture *hostTexture, uint32 sliceIndex, sint32 mipIndex, bool clearDepth, bool clearStencil, float depthValue, uint32 stencilValue);
+	void texture_copyImageSubData_record(LatteTexture *src, sint32 srcMip, sint32 effectiveSrcX, sint32 effectiveSrcY, sint32 srcSlice, LatteTexture *dst, sint32 dstMip, sint32 effectiveDstX, sint32 effectiveDstY, sint32 dstSlice, sint32 effectiveCopyWidth, sint32 effectiveCopyHeight, sint32 srcDepth);
 	void bufferCache_copy_record(uint32 srcOffset, uint32 dstOffset, uint32 size);
 	void bufferCache_copyStreamoutToMainBuffer_record(uint32 srcOffset, uint32 dstOffset, uint32 size);
 	void streamout_rendererFinishDrawcall_record();

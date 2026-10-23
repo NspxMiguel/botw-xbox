@@ -24,11 +24,18 @@ class LatteQueryObjectD3D12 final : public LatteQueryObject
 	bool getResult(uint64 &numSamplesPassed) override
 	{
 		Dispatch(0);
-		if (m_resultReady) numSamplesPassed = m_result;
+		if (m_resultReady)
+			numSamplesPassed = m_result;
 		return m_resultReady;
 	}
-	void begin() override { Dispatch(1); }
-	void end() override { Dispatch(2); }
+	void begin() override
+	{
+		Dispatch(1);
+	}
+	void end() override
+	{
+		Dispatch(2);
+	}
 	void Dispatch(uint32 action)
 	{
 		m_renderer->m_pipeline.CheckFront();
@@ -118,7 +125,9 @@ class LatteQueryObjectD3D12 final : public LatteQueryObject
 
 	void Reset()
 	{
-		queryEnded = false; queryEventStart = 0; queryEventEnd = 0;
+		queryEnded = false;
+		queryEventStart = 0;
+		queryEventEnd = 0;
 		Dispatch(3);
 	}
 	void RecordReset()
@@ -155,7 +164,8 @@ class LatteQueryObjectD3D12 final : public LatteQueryObject
 LatteQueryObject *D3D12Renderer::occlusionQuery_create()
 {
 	auto &oq = m_occlusionQueries;
-	BackendPacket packet{}; packet.kind = BackendPacket::Kind::QueryHeap;
+	BackendPacket packet{};
+	packet.kind = BackendPacket::Kind::QueryHeap;
 	ExecuteBackend(LattePipeline::Opcode::Create, packet);
 	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	LatteQueryObjectD3D12 *query;
@@ -218,7 +228,10 @@ void D3D12Renderer::occlusionQuery_destroyAll()
 	auto active = std::move(oq.active);
 	oq.active.clear();
 	for (auto *q : active)
-	{ RetireResource(q->recordingId); delete q; }
+	{
+		RetireResource(q->recordingId);
+		delete q;
+	}
 	for (auto *q : oq.cached)
 		delete q;
 	oq.active.clear();
@@ -228,24 +241,38 @@ void D3D12Renderer::occlusionQuery_destroyAll()
 	oq.results = nullptr;
 }
 
-
 void D3D12Renderer::query_record(const QueryPacket &packet, const LattePipeline::Arena &)
 {
 	m_pipeline.CheckBack();
 	auto *query = m_resources.Get<LatteQueryObjectD3D12>(packet.query);
 	switch (packet.action)
 	{
-	case 0: query->m_resultReady = query->RecordResult(query->m_result); break;
-	case 1: query->RecordBegin(); break;
-	case 2: query->RecordEnd(); break;
-	case 3: query->RecordReset(); break;
-	case 4: if (query->m_hasActiveFragment) query->EndFragment(); break;
-	case 5: m_occlusionQueries.active.push_back(query); break;
-	case 6: m_occlusionQueries.active.erase(std::remove(m_occlusionQueries.active.begin(), m_occlusionQueries.active.end(), query), m_occlusionQueries.active.end()); break;
-	default: throw std::logic_error("Invalid Latte query operation");
+	case 0:
+		query->m_resultReady = query->RecordResult(query->m_result);
+		break;
+	case 1:
+		query->RecordBegin();
+		break;
+	case 2:
+		query->RecordEnd();
+		break;
+	case 3:
+		query->RecordReset();
+		break;
+	case 4:
+		if (query->m_hasActiveFragment)
+			query->EndFragment();
+		break;
+	case 5:
+		m_occlusionQueries.active.push_back(query);
+		break;
+	case 6:
+		m_occlusionQueries.active.erase(std::remove(m_occlusionQueries.active.begin(), m_occlusionQueries.active.end(), query), m_occlusionQueries.active.end());
+		break;
+	default:
+		throw std::logic_error("Invalid Latte query operation");
 	}
 	m_resources.Use(packet.query, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
-
 }
 void D3D12Renderer::occlusionQuery_createHeap_record()
 {

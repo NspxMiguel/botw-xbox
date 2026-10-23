@@ -15,7 +15,8 @@ CachedFBOD3D12::CachedFBOD3D12(D3D12Renderer *renderer, uint64 key)
 	: LatteCachedFBO(key), m_renderer(renderer)
 {
 	recordingId = renderer->RegisterResource(this);
-	for (uint32 i = 0; i < 8; ++i) m_colorViews[i] = static_cast<LatteTextureViewD3D12 *>(colorBuffer[i].texture);
+	for (uint32 i = 0; i < 8; ++i)
+		m_colorViews[i] = static_cast<LatteTextureViewD3D12 *>(colorBuffer[i].texture);
 	m_depthView = static_cast<LatteTextureViewD3D12 *>(depthBuffer.texture);
 	m_renderer->InitializeFramebuffer(recordingId);
 }

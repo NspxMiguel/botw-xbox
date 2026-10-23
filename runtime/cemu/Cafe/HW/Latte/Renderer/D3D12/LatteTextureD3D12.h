@@ -31,9 +31,18 @@ class LatteTextureD3D12 : public LatteTexture
 		Latte::E_HWTILEMODE tileMode;
 		bool isDepth;
 	};
-	const NativeDefinition &GetNativeDefinition() const { return m_definition; }
-	sint32 GetNativeMipWidth(sint32 mip) const { return std::max<uint32>(1, m_definition.width >> mip); }
-	sint32 GetNativeMipHeight(sint32 mip) const { return std::max<uint32>(1, m_definition.height >> mip); }
+	const NativeDefinition &GetNativeDefinition() const
+	{
+		return m_definition;
+	}
+	sint32 GetNativeMipWidth(sint32 mip) const
+	{
+		return std::max<uint32>(1, m_definition.width >> mip);
+	}
+	sint32 GetNativeMipHeight(sint32 mip) const
+	{
+		return std::max<uint32>(1, m_definition.height >> mip);
+	}
 	void CreateNative();
 	void ReleaseNative();
 

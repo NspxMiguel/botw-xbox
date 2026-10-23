@@ -1269,7 +1269,8 @@ void D3D12PipelineCache::Clear()
 	for (auto &it : m_pipelines)
 	{
 		m_renderer->RetireResource(it.second->recordingId);
-		if (it.second->isValid()) m_renderer->ReleaseObjectDeferred(it.second->pso);
+		if (it.second->isValid())
+			m_renderer->ReleaseObjectDeferred(it.second->pso);
 	}
 	m_pipelines.clear();
 	for (auto &it : m_internalPipelines)

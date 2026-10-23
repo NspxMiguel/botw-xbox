@@ -48,7 +48,8 @@ void D3D12Renderer::draw_beginSequence()
 {
 	m_pipeline.BeginOperation();
 	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Sequence);
-	BackendPacket service{}; service.kind = BackendPacket::Kind::ServicePresent;
+	BackendPacket service{};
+	service.kind = BackendPacket::Kind::ServicePresent;
 	ExecuteBackend(LattePipeline::Opcode::Control, service);
 	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	// BotWRecomp: Cemu frontend cache trimming is not present in this runtime.
@@ -106,7 +107,9 @@ void D3D12Renderer::draw_endSequence()
 	if (pixelShader)
 		LatteRenderTarget_trackUpdates();
 	const bool hasReadback = LatteTextureReadback_Update();
-	BackendPacket packet{}; packet.kind = BackendPacket::Kind::EndSequence; packet.words[0] = hasReadback;
+	BackendPacket packet{};
+	packet.kind = BackendPacket::Kind::EndSequence;
+	packet.words[0] = hasReadback;
 	ExecuteBackend(LattePipeline::Opcode::Control, packet);
 }
 
@@ -934,9 +937,11 @@ void D3D12Renderer::draw_prepareStage(LatteDecompilerShader *shader, LattePipeli
 	auto &mapping = shader->resourceMapping;
 	for (uint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; ++i)
 	{
-		if (mapping.uniformBuffersBindingPoint[i] < 0) continue;
+		if (mapping.uniformBuffersBindingPoint[i] < 0)
+			continue;
 		const sint32 reg = remap.GetCBV(mapping.uniformBuffersBindingPoint[i]);
-		if (reg >= 0) out.uniforms[reg] = m_frontBindings.uniforms[(uint32)out.stage][i];
+		if (reg >= 0)
+			out.uniforms[reg] = m_frontBindings.uniforms[(uint32)out.stage][i];
 	}
 	out.samplerCount = std::max<uint32>(remap.srvCount, 1);
 	cemu_assert_debug(out.samplerCount <= D3D12Const::kMaxSamplersPerStage);
@@ -945,52 +950,72 @@ void D3D12Renderer::draw_prepareStage(LatteDecompilerShader *shader, LattePipeli
 		auto &sampler = out.samplers[i];
 		sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
 		sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-		sampler.MaxAnisotropy = 1; sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+		sampler.MaxAnisotropy = 1;
+		sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
 	}
 	out.textureCount = mapping.getTextureCount();
 	cemu_assert_debug(out.textureCount <= D3D12Const::kMaxSRVsPerStage);
 	const sint32 textureBase = mapping.getTextureBaseBindingPoint();
 	{
-	LatteProfiler::Scope textureScope(LatteProfiler::Slot::TextureBinding);
-	for (uint32 i = 0; i < out.textureCount; ++i)
-	{
-		const auto unit = mapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
-		uint32 regIndex;
-		auto *view = _GetBoundTextureForShader(m_frontState.boundTexture, shader, unit, regIndex);
-		auto &binding = out.textures[i];
-		binding.view = view ? view->recordingId : LattePipeline::ResourceId{};
-		binding.swizzle = LatteGPUState.contextRegister[regIndex + 4];
-		binding.reg = textureBase >= 0 ? remap.GetSRV(textureBase + i) : -1;
-		binding.nullDimension = shader->textureUnitDim[unit];
-		if (binding.reg < 0) continue;
-		const bool mismatch = view && ((binding.nullDimension == Latte::E_DIM::DIM_1D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_1D) || (binding.nullDimension == Latte::E_DIM::DIM_2D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_2D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_2D_MSAA));
-		// Transition all bound inputs even when dimension validation selects a null SRV.
-		if (mismatch) binding.nullDimension = shader->textureUnitDim[unit];
-		draw_buildSamplerDesc(shader, unit, view, out.samplers[binding.reg]);
-		if (mismatch) binding.reg = -2 - binding.reg;
-	}
+		LatteProfiler::Scope textureScope(LatteProfiler::Slot::TextureBinding);
+		for (uint32 i = 0; i < out.textureCount; ++i)
+		{
+			const auto unit = mapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
+			uint32 regIndex;
+			auto *view = _GetBoundTextureForShader(m_frontState.boundTexture, shader, unit, regIndex);
+			auto &binding = out.textures[i];
+			binding.view = view ? view->recordingId : LattePipeline::ResourceId{};
+			binding.swizzle = LatteGPUState.contextRegister[regIndex + 4];
+			binding.reg = textureBase >= 0 ? remap.GetSRV(textureBase + i) : -1;
+			binding.nullDimension = shader->textureUnitDim[unit];
+			if (binding.reg < 0)
+				continue;
+			const bool mismatch = view && ((binding.nullDimension == Latte::E_DIM::DIM_1D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_1D) || (binding.nullDimension == Latte::E_DIM::DIM_2D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_2D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_2D_MSAA));
+			// Transition all bound inputs even when dimension validation selects a null SRV.
+			if (mismatch)
+				binding.nullDimension = shader->textureUnitDim[unit];
+			draw_buildSamplerDesc(shader, unit, view, out.samplers[binding.reg]);
+			if (mismatch)
+				binding.reg = -2 - binding.reg;
+		}
 	}
 	out.streamout = mapping.tfStorageBindingPoint >= 0 && remap.GetUAV(mapping.tfStorageBindingPoint) == 0;
 	if (mapping.uniformVarsBufferBindingPoint >= 0)
 	{
 		out.uniformReg = remap.GetCBV(mapping.uniformVarsBufferBindingPoint);
-		if (out.uniformReg >= 0) out.uniformBytes = draw_snapshotUniformVars(shader);
+		if (out.uniformReg >= 0)
+			out.uniformBytes = draw_snapshotUniformVars(shader);
 	}
 }
 
 void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext &drawcallContext)
 {
 	m_pipeline.CheckFront();
-	if (!m_pipeline.Queued()) { draw_executeDirect(baseVertex, baseInstance, instanceCount, count, indexDataMPTR, indexType, drawcallContext); return; }
+	if (!m_pipeline.Queued())
+	{
+		draw_executeDirect(baseVertex, baseInstance, instanceCount, count, indexDataMPTR, indexType, drawcallContext);
+		return;
+	}
 	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	LatteGPUState.drawCallCounter++;
-	if (m_frontState.skipDrawSequence) return;
-	if (LatteGPUState.contextNew.GetSpecialStateValues()[8]) { LatteDraw_handleSpecialState8_clearAsDepth(); return; }
-	if (LatteGPUState.contextNew.GetSpecialStateValues()[5]) { draw_handleSpecialState5(); return; }
+	if (m_frontState.skipDrawSequence)
+		return;
+	if (LatteGPUState.contextNew.GetSpecialStateValues()[8])
+	{
+		LatteDraw_handleSpecialState8_clearAsDepth();
+		return;
+	}
+	if (LatteGPUState.contextNew.GetSpecialStateValues()[5])
+	{
+		draw_handleSpecialState5();
+		return;
+	}
 	m_frontState.verticesPerInstance = count;
-	if (m_frontState.streamoutEnabled) LatteStreamout_PrepareDrawcall(count, instanceCount);
+	if (m_frontState.streamoutEnabled)
+		LatteStreamout_PrepareDrawcall(count, instanceCount);
 	auto [fetch, vs, ps, gs] = LatteSHRC_GetActiveShaders();
-	if (!fetch || !vs) return;
+	if (!fetch || !vs)
+		return;
 	INDEX_TYPE hostIndexType;
 	uint32 indexCount, indexMax = 0;
 	IndexAllocation allocation{};
@@ -999,42 +1024,59 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 	uint8 modified = 0;
 	LatteBufferCache_Sync(indexMax + baseVertex, baseInstance, instanceCount, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, modified);
 	auto *fbo = m_frontState.activeFBO;
-	if (!fbo) return;
+	if (!fbo)
+		return;
 	auto *pipeline = m_pipelineCache->GetOrCreate(fetch, vs, gs, ps, fbo, LatteGPUState.contextNew, hostIndexType);
-	if (!pipeline->isValid()) return;
-	if (!pipeline->recordingId) pipeline->recordingId = RegisterResource(pipeline);
+	if (!pipeline->isValid())
+		return;
+	if (!pipeline->recordingId)
+		pipeline->recordingId = RegisterResource(pipeline);
 	LattePipeline::DrawPacket packet{};
-	packet.pipeline = pipeline->recordingId; packet.framebuffer = fbo->recordingId;
+	packet.pipeline = pipeline->recordingId;
+	packet.framebuffer = fbo->recordingId;
 	if (hostIndexType != INDEX_TYPE::NONE)
 	{
-		if (!allocation.rendererInternal) return;
+		if (!allocation.rendererInternal)
+			return;
 		packet.indices = static_cast<IndexResource *>(allocation.rendererInternal)->id;
 	}
-	packet.baseVertex = baseVertex; packet.baseInstance = baseInstance; packet.instanceCount = instanceCount;
-	packet.count = count; packet.indexCount = indexCount; packet.indexType = static_cast<uint32>(hostIndexType);
+	packet.baseVertex = baseVertex;
+	packet.baseInstance = baseInstance;
+	packet.instanceCount = instanceCount;
+	packet.count = count;
+	packet.indexCount = indexCount;
+	packet.indexType = static_cast<uint32>(hostIndexType);
 	packet.streamout = vs->resourceMapping.tfStorageBindingPoint >= 0;
 	uint32 runtimeDwords[D3D12Const::kRuntimeDataDwords]{};
 #ifdef CEMU_D3D12_SPIRV_TO_DXIL
 	if (D3D12ShaderCompiler::GetBackend() == D3D12ShaderCompiler::Backend::SpirvToDXIL)
 	{
 		dxil_spirv_vertex_runtime_data runtime{};
-		runtime.first_vertex = baseVertex; runtime.base_instance = baseInstance; runtime.is_indexed_draw = hostIndexType != INDEX_TYPE::NONE;
+		runtime.first_vertex = baseVertex;
+		runtime.base_instance = baseInstance;
+		runtime.is_indexed_draw = hostIndexType != INDEX_TYPE::NONE;
 		memcpy(runtimeDwords, &runtime, sizeof(runtime));
 	}
 	else
 #endif
-	{ runtimeDwords[0] = baseVertex; runtimeDwords[1] = baseInstance; }
+	{
+		runtimeDwords[0] = baseVertex;
+		runtimeDwords[1] = baseInstance;
+	}
 	packet.runtime = StageBytes(runtimeDwords, sizeof(runtimeDwords));
 	LattePipeline::DrawBlock block{};
 	memcpy(block.vertices, m_frontBindings.vertices, sizeof(block.vertices));
-	packet.viewport = m_frontState.viewport; packet.scissor = m_frontState.scissor;
+	packet.viewport = m_frontState.viewport;
+	packet.scissor = m_frontState.scissor;
 	memcpy(packet.blendFactor, LatteGPUState.contextRegister + Latte::REGADDR::CB_BLEND_RED, sizeof(packet.blendFactor));
 	packet.stencilRef = LatteGPUState.contextNew.DB_STENCILREFMASK.get_STENCILREF_F();
 	{
-	LatteProfiler::DetailScope detail(LatteProfiler::Detail::BindingsPrepare);
-	draw_prepareStage(vs, block.stages[block.stageCount++]);
-	if (ps) draw_prepareStage(ps, block.stages[block.stageCount++]);
-	if (gs) draw_prepareStage(gs, block.stages[block.stageCount++]);
+		LatteProfiler::DetailScope detail(LatteProfiler::Detail::BindingsPrepare);
+		draw_prepareStage(vs, block.stages[block.stageCount++]);
+		if (ps)
+			draw_prepareStage(ps, block.stages[block.stageCount++]);
+		if (gs)
+			draw_prepareStage(gs, block.stages[block.stageCount++]);
 	}
 	for (uint32 i = 0; i < block.stageCount; ++i)
 	{
@@ -1042,11 +1084,13 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 		block.stages[i].uniformBytes = {};
 	}
 	packet.state = m_drawBlocks.Intern(block, m_pipeline.Sequence() + 1, m_operations.Progress().recorded);
-	if (!packet.state) throw std::runtime_error("Latte immutable draw blocks exhausted");
+	if (!packet.state)
+		throw std::runtime_error("Latte immutable draw blocks exhausted");
 	m_operations.Execute<LattePipeline::DrawPacket, &D3D12Renderer::draw_record>(m_pipeline, LattePipeline::Opcode::Draw, packet, *this);
 	ApplyFrontCompletions();
 	UpdatePipelineProfile();
-	if (m_frontState.streamoutEnabled) LatteStreamout_FinishDrawcall(false);
+	if (m_frontState.streamoutEnabled)
+		LatteStreamout_FinishDrawcall(false);
 }
 
 void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena)
@@ -1058,16 +1102,33 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 	// Binding caches are recorder-owned; incoming blocks contain complete values.
 	m_state.renderTargetsDirty = m_state.renderTargetsDirty || m_recordingFBO != packet.framebuffer;
 	m_recordingFBO = packet.framebuffer;
-	if (memcmp(&m_state.viewport, &packet.viewport, sizeof(packet.viewport)) != 0) { m_state.viewport = packet.viewport; m_state.viewportDirty = true; }
-	if (memcmp(&m_state.scissor, &packet.scissor, sizeof(packet.scissor)) != 0) { m_state.scissor = packet.scissor; m_state.scissorDirty = true; }
+	if (memcmp(&m_state.viewport, &packet.viewport, sizeof(packet.viewport)) != 0)
+	{
+		m_state.viewport = packet.viewport;
+		m_state.viewportDirty = true;
+	}
+	if (memcmp(&m_state.scissor, &packet.scissor, sizeof(packet.scissor)) != 0)
+	{
+		m_state.scissor = packet.scissor;
+		m_state.scissorDirty = true;
+	}
 	const auto baseAddress = m_bufferCache->GetGPUVirtualAddress();
 	for (uint32 i = 0; i < LATTE_MAX_VERTEX_BUFFERS; ++i)
 	{
 		const auto &v = block.vertices[i];
 		D3D12_VERTEX_BUFFER_VIEW view{};
 		// Unbound slots must remain zero, as in the reference recorder.
-		if (v.bound) { view.BufferLocation = baseAddress + v.offset; view.SizeInBytes = std::min(v.size, m_bufferCacheSize - v.offset); view.StrideInBytes = v.stride; }
-		if (memcmp(&view, &m_state.vertexBuffers[i], sizeof(view)) != 0) { m_state.vertexBuffers[i] = view; m_state.vertexBufferDirtyMask |= 1u << i; }
+		if (v.bound)
+		{
+			view.BufferLocation = baseAddress + v.offset;
+			view.SizeInBytes = std::min(v.size, m_bufferCacheSize - v.offset);
+			view.StrideInBytes = v.stride;
+		}
+		if (memcmp(&view, &m_state.vertexBuffers[i], sizeof(view)) != 0)
+		{
+			m_state.vertexBuffers[i] = view;
+			m_state.vertexBufferDirtyMask |= 1u << i;
+		}
 	}
 	const uint32 baseVertex = packet.baseVertex, baseInstance = packet.baseInstance;
 	const uint32 instanceCount = packet.instanceCount, count = packet.count, hostIndexCount = packet.indexCount;
@@ -1078,23 +1139,34 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 	{
 		const auto &source = block.stages[i];
 		auto &out = stageBindings[i];
-		out.stage = source.stage; out.samplerCount = source.samplerCount;
+		out.stage = source.stage;
+		out.samplerCount = source.samplerCount;
 		memcpy(out.samplers, source.samplers, out.samplerCount * sizeof(*out.samplers));
 		for (uint32 reg = 0; reg < D3D12Const::kMaxCBVsPerStage; ++reg)
 		{
 			const auto &range = source.uniforms[reg];
-			if (!range.size) continue;
+			if (!range.size)
+				continue;
 			out.tableDesc.cbvAddress[reg] = GetAlignedUniformBufferAddress(range.offset, range.size);
 			out.tableDesc.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
 		}
 		for (uint32 j = 0; j < source.textureCount; ++j)
 		{
 			const auto &binding = source.textures[j];
-			if (binding.reg == -1) continue;
-			if (binding.reg < -1) { out.tableDesc.srv[-2 - binding.reg] = GetNullSRV(binding.nullDimension); continue; }
+			if (binding.reg == -1)
+				continue;
+			if (binding.reg < -1)
+			{
+				out.tableDesc.srv[-2 - binding.reg] = GetNullSRV(binding.nullDimension);
+				continue;
+			}
 			out.tableDesc.srv[binding.reg] = binding.view ? m_resources.Get<LatteTextureViewD3D12>(binding.view)->GetSRV(binding.swizzle) : GetNullSRV(binding.nullDimension);
 		}
-		if (source.streamout) { out.tableDesc.uavResource = m_xfbRingBuffer.Get(); out.tableDesc.uavSize = m_xfbRingBufferSize; }
+		if (source.streamout)
+		{
+			out.tableDesc.uavResource = m_xfbRingBuffer.Get();
+			out.tableDesc.uavSize = m_xfbRingBufferSize;
+		}
 	}
 	// Rollover can submit/reset/retire. No transient uniform GPU allocation is
 	// created until every sampler table belongs to the current heap generation.
@@ -1113,7 +1185,8 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 			for (uint32 j = 0; j < block.stages[i].textureCount; ++j)
 			{
 				const auto id = block.stages[i].textures[j].view;
-				if (!id) continue;
+				if (!id)
+					continue;
 				auto *view = m_resources.Get<LatteTextureViewD3D12>(id);
 				if (view->ReuseShaderReadTransition())
 					LatteProfiler::Add(LatteProfiler::Counter::TransitionHits);
@@ -1238,7 +1311,8 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 		// don't. The translated shaders add these offsets back, see D3D12ShaderTranslate::SPIRVToHLSL
 		uint32 runtimeDwords[D3D12Const::kRuntimeDataDwords];
 		const auto runtimeBytes = arena.Read(packet.runtime);
-		if (runtimeBytes.size() != sizeof(runtimeDwords)) throw std::logic_error("Invalid Latte runtime constants");
+		if (runtimeBytes.size() != sizeof(runtimeDwords))
+			throw std::logic_error("Invalid Latte runtime constants");
 		memcpy(runtimeDwords, runtimeBytes.data(), sizeof(runtimeDwords));
 		if (!m_state.runtimeDataValid || memcmp(m_state.currentRuntimeData, runtimeDwords, sizeof(runtimeDwords)) != 0)
 		{
@@ -1261,9 +1335,11 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 	// A sampler rollover can have advanced the recording fence after front
 	// pinned the IDs. Retirement must cover the submission that actually uses them.
 	const auto recordedSequence = m_operations.ActiveHeader().sequence, recordingFence = GetRecordingSubmissionId();
-	for (auto id : {packet.pipeline, packet.framebuffer, packet.indices}) m_resources.Use(id, recordedSequence, recordingFence);
+	for (auto id : {packet.pipeline, packet.framebuffer, packet.indices})
+		m_resources.Use(id, recordedSequence, recordingFence);
 	auto pinView = [&](LatteTextureViewD3D12 *view) {
-		if (!view) return;
+		if (!view)
+			return;
 		m_resources.Use(view->recordingId, recordedSequence, recordingFence);
 		m_resources.Use(view->GetBaseTexture()->recordingId, recordedSequence, recordingFence);
 	};
@@ -1271,12 +1347,14 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 	{
 		for (uint32 i = 0; i < block.stageCount; ++i)
 			for (uint32 j = 0; j < block.stages[i].textureCount; ++j)
-				if (block.stages[i].textures[j].view) pinView(m_resources.Get<LatteTextureViewD3D12>(block.stages[i].textures[j].view));
+				if (block.stages[i].textures[j].view)
+					pinView(m_resources.Get<LatteTextureViewD3D12>(block.stages[i].textures[j].view));
 		m_pinnedDrawBlock = packet.state;
 	}
 	if (m_pinnedFramebuffer != packet.framebuffer || m_pinnedDrawFence != recordingFence)
 	{
-		for (uint32 i = 0; i < 8; ++i) pinView(m_state.activeFBO->GetColorView(i));
+		for (uint32 i = 0; i < 8; ++i)
+			pinView(m_state.activeFBO->GetColorView(i));
 		pinView(m_state.activeFBO->GetDepthView());
 		m_pinnedFramebuffer = packet.framebuffer;
 	}

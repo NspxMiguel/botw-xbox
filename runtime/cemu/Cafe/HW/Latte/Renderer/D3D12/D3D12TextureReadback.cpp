@@ -89,7 +89,6 @@ uint8 *LatteTextureReadbackInfoD3D12::GetData()
 	return m_replyData;
 }
 
-
 LatteTextureReadbackInfoD3D12::~LatteTextureReadbackInfoD3D12()
 {
 	m_renderer->RetireResource(m_recordingId);
@@ -97,7 +96,8 @@ LatteTextureReadbackInfoD3D12::~LatteTextureReadbackInfoD3D12()
 
 bool LatteTextureReadbackInfoD3D12::IsFinished()
 {
-	Dispatch(1); return m_replyFinished;
+	Dispatch(1);
+	return m_replyFinished;
 }
 void LatteTextureReadbackInfoD3D12::ForceFinish()
 {
@@ -108,15 +108,20 @@ void LatteTextureReadbackInfoD3D12::Dispatch(uint32 action)
 {
 	m_renderer->m_pipeline.CheckFront();
 	D3D12Renderer::ReadbackPacket packet{};
-	packet.readback = m_recordingId; packet.action = action;
+	packet.readback = m_recordingId;
+	packet.action = action;
 	if (action == 0)
 	{
 		cemu_assert(m_textureView);
 		auto *texture = static_cast<LatteTextureD3D12 *>(m_textureView->baseTexture);
 		cemu_assert_debug(!texture->Is3DTexture());
-		packet.texture = texture->recordingId; packet.mip = m_firstMip; packet.slice = m_firstSlice;
-		packet.rowPitch = m_rowPitch; packet.imageSize = m_image_size;
-		packet.width = texture->GetMipWidth(m_firstMip); packet.height = texture->GetMipHeight(m_firstMip);
+		packet.texture = texture->recordingId;
+		packet.mip = m_firstMip;
+		packet.slice = m_firstSlice;
+		packet.rowPitch = m_rowPitch;
+		packet.imageSize = m_image_size;
+		packet.width = texture->GetMipWidth(m_firstMip);
+		packet.height = texture->GetMipHeight(m_firstMip);
 	}
 	m_renderer->m_operations.Execute<D3D12Renderer::ReadbackPacket, &D3D12Renderer::readback_record>(m_renderer->m_pipeline, LattePipeline::Opcode::Readback, packet, *m_renderer);
 }
@@ -127,14 +132,23 @@ void D3D12Renderer::readback_record(const ReadbackPacket &packet, const LattePip
 	auto *readback = m_resources.Get<LatteTextureReadbackInfoD3D12>(packet.readback);
 	switch (packet.action)
 	{
-	case 0: readback->RecordStart(packet.texture, packet.mip, packet.slice, packet.rowPitch, packet.imageSize, packet.width, packet.height); break;
-	case 1: readback->m_replyFinished = readback->RecordFinished(); break;
-	case 2: readback->RecordForceFinish(); break;
-	case 3: readback->m_replyData = m_readbackRing->GetCPUPtr(readback->m_bufferOffset); break;
-	default: throw std::logic_error("Invalid Latte readback operation");
+	case 0:
+		readback->RecordStart(packet.texture, packet.mip, packet.slice, packet.rowPitch, packet.imageSize, packet.width, packet.height);
+		break;
+	case 1:
+		readback->m_replyFinished = readback->RecordFinished();
+		break;
+	case 2:
+		readback->RecordForceFinish();
+		break;
+	case 3:
+		readback->m_replyData = m_readbackRing->GetCPUPtr(readback->m_bufferOffset);
+		break;
+	default:
+		throw std::logic_error("Invalid Latte readback operation");
 	}
-	for (auto id : {packet.readback, packet.texture}) m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
-
+	for (auto id : {packet.readback, packet.texture})
+		m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
 }
 
 #endif // ENABLE_D3D12

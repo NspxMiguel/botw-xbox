@@ -28,7 +28,10 @@ class LatteTextureViewD3D12 : public LatteTextureView
 		Latte::E_DIM dim;
 		Latte::E_GX2SURFFMT format;
 	};
-	const NativeDefinition &GetNativeDefinition() const { return m_definition; }
+	const NativeDefinition &GetNativeDefinition() const
+	{
+		return m_definition;
+	}
 
 	LatteTextureD3D12 *GetBaseTexture() const
 	{
