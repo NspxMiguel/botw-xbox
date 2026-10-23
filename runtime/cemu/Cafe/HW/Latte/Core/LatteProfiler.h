@@ -92,11 +92,8 @@ inline bool IsConfigured()
 {
 	static const bool enabled = [] {
 		const char *value = std::getenv("CEMU_LATTE_PROFILE");
-#ifdef BOTWRECOMP
-		return !value || std::strcmp(value, "0") != 0;
-#else
+		// Off by default: ~20 timed slots per draw cost milliseconds per frame at 5k draws.
 		return value && std::strcmp(value, "0") != 0;
-#endif
 	}();
 	return enabled;
 }

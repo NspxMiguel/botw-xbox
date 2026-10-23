@@ -24,6 +24,7 @@
 #endif
 #include <algorithm>
 #include <cstdlib>
+#include <filesystem>
 
 // Keep the POSIX implementation of GuestThread out of the UWP host. W1 owns thread.h/thread.cpp.
 namespace threads {
@@ -128,6 +129,9 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
     g_game_root = game;
     g_user_root = user;
     LOG("prepare_runtime: game=%s user=%s", game.c_str(), user.c_str());
+    // LocalState/latte-profile.txt turns the Latte profiler on (it reads its switch from the environment).
+    if (std::filesystem::exists(std::filesystem::path(user) / "latte-profile.txt"))
+        _putenv_s("CEMU_LATTE_PROFILE", "1");
     try {
         mem::init();
         dispatch::init();
