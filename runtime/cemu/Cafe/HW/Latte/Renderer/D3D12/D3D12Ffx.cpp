@@ -8,11 +8,16 @@
 #include "../../../../../../src/fsr3_history.h"
 #include "../../../../../../src/log.h"
 #ifdef BOTW_HAS_FFX
+#ifdef BOTW_FFX_STATIC
+#include <FidelityFX/host/ffx_fsr3upscaler.h>
+#include <FidelityFX/host/backends/dx12/ffx_dx12.h>
+#else
 #include <ffx_api.h>
 #include <dx12/ffx_api_dx12.h>
 #include <ffx_upscale.h>
 #include <ffx_framegeneration.h>
 #include <dx12/ffx_api_framegeneration_dx12.h>
+#endif
 #include <dxgi1_6.h>
 #include <d3dcompiler.h>
 #endif
@@ -24,6 +29,17 @@ struct D3D12Ffx::Impl
 	{
 	}
 #ifdef BOTW_HAS_FFX
+#ifdef BOTW_FFX_STATIC
+	bool available = false, upscale = false, readyLogged = false;
+	std::unique_ptr<FfxFsr3UpscalerContext> upscaleContext;
+	std::vector<uint8_t> scratch;
+	std::array<ComPtr<ID3D12Resource>, 3> sharedResources;
+	std::array<D3D12_RESOURCE_STATES, 3> sharedStates{};
+	static FfxResource Resource(ID3D12Resource *resource, FfxResourceStates state = FFX_RESOURCE_STATE_COMPUTE_READ)
+	{
+		return ffxGetResourceDX12(resource, ffxGetResourceDescriptionDX12(resource), nullptr, state);
+	}
+#else
 	HMODULE loader = nullptr;
 	PfnFfxCreateContext create = nullptr;
 	PfnFfxDestroyContext destroy = nullptr;
@@ -45,6 +61,7 @@ struct D3D12Ffx::Impl
 	unsigned presentTimeouts = 0;
 	std::chrono::steady_clock::time_point retryAfter{};
 	D3D12SwapChain *chain = nullptr;
+#endif
 	ComPtr<ID3D12Resource> motion, mask, normalizedDepth, linearColor, linearOutput;
 	ComPtr<ID3D12PipelineState> linearPipeline, displayPipeline;
 	D3D12_CPU_DESCRIPTOR_HANDLE linearRTV{}, linearOutputRTV{};
@@ -88,6 +105,7 @@ struct D3D12Ffx::Impl
 			LOG("FidelityFX: %s; using FSR 1 (then output scaling if unavailable)", reason);
 		warned = failed = true;
 	}
+#ifndef BOTW_FFX_STATIC
 	void PresentFailed(const char *reason)
 	{
 		if (chain->PresentTimedOut())
@@ -208,6 +226,7 @@ struct D3D12Ffx::Impl
 			self.callbackFailed.store(true);
 		return result;
 	}
+#endif
 	void CreateDepthPipeline()
 	{
 		if (depthPipeline && linearPipeline && displayPipeline)
@@ -314,7 +333,7 @@ float4 Display(float4 position : SV_Position) : SV_Target {
 		cmd->DrawInstanced(3, 1, 0, 0);
 		renderer.InvalidateDrawState();
 	}
-	FfxApiResource NormalizeDepth(LatteTextureD3D12 *depth)
+	auto NormalizeDepth(LatteTextureD3D12 *depth)
 	{
 		renderer.TransitionTexture(depth, 0, 1, 0, 1, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 		renderer.TransitionResource(normalizedDepth.Get(), depthState, D3D12_RESOURCE_STATE_RENDER_TARGET);
@@ -343,7 +362,11 @@ float4 Display(float4 position : SV_Position) : SV_Target {
 		renderer.TransitionResource(normalizedDepth.Get(), depthState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 		renderer.FlushBarriers();
 		renderer.InvalidateDrawState();
+#ifdef BOTW_FFX_STATIC
+		return Resource(normalizedDepth.Get());
+#else
 		return ffxApiGetResourceDX12(normalizedDepth.Get());
+#endif
 	}
 	bool DetectCut(ID3D12Resource *color, D3D12_RESOURCE_STATES &state)
 	{
@@ -414,6 +437,7 @@ float4 Display(float4 position : SV_Position) : SV_Target {
 		return cut;
 	}
 
+#ifndef BOTW_FFX_STATIC
 	double ModeHz() const
 	{
 		if (!chain)
@@ -437,6 +461,7 @@ float4 Display(float4 position : SV_Position) : SV_Target {
 		return 0;
 	}
 #endif
+#endif
 };
 
 D3D12Ffx::D3D12Ffx(D3D12Renderer &renderer) : impl(std::make_unique<Impl>(renderer))
@@ -446,6 +471,9 @@ D3D12Ffx::D3D12Ffx(D3D12Renderer &renderer) : impl(std::make_unique<Impl>(render
 	const char *overrideValue = std::getenv("BOTW_UPSCALER");
 	if (fsr3::select(fsr3::console.load(), false, overrideValue ? overrideValue : "", true, true).path != fsr3::Path::Fsr31)
 		return;
+#ifdef BOTW_FFX_STATIC
+	s.available = true;
+#else
 	// Store apps load their own DLLs with LoadPackagedLibrary; LoadLibraryExW is the desktop fallback.
 	// The loader opens the effect DLLs itself with LoadLibrary, which the app container may refuse:
 	// load them first so its lookups find modules that are already mapped.
@@ -474,11 +502,12 @@ D3D12Ffx::D3D12Ffx(D3D12Renderer &renderer) : impl(std::make_unique<Impl>(render
 	s.backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
 	s.backend.device = renderer.GetDevice();
 #endif
+#endif
 }
 D3D12Ffx::~D3D12Ffx()
 {
 	Reset();
-#ifdef BOTW_HAS_FFX
+#if defined(BOTW_HAS_FFX) && !defined(BOTW_FFX_STATIC)
 	const auto loader = impl->loader;
 	// Release any retained SDK COM objects before unloading their implementation.
 	impl.reset();
@@ -491,6 +520,19 @@ try
 {
 #ifdef BOTW_HAS_FFX
 	auto &s = *impl;
+#ifdef BOTW_FFX_STATIC
+	if (!s.upscale && !s.motion && !s.mask && !s.upscaleContext)
+		return;
+	s.renderer.Flush(true);
+	if (s.upscale && ffxFsr3UpscalerContextDestroy(s.upscaleContext.get()) != FFX_OK)
+		s.Fail("upscale context destruction failed");
+	s.upscale = false;
+	s.upscaleContext.reset();
+	s.scratch.clear();
+	for (auto &resource : s.sharedResources)
+		resource.Reset();
+	s.readyLogged = false;
+#else
 	if (!s.upscale && !s.generation && !s.swap && !s.motion && !s.mask)
 		return;
 	if (!s.ResetGeneration())
@@ -499,6 +541,7 @@ try
 	if (s.upscale && s.destroy(&s.upscale, nullptr) != FFX_API_RETURN_OK)
 		s.Fail("upscale context destruction failed");
 	s.upscale = nullptr;
+#endif
 	s.history.clear();
 	for (auto &slot : s.probes)
 		slot = {};
@@ -542,7 +585,11 @@ void D3D12Ffx::Resize(uint32 iw, uint32 ih, uint32 ow, uint32 oh, D3D12SwapChain
 #ifdef BOTW_HAS_FFX
 	auto &s = *impl;
 	Reset();
+#ifdef BOTW_FFX_STATIC
+	if (!s.available || s.failed)
+#else
 	if (!s.loader || s.failed)
+#endif
 		return;
 	s.iw = iw;
 	s.ih = ih;
@@ -550,6 +597,55 @@ void D3D12Ffx::Resize(uint32 iw, uint32 ih, uint32 ow, uint32 oh, D3D12SwapChain
 	s.oh = oh;
 	try
 	{
+#ifdef BOTW_FFX_STATIC
+		FfxFsr3UpscalerContextDescription context{};
+		context.flags = FFX_FSR3UPSCALER_ENABLE_AUTO_EXPOSURE;
+		context.maxRenderSize = {iw, ih};
+		context.maxUpscaleSize = {ow, oh};
+		s.scratch.resize(ffxGetScratchMemorySizeDX12(1));
+		s.upscaleContext = std::make_unique<FfxFsr3UpscalerContext>();
+		if (ffxGetInterfaceDX12(&context.backendInterface, ffxGetDeviceDX12(s.renderer.GetDevice()),
+								s.scratch.data(), s.scratch.size(), 1) != FFX_OK)
+		{
+			s.Fail("static upscale context creation failed");
+			Reset();
+			return;
+		}
+		if (ffxFsr3UpscalerContextCreate(s.upscaleContext.get(), &context) != FFX_OK)
+		{
+			// The SDK initializes the interface before allocating GPU resources.
+			// Release partially created resources as well as successful contexts.
+			ffxFsr3UpscalerContextDestroy(s.upscaleContext.get());
+			s.Fail("static upscale context creation failed");
+			Reset();
+			return;
+		}
+		s.upscale = true;
+		FfxFsr3UpscalerSharedResourceDescriptions shared{};
+		if (ffxFsr3UpscalerGetSharedResourceDescriptions(s.upscaleContext.get(), &shared) != FFX_OK)
+			throw std::runtime_error("FSR shared resource descriptions unavailable");
+		const std::array descriptions{shared.dilatedDepth, shared.dilatedMotionVectors, shared.reconstructedPrevNearestDepth};
+		const auto heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+		for (size_t i = 0; i < descriptions.size(); ++i)
+		{
+			const auto &resource = descriptions[i].resourceDescription;
+			D3D12_RESOURCE_DESC desc{};
+			desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+			desc.Width = resource.width;
+			desc.Height = resource.height;
+			desc.DepthOrArraySize = resource.depth;
+			desc.MipLevels = resource.mipCount;
+			desc.SampleDesc.Count = 1;
+			desc.Format = ffxGetDX12FormatFromSurfaceFormat(resource.format);
+			desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+			if (resource.usage & FFX_RESOURCE_USAGE_RENDERTARGET)
+				desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+			s.sharedStates[i] = D3D12_RESOURCE_STATE_COMMON;
+			D3D12_ThrowIfFailed(s.renderer.GetDevice()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+																				s.sharedStates[i], nullptr, IID_PPV_ARGS(&s.sharedResources[i])),
+								"FSR shared resource");
+		}
+#else
 		if (!s.Version(FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE, s.upscaleVersion))
 		{
 			s.Fail("FSR 3.1 provider unavailable");
@@ -566,6 +662,7 @@ void D3D12Ffx::Resize(uint32 iw, uint32 ih, uint32 ow, uint32 oh, D3D12SwapChain
 			Reset();
 			return;
 		}
+#endif
 		auto texture = [&](DXGI_FORMAT format, ComPtr<ID3D12Resource> &resource, D3D12_CPU_DESCRIPTOR_HANDLE &rtv,
 						   uint32 width = 0, uint32 height = 0) {
 			D3D12_RESOURCE_DESC desc{};
@@ -606,6 +703,7 @@ void D3D12Ffx::Resize(uint32 iw, uint32 ih, uint32 ow, uint32 oh, D3D12SwapChain
 								"FFX scene probe");
 		// No clean guest projection hook: jitter stays zero; querying an offset alone
 		// would not jitter scene rendering and would provide incorrect reconstruction data.
+#ifndef BOTW_FFX_STATIC
 		LOG("FidelityFX: FSR 3.1 %ux%u -> %ux%u; zero motion, no jitter, image-cut reset", iw, ih, ow, oh);
 		if (!chain || s.fgFailed)
 			return;
@@ -697,6 +795,9 @@ void D3D12Ffx::Resize(uint32 iw, uint32 ih, uint32 ow, uint32 oh, D3D12SwapChain
 		}
 		// ponytail: BotW HUD is already baked into color; no HUD-less surface or
 		// separate UI pass is available. Generated frames may distort HUD/text.
+#else
+		(void)chain;
+#endif
 	}
 	catch (const std::exception &)
 	{
@@ -767,6 +868,21 @@ bool D3D12Ffx::Upscale(ID3D12Resource *color, D3D12_RESOURCE_STATES &colorState,
 	r.TransitionResource(s.mask.Get(), s.maskState, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 	r.FlushBarriers();
 	const auto depthInput = s.NormalizeDepth(depth);
+#ifdef BOTW_FFX_STATIC
+	for (size_t i = 0; i < s.sharedResources.size(); ++i)
+		r.TransitionResource(s.sharedResources[i].Get(), s.sharedStates[i], D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+	r.FlushBarriers();
+	FfxFsr3UpscalerDispatchDescription desc{};
+	desc.dilatedDepth = Impl::Resource(s.sharedResources[0].Get(), FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+	desc.dilatedMotionVectors = Impl::Resource(s.sharedResources[1].Get(), FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+	desc.reconstructedPrevNearestDepth = Impl::Resource(s.sharedResources[2].Get(), FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+	desc.commandList = ffxGetCommandListDX12(cmd);
+	desc.color = Impl::Resource(s.linearColor.Get());
+	desc.depth = depthInput;
+	desc.motionVectors = Impl::Resource(s.motion.Get());
+	desc.reactive = desc.transparencyAndComposition = Impl::Resource(s.mask.Get());
+	desc.output = Impl::Resource(s.linearOutput.Get(), FFX_RESOURCE_STATE_UNORDERED_ACCESS);
+#else
 	ffxDispatchDescUpscale desc{};
 	desc.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
 	desc.commandList = cmd;
@@ -775,6 +891,7 @@ bool D3D12Ffx::Upscale(ID3D12Resource *color, D3D12_RESOURCE_STATES &colorState,
 	desc.motionVectors = ffxApiGetResourceDX12(s.motion.Get());
 	desc.reactive = desc.transparencyAndComposition = ffxApiGetResourceDX12(s.mask.Get());
 	desc.output = ffxApiGetResourceDX12(s.linearOutput.Get(), FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+#endif
 	desc.motionVectorScale = {1, 1};
 	desc.renderSize = {s.iw, s.ih};
 	desc.upscaleSize = {s.ow, s.oh};
@@ -791,7 +908,11 @@ bool D3D12Ffx::Upscale(ID3D12Resource *color, D3D12_RESOURCE_STATES &colorState,
 	desc.cameraFovAngleVertical = 1.04719755f;
 	desc.viewSpaceToMetersFactor = 1;
 	r.InvalidateDrawState();
+#ifdef BOTW_FFX_STATIC
+	if (ffxFsr3UpscalerContextDispatch(s.upscaleContext.get(), &desc) != FFX_OK)
+#else
 	if (s.dispatch(&s.upscale, &desc.header) != FFX_API_RETURN_OK)
+#endif
 	{
 		s.Fail("upscale dispatch failed");
 		return false;
@@ -799,6 +920,14 @@ bool D3D12Ffx::Upscale(ID3D12Resource *color, D3D12_RESOURCE_STATES &colorState,
 	r.GetDevice()->CreateRenderTargetView(output, nullptr, s.linearOutputRTV);
 	s.ConvertColor(s.linearOutput.Get(), s.linearOutputState, output, outputState,
 				   s.linearOutputRTV, s.displayPipeline.Get(), s.ow, s.oh);
+#ifdef BOTW_FFX_STATIC
+	if (!s.readyLogged)
+	{
+		LOG("FidelityFX: FSR 3.1 static upscaler ready (%s, %ux%u)",
+			s.iw == s.ow && s.ih == s.oh ? "native AA" : "upscaling", s.ow, s.oh);
+		s.readyLogged = true;
+	}
+#else
 	++s.frame;
 	s.frameResets[s.frame % s.frameResets.size()].store(s.resetHistory);
 	if (s.generation && (s.swap || s.manual) && !s.fgFailed)
@@ -824,6 +953,7 @@ bool D3D12Ffx::Upscale(ID3D12Resource *color, D3D12_RESOURCE_STATES &colorState,
 			s.Fail("FG prepare failed", true);
 		}
 	}
+#endif
 	r.InvalidateDrawState();
 	return true;
 #else
@@ -837,7 +967,7 @@ bool D3D12Ffx::Upscale(ID3D12Resource *color, D3D12_RESOURCE_STATES &colorState,
 }
 void D3D12Ffx::PreparePresent(bool paused)
 {
-#ifdef BOTW_HAS_FFX
+#if defined(BOTW_HAS_FFX) && !defined(BOTW_FFX_STATIC)
 	auto &s = *impl;
 	s.generating = false;
 	if (s.callbackFailed.exchange(false))
@@ -879,7 +1009,7 @@ void D3D12Ffx::PreparePresent(bool paused)
 }
 bool D3D12Ffx::PresentGenerated()
 {
-#ifdef BOTW_HAS_FFX
+#if defined(BOTW_HAS_FFX) && !defined(BOTW_FFX_STATIC)
 	auto &s = *impl;
 	if (!s.manual || !s.generating)
 		return false;
@@ -960,13 +1090,15 @@ void D3D12Ffx::EndFrame()
 #ifdef BOTW_HAS_FFX
 	if (impl->failed)
 		Reset();
+#ifndef BOTW_FFX_STATIC
 	else if (impl->fgFailed)
 		impl->ResetGeneration();
+#endif
 #endif
 }
 bool D3D12Ffx::Generating() const
 {
-#ifdef BOTW_HAS_FFX
+#if defined(BOTW_HAS_FFX) && !defined(BOTW_FFX_STATIC)
 	return impl->generating;
 #else
 	return false;

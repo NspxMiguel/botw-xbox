@@ -37,6 +37,13 @@ int main() {
     assert(
         !core_window_fg_interval(Console::SeriesX, 30, std::numeric_limits<double>::quiet_NaN()));
     assert(!core_window_fg_interval(Console::SeriesX, 60, std::numeric_limits<double>::infinity()));
+    // NativeAA requires temporal processing and equal positive dimensions.
+    assert(native_aa(Path::Fsr31, 1920, 1080, 1920, 1080));
+    assert(native_aa(Path::Fsr31, 1280, 720, 1280, 720));
+    assert(!native_aa(Path::Fsr1, 1920, 1080, 1920, 1080));
+    assert(!native_aa(Path::Off, 1920, 1080, 1920, 1080));
+    assert(!native_aa(Path::Fsr31, 1280, 720, 1920, 1080));
+    assert(!native_aa(Path::Fsr31, 0, 0, 0, 0));
     // Hysteresis uses actual frame time at 120 Hz; stable 60 fps stays disabled.
     FrameGenerationPolicy high_refresh_policy;
     for (int i = 0; i < 600; ++i)

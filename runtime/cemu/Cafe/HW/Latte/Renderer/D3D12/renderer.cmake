@@ -51,7 +51,8 @@ target_include_directories(cemu_gpu PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/fsr")
 
 # Optional SDK remains outside the source tree. Never link its import libraries.
 set(BOTW_FFX_SDK "" CACHE PATH "External FidelityFX 2.3.0 Kits/FidelityFX directory")
-if(BOTW_FFX_SDK)
+include("${CMAKE_SOURCE_DIR}/cmake/ffx_static.cmake")
+if(BOTW_FFX_SDK AND NOT BOTW_FFX_SOURCE)
   foreach(_file api/include/ffx_api.h upscalers/include/ffx_upscale.h
       framegeneration/include/ffx_framegeneration.h
       signedbin/amd_fidelityfx_loader_dx12.dll

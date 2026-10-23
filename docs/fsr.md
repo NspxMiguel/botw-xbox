@@ -4,8 +4,12 @@
 
 The D3D12 TV output has an AMD FSR 1 FP32 EASU + RCAS path, using the
 unaltered MIT AMD shader headers under `runtime/third_party/fidelityfx`.
-It needs no guest motion vectors, depth, jitter or previous frame. This is
-spatial FSR 1, **not temporal FSR 3.1 and not AMD frame generation**.
+It needs no guest motion vectors, depth, jitter or previous frame. It remains the
+fallback when temporal processing is unavailable. Optional static FSR 3.1.4 from
+MIT SDK v1.1.4 now dispatches through the native upscaler component API, including
+NativeAA at equal input/output sizes. See [FSR3-INTEGRATION.md](FSR3-INTEGRATION.md)
+for the source build and exact depth/zero-motion/no-jitter limitations. Static
+builds do not include AMD frame generation.
 
 Automatic startup selection keeps the swapchain at HDMI output dimensions and
 selects internal resolution independently:
@@ -19,8 +23,12 @@ Lower output resolutions further cap internal scale. Explicit scale is clamped t
 the console/output limits. Presets divide the output dimensions by 1.3 (Ultra
 Quality), 1.5 (Quality), 1.7 (Balanced), or 2.0 (Performance), also respecting the
 console cap and 720p minimum. At 4K, Series X Quality uses 2560 x 1440; Series S
-uses its 1080p cap. Native output retains the user-selected output filter; FSR runs only when neither dimension shrinks and at least one grows. Manual graphic-pack texture
-rules retain authority over render-target dimensions. No FPS claim is implied by
+uses its 1080p cap. Without static FSR3, native output retains the user-selected
+output filter; FSR1 runs only when neither dimension shrinks and at least one grows. Static FSR3 also
+runs at equal dimensions as NativeAA. The optional FFX automatic policy overrides
+the base table above: native through 1080p, then quality 1.5 for Series X/desktop
+or balanced 1.7 for Series S, with 2160p/1440p output caps respectively. Manual
+graphic-pack texture rules retain authority over render-target dimensions. No FPS claim is implied by
 these caps; real console GPU measurements are still needed.
 
 The existing output shader first draws at the source's effective resolution into
@@ -62,17 +70,19 @@ The quick menu need not change yet. `Settings` and UWP LocalSettings carry:
 | `frameGeneration` | 0 auto, 1 off, 2 request FSR3.1; default auto |
 
 Upscaler changes are published atomically by UWP settings; scale/preset changes
-apply on the next launch. Enum values are reserved for the w17 FSR 3.1 job. Temporal requests explicitly
-resolve to spatial FSR1, and all frame-generation requests explicitly resolve to
-Off when settings are applied. Neither unsupported mode is offered in the UI.
-The old custom interpolator remains disabled. There is no capability claim that FG is ready.
+apply on the next launch. The persisted temporal request resolves to spatial
+fallback in the common settings layer; D3D12Ffx selects the optional temporal path and honors `BOTW_UPSCALER`.
+All frame-generation requests resolve to Off in the static build. These modes are
+not offered separately in the UI. The old custom interpolator remains disabled;
+there is no capability claim that frame generation is ready.
 
 ## FSR 3.1 feasibility and exact integration points
 
 No captured game frames, guest buffer traces or validated per-build uniform
 layouts are available here. Resolution/format matches are useful candidates,
-not proof of a final-scene depth or camera matrix. Consequently temporal FSR
-and frame interpolation are deliberately not dispatched.
+not proof of a final-scene depth or camera matrix. Static FSR3 now dispatches with
+the existing depth heuristic, zero motion and no jitter. The remaining camera/velocity work below would improve that approximation;
+it has not been implemented. Static frame interpolation is not dispatched.
 
 ### Scene color / depth and ordering
 

@@ -126,6 +126,10 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 		requested = fsr::Upscaler::Spatial;
 	bool fsr = !padView && !m_fsrFailed &&
 			   fsr::should_upscale(requested, inputWidth, inputHeight, imageWidth, imageHeight);
+#ifdef BOTW_FFX_STATIC
+	// FSR1 only scales up. FSR3 also accepts NativeAA at a 1.0 ratio.
+	fsr = fsr || (!padView && !m_fsrFailed && fsr3::native_aa(selection.path, inputWidth, inputHeight, imageWidth, imageHeight));
+#endif
 	if (fsr && (!m_fsr || !m_fsr->Matches(inputWidth, inputHeight, imageWidth, imageHeight)))
 	{
 		// Keep the user's output filter for this frame; resize between presents.
