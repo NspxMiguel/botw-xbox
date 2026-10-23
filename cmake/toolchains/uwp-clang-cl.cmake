@@ -1,28 +1,108 @@
-# Cross-compile UWP on macOS with Microsoft's unpacked SDK/CRT and LLVM.
+# Cross-compile UWP with Microsoft's unpacked SDK/CRT and native LLVM tools.
 set(CMAKE_SYSTEM_NAME Windows)
 set(CMAKE_SYSTEM_PROCESSOR AMD64)
+
+# Preserve the maintainer's existing layout; new users use the builder data dir.
+set(_builder_data "$ENV{HOME}/.botw-builder")
+if(DEFINED ENV{USERPROFILE} AND NOT DEFINED ENV{HOME})
+  set(_builder_data "$ENV{USERPROFILE}/.botw-builder")
+endif()
+set(_xwin_default "${_builder_data}/xwin")
+set(_vcpkg_default "${_builder_data}/vcpkg-uwp")
+if(EXISTS "$ENV{HOME}/.local/share/nxbox/xwin/sdk")
+  set(_xwin_default "$ENV{HOME}/.local/share/nxbox/xwin/sdk")
+endif()
+if(EXISTS "$ENV{HOME}/.local/share/nxbox/vcpkg-uwp")
+  set(_vcpkg_default "$ENV{HOME}/.local/share/nxbox/vcpkg-uwp")
+endif()
+if(DEFINED ENV{XWIN_ROOT})
+  set(_xwin_default "$ENV{XWIN_ROOT}")
+endif()
+if(DEFINED ENV{VCPKG_UWP_ROOT})
+  set(_vcpkg_default "$ENV{VCPKG_UWP_ROOT}")
+endif()
 set(XWIN_ROOT
-    "$ENV{HOME}/.local/share/nxbox/xwin/sdk"
+    "${_xwin_default}"
     CACHE PATH "Unpacked xwin SDK and MSVC CRT")
 set(VCPKG_UWP_ROOT
-    "$ENV{HOME}/.local/share/nxbox/vcpkg-uwp"
+    "${_vcpkg_default}"
     CACHE PATH "Unpacked vcpkg UWP and desktop trees")
-set(CMAKE_C_COMPILER /opt/homebrew/opt/llvm/bin/clang-cl)
-set(CMAKE_CXX_COMPILER /opt/homebrew/opt/llvm/bin/clang-cl)
-set(CMAKE_C_COMPILER_TARGET x86_64-pc-windows-msvc)
-set(CMAKE_CXX_COMPILER_TARGET x86_64-pc-windows-msvc)
-set(CMAKE_LINKER /opt/homebrew/bin/lld-link)
-set(CMAKE_AR /opt/homebrew/opt/llvm/bin/llvm-lib)
-set(CMAKE_RC_COMPILER /opt/homebrew/opt/llvm/bin/llvm-rc)
-set(CMAKE_MT /opt/homebrew/opt/llvm/bin/llvm-mt)
+
+set(_llvm_hints
+    /opt/homebrew/opt/llvm/bin
+    /opt/homebrew/opt/lld/bin
+    /usr/local/opt/llvm/bin
+    /usr/local/opt/lld/bin
+    /usr/lib/llvm/bin
+    "$ENV{ProgramFiles}/LLVM/bin"
+    "$ENV{ProgramFiles\(x86\)}/LLVM/bin"
+    "C:/Program Files/LLVM/bin")
+file(
+  GLOB _linux_llvm
+  LIST_DIRECTORIES TRUE
+  "/usr/lib/llvm-*/bin")
+list(
+  SORT _linux_llvm
+  COMPARE NATURAL
+  ORDER DESCENDING)
+list(APPEND _llvm_hints ${_linux_llvm})
+# find_program searches PATH before common install locations. Every tool is a
+# cache FILEPATH, so -DCMAKE_C_COMPILER=..., etc. always wins.
+find_program(
+  CMAKE_C_COMPILER
+  NAMES clang-cl
+  PATHS ${_llvm_hints} REQUIRED)
+find_program(
+  CMAKE_CXX_COMPILER
+  NAMES clang-cl
+  PATHS ${_llvm_hints} REQUIRED)
+find_program(
+  CMAKE_LINKER
+  NAMES lld-link
+  PATHS ${_llvm_hints} REQUIRED)
+find_program(
+  CMAKE_AR
+  NAMES llvm-lib
+  PATHS ${_llvm_hints} REQUIRED)
+find_program(
+  CMAKE_RC_COMPILER
+  NAMES llvm-rc
+  PATHS ${_llvm_hints} REQUIRED)
+find_program(
+  CMAKE_MT
+  NAMES llvm-mt
+  PATHS ${_llvm_hints} REQUIRED)
+set(CMAKE_C_COMPILER_TARGET
+    x86_64-pc-windows-msvc
+    CACHE STRING "C compiler target")
+set(CMAKE_CXX_COMPILER_TARGET
+    x86_64-pc-windows-msvc
+    CACHE STRING "C++ compiler target")
 set(CMAKE_MSVC_RUNTIME_LIBRARY MultiThreadedDLL)
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
-set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES XWIN_ROOT VCPKG_UWP_ROOT)
+set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
+    XWIN_ROOT
+    VCPKG_UWP_ROOT
+    XWIN_SDK_INCLUDE_DIR
+    CMAKE_C_COMPILER
+    CMAKE_CXX_COMPILER
+    CMAKE_LINKER
+    CMAKE_AR
+    CMAKE_RC_COMPILER
+    CMAKE_MT)
+
+# xwin normally flattens includes; the existing maintainer SDK is versioned.
+set(_sdk_include "${XWIN_ROOT}/sdk/include")
+if(EXISTS "${_sdk_include}/10.0.26100/um")
+  set(_sdk_include "${_sdk_include}/10.0.26100")
+endif()
+set(XWIN_SDK_INCLUDE_DIR
+    "${_sdk_include}"
+    CACHE PATH "SDK include root containing ucrt, um, shared, winrt, cppwinrt")
 
 set(_uwp_includes "/imsvc\"${XWIN_ROOT}/crt/include\"")
 foreach(_part ucrt um shared winrt cppwinrt)
-  string(APPEND _uwp_includes
-         " /imsvc\"${XWIN_ROOT}/sdk/include/10.0.26100/${_part}\"")
+  string(APPEND _uwp_includes " /imsvc\"${XWIN_SDK_INCLUDE_DIR}/${_part}\"")
 endforeach()
 # The 14.44 STL imports the C environment functions unconditionally. Expose CRT
 # declarations while preserving UWP Windows API partition guards. Xbox Series

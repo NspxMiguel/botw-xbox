@@ -35,3 +35,15 @@ PEDIDOS.md
 CONTRATO.md
 IDEIAS.md
 DESIGN.md
+
+# Private builder data, signing identities and playable packages.
+.botw-builder/
+builder-test/
+builder-output/
+builder-work-*/
+*.appx
+*.pfx
+*.p12
+*.cer
+.pytest_cache/
+.ruff_cache/

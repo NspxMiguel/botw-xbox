@@ -184,8 +184,11 @@ else()
   target_compile_options(cemu_gpu PRIVATE -w -O2 -g1)
 endif()
 if(BOTW_RENDERER STREQUAL "metal")
-  target_include_directories(
-    cemu_gpu PRIVATE runtime/cemu/dependencies/metal-cpp /opt/homebrew/include)
+  find_package(Boost REQUIRED CONFIG)
+  find_package(glm REQUIRED CONFIG)
+  target_include_directories(cemu_gpu
+                             PRIVATE runtime/cemu/dependencies/metal-cpp)
+  target_link_libraries(cemu_gpu PRIVATE Boost::headers glm::glm)
   target_compile_definitions(cemu_gpu PRIVATE ENABLE_METAL IMGUI_IMPL_METAL_CPP)
 endif()
 # BEGIN W2 renderer dependencies.
@@ -337,8 +340,14 @@ endif()
 find_package(fmt REQUIRED)
 find_package(ZLIB REQUIRED)
 if(BOTW_PLATFORM STREQUAL "apple" AND NOT DEFINED OPENSSL_ROOT_DIR)
-  set(OPENSSL_ROOT_DIR /opt/homebrew/opt/openssl@3) # the shipped Mac build
-                                                    # links OpenSSL 3
+  # Homebrew OpenSSL is keg-only. Prefer native package discovery elsewhere.
+  find_program(BOTW_BREW_EXECUTABLE brew)
+  if(BOTW_BREW_EXECUTABLE)
+    execute_process(
+      COMMAND "${BOTW_BREW_EXECUTABLE}" --prefix openssl@3
+      OUTPUT_VARIABLE OPENSSL_ROOT_DIR
+      OUTPUT_STRIP_TRAILING_WHITESPACE)
+  endif()
 endif()
 find_package(OpenSSL REQUIRED)
 find_package(zstd REQUIRED CONFIG)

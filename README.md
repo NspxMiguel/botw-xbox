@@ -40,6 +40,8 @@ estimate, not a promise.
 
 ## Building
 
+Players: see [BUILDING.md](BUILDING.md) for the four local builder commands.
+
 See [docs/CI.md](docs/CI.md). CI builds only the game-free runtime. Recompiling the game happens on
 your own computer from your own already extracted and decrypted dump; the generated code and the
 resulting package must stay there. Setup accepts decrypted `code/`, `content/`, `meta/` folders,
@@ -100,6 +102,10 @@ ponto de lançamento: 60 fps cravados, sem travadas de compilação de shader, 4
 **60 fps:** falta dividir a thread de comandos de GPU em duas threads trabalhando ao mesmo tempo
 ([docs/latte-pipelining.md](docs/latte-pipelining.md)). Estimativa: 4–8 semanas. É estimativa, não
 promessa.
+
+## Como montar o pacote
+
+Veja [BUILDING.md em português](BUILDING.md#português-brasileiro) para os quatro comandos locais.
 
 ## Créditos e licença
 

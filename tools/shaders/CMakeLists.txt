@@ -12,10 +12,10 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 add_executable(latte2msl src/main.cpp src/inventory.cpp src/r600.cpp
                          src/msl.cpp)
-target_include_directories(latte2msl PRIVATE /opt/homebrew/include)
+find_package(zstd REQUIRED CONFIG)
+find_package(ZLIB REQUIRED)
 target_compile_options(latte2msl PRIVATE -Wall -Wno-unused-function)
-target_link_libraries(latte2msl PRIVATE /opt/homebrew/opt/zstd/lib/libzstd.dylib
-                                        z)
+target_link_libraries(latte2msl PRIVATE zstd::libzstd_shared ZLIB::ZLIB)
 
 # Metal-framework compile check (no offline toolchain needed)
 add_executable(mtlcheck src/mtlcheck.mm)
