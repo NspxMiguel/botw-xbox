@@ -20,7 +20,7 @@ TITLE_ID = "00050000101c9400"
 REMASTER = (
     ("Mods/FPS++", "Mode", "Normal Settings", "Normal Settings"),
     ("Mods/FPS++", "FPS Limit", "60FPS Limit (Default)", "60FPS Limit (Default)"),
-    ("Graphics", "Resolution", "1280x720 (Default)", "1280x720 (Default)"),
+    ("Graphics", "Resolution", "1280x720 (HD, Default)", "1280x720 (HD, Default)"),
     ("Graphics", "Shadows", "Ultra (300%)", "Extreme (400%, Unstable)"),
     ("Graphics", "Shadow Draw Distance", "High (Default)", "Very High (Recommended)"),
     ("Graphics", "Anti-Aliasing", "Normal FXAA (Default)", "Normal FXAA (Default)"),
