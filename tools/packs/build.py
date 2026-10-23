@@ -286,16 +286,19 @@ def apply_to_image(image, prepared):
                 write.address, 10, imp.sym_index, 0, image.text.index
             )
     original_lo, original_hi = image.text_lo, image.text_hi
-    cave_code = {
+    image.pack_code = {
         w.address + offset
         for w in prepared.writes
         if w.executable
         for offset in range(0, len(w.data), 4)
-        if prepared.cave_base <= w.address < prepared.cave_end
+    }
+    cave_code = {
+        a for a in image.pack_code if prepared.cave_base <= a < prepared.cave_end
     }
     image.text_lo = min(original_lo, prepared.cave_base) if cave_code else original_lo
     image.text_hi = max(original_hi, prepared.cave_end)
     image.is_text = lambda a: original_lo <= a < original_hi or a in cave_code
+    image.cave_code = cave_code
     image.ctr_continuations, image.lr_redirects = continuation_targets(
         image, prepared.writes, cave_code, original_lo, original_hi
     )

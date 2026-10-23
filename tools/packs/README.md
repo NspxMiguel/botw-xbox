@@ -123,6 +123,17 @@ with overlap and branch-range checks. Cave constants are excluded from function
 discovery. New import calls retain HLE relocation metadata; stale relocations covering
 replaced instructions are removed before analysis/codegen.
 
+Direct `bl`/`bla` targets use ordinary function discovery. Constant
+`li/mtctr/bctrl` and `lis/(addi|ori)/mtctr/bctrl` sequences in patched text or
+caves also seed function entries, without treating cave data as code.
+`packs_report.json` includes a `cave_calls` audit of every cave call and patched
+call into a cave, including source locations, resolved targets, imports and
+displaced-code continuations. Missing known code targets fail compilation.
+Conditional branch displacements are parenthesized before LLVM assembly:
+otherwise LLVM can parse `blt -16` as the prediction hint `blt- 16` and reverse
+the jump. Every assembled direct branch is decoded and its destination checked
+against the resolved patch expression.
+
 The normal generated sources are accompanied by `packs_generated.inc` (compiled runtime
 snapshot) and `packs_report.json` (selected presets, variables, CRC, hashes). These are
 private generated outputs and must never be committed or distributed. Inside this repo,

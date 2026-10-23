@@ -11,10 +11,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from cafe import ppc
 from cafe.analyze import Analyzer
 from cafe.codegen import Generator
 from cafe.image import Image
 from cafe.rpx import Reloc, Symbol
+from tools.packs.audit import audit_cave_calls
 from tools.packs.build import apply_to_image, emit_snapshot, prepare
 from tools.packs.checksum import module_checksum
 from tools.packs.patches import Assembler, Write, apply_writes, compile_patch, layout
@@ -290,6 +292,46 @@ blr
         self.assertEqual(writes[1].data.hex(), "41820005")
         self.assertEqual(writes[-1].data, struct.pack(">2f", 60, 2))
 
+    def test_backward_conditional_aliases_preserve_sign_and_prediction(self):
+        for mnemonic in (
+            "blt",
+            "bgt",
+            "ble",
+            "bge",
+            "beq",
+            "bne",
+            "bdnz",
+            "bdz",
+            "bltl",
+            "blt-",
+            "blt+",
+        ):
+            with self.subTest(mnemonic=mnemonic):
+                writes, _, _, _ = self.compile(
+                    f"[A]\nmoduleMatches=0x1234\n0x018002b4={mnemonic} 0x018001d4"
+                )
+                instruction = ppc.decode(
+                    int.from_bytes(writes[0].data, "big"), writes[0].address
+                )
+                self.assertEqual(instruction.target, 0x018001D4)
+                self.assertEqual(instruction.LK, mnemonic == "bltl")
+
+    def test_assembler_branch_target_mismatch_is_rejected(self):
+        statements, symbols, _, _ = layout(
+            [("synthetic.asm", "[A]\nmoduleMatches=0x1234\n0x018002b4=blt 0x018001d4")],
+            0x1234,
+            {},
+            0x01800000,
+        )
+        assembler = Assembler()
+        with (
+            patch.object(
+                assembler, "encode_many", return_value=[bytes.fromhex("418000e0")]
+            ),
+            self.assertRaisesRegex(PackError, "assembled branch target mismatch"),
+        ):
+            compile_patch(statements, symbols, assembler)
+
     def test_module_filter(self):
         writes, _, _, active = self.compile(
             "[A]\nmoduleMatches=0x8888\n.origin=codecave\nunsupported"
@@ -328,6 +370,132 @@ blr
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_cave_call_to_data_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "authored.elf"
+            path.write_bytes(synthetic_elf())
+            image = Image(str(path))
+            plan = SimpleNamespace(
+                cave_base=0x01800000,
+                cave_end=0x01800010,
+                writes=[
+                    Write(0x01800000, struct.pack(">f", 1), "data"),
+                    Write(0x02000000, bytes.fromhex("49800003"), "call", True),
+                ],
+            )
+            apply_to_image(image, plan)
+            self.assertFalse(image.is_text(0x01800000))
+            with self.assertRaisesRegex(PackError, "has no function"):
+                audit_cave_calls(image, plan, {})
+
+    def test_nested_cave_calls_and_backward_loop_execute(self):
+        # Exercise the actual RETURN guard with a saved stack LR, including a
+        # callee that uses the caller's LR save slot in its own stack frame.
+        calls = (
+            "bl callee",
+            "bla callee",
+            "lis r12,callee@ha\naddi r12,r12,callee@lo\nmtctr r12\nbctrl",
+            "lis r12,callee@hi\nori r12,r12,callee@lo\nmtctr r12\nbctrl",
+            "bl callee",
+        )
+        for index, call in enumerate(calls):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                raw = synthetic_elf(code=bytes(32))
+                path = root / "authored.elf"
+                path.write_bytes(raw)
+                (root / "rules.txt").write_text(RULES)
+                text = (
+                    "0x02000000=mflr r30\n0x02000004=bla entry\n"
+                    "0x02000008=mtlr r30\n0x0200000c=blr\n"
+                )
+                if index == 4:
+                    text = (
+                        "0x02000000=mflr r30\n0x02000004=lis r12,entry@ha\n"
+                        "0x02000008=addi r12,r12,entry@lo\n0x0200000c=mtctr r12\n"
+                        "0x02000010=bctrl\n0x02000014=mtlr r30\n0x02000018=blr\n"
+                    )
+                (root / "patch_test.asm").write_text(
+                    f"[A]\nmoduleMatches={module_checksum(raw):#x}\n"
+                    f"{text}"
+                    ".origin=codecave\nconstant:\n.float 1\n"
+                    "callee:\nmflr r0\nstwu r1,-16(r1)\nstw r31,12(r1)\n"
+                    "mr r31,r6\nstw r0,20(r1)\naddi r3,r3,1\n"
+                    "lwz r0,20(r1)\nmtlr r0\nlwz r31,12(r1)\naddi r1,r1,16\nblr\n"
+                    ".int 0x49800003\nentry:\nstwu r1,-32(r1)\nmflr r0\n"
+                    "stw r0,36(r1)\nstw r31,28(r1)\nmr r31,r1\nli r6,2\n"
+                    f"loop:\n{call}\naddi r6,r6,-1\ncmpwi r6,0\nbgt loop\n"
+                    "addi r11,r31,32\nlwz r0,4(r11)\nmtlr r0\n"
+                    "lwz r31,-4(r11)\nmr r1,r11\nblr\n"
+                )
+                driver = SimpleNamespace(
+                    Image=Image, Analyzer=Analyzer, Generator=Generator
+                )
+                state = configure_hook(
+                    driver,
+                    {"title_id": "0000000000000001", "packs": [{"path": str(root)}]},
+                    Assembler(),
+                    raw,
+                )
+                image = driver.Image(str(path))
+                analyzer = driver.Analyzer(image)
+                analyzer.discover_entries()
+                self.assertIn(0x01800004, analyzer.entries)
+                self.assertIn(0x01800034, analyzer.entries)
+                self.assertNotIn(0x01800000, analyzer.entries)
+                self.assertNotIn(0x01800030, analyzer.entries)
+                analyzer.run()
+                self.assertFalse(analyzer.problems)
+                self.assertIn(0x01800004, analyzer.functions)
+                self.assertTrue(all(image.is_text(a) for a in analyzer.functions))
+                self.assertTrue(
+                    all(c["target_is_function"] for c in state["cave_calls"])
+                )
+                generator = driver.Generator(image, analyzer.entries)
+                codes, callees = [], set()
+                for function in analyzer.functions.values():
+                    code, calls_used = generator.gen_function(function)
+                    codes.append(code)
+                    callees.update(calls_used)
+                self.assertFalse(generator.unsupported)
+                from tools.recompile import HEADER
+
+                source = (
+                    HEADER
+                    + "\n#include <cassert>\n#include <cstdlib>\n#include <vector>\n"
+                )
+                source += 'uint8_t* g_mem;\nextern "C" PPC_NORETURN void rt_bad_return(PPCContext*, uint32_t, uint32_t) { std::abort(); }\n'
+                source += 'extern "C" PPC_NORETURN void rt_trap(PPCContext*, uint32_t, const char*) { std::abort(); }\n'
+                source += "\n".join(
+                    f'extern "C" void {symbol}(PPCContext*);' for symbol in callees
+                )
+                source += "\n" + "\n".join(codes)
+                source += 'extern "C" void rt_call(PPCContext* c, uint32_t target) { switch (target) {\n'
+                source += "\n".join(
+                    f"case 0x{entry:08x}: f_{entry:08x}(c); return;"
+                    for entry in analyzer.functions
+                )
+                source += "default: std::abort(); } }\n"
+                source += "int main() { std::vector<uint8_t> memory(0x20000); g_mem=memory.data(); PPCContext c{}; c.lr=0x1234; c.r[1]=0x10000; c.r[3]=7; c.r[31]=0x5678; f_02000000(&c); assert(c.lr==0x1234 && c.r[3]==9 && c.r[1]==0x10000 && c.r[31]==0x5678); }\n"
+                (root / "hle_decls.h").write_text("")
+                cpp = root / "nested.cpp"
+                cpp.write_text(source)
+                binary = root / "nested"
+                subprocess.run(
+                    [
+                        "clang++",
+                        "-std=c++20",
+                        "-I",
+                        "runtime/include",
+                        str(cpp),
+                        "-o",
+                        str(binary),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run([str(binary)], check=True, capture_output=True)
+
     def test_synthetic_image_hook_analyze_codegen_snapshot(self):
         raw = synthetic_elf()
         with tempfile.TemporaryDirectory() as directory:

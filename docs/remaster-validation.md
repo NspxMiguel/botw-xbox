@@ -35,6 +35,46 @@ shadow-map dimensions and the GUI precision upgrade still apply independently.
 Upstream marks the selected shadow tier **Unstable**; compilation does not
 establish its performance or stability.
 
+## Boot return failure in console build 1.0.53
+
+The failing return belongs to FPS++'s `patch_ControllerScrollSpeed.asm`, in
+`updateDerivativeParams_`. The actual entry path is an original text call at
+`0x030bccf4` to `0x030bd694`, followed by the pack's absolute tail branch to
+`0x0180008c`. The LR value `0x01800140` comes from a constant CTR call at
+`0x0180013c` to the existing text function `0x030bd28c`, not from an undiscovered
+direct call to another cave routine.
+
+The root cause was ambiguous LLVM assembly syntax for negative conditional
+displacements with an implicit condition register. Three backward `blt` branches
+in ControllerScrollSpeed and one in GameSpeed were encoded as forward jumps.
+In particular, the branch at `0x018002b4` landed at `0x01800394`, bypassing the
+epilogue's saved-LR reload and `mtlr`. The return guard then correctly rejected
+the stale nested-call LR at `0x018003d0`. The other two incorrect controller
+branches escaped into Cutscene code. Parenthesized displacements fix all four;
+decoding and checking every emitted direct branch prevents recurrence.
+
+The complete four-pack audit covers 409 callsites: FPS++ 20, Graphics 385,
+Enhancements 0, Draw Distance 4. Of those, 401 ordinary calls resolve to
+generated functions, six are HLE imports, and two are the existing displaced-code
+CTR continuations. There are 21 distinct cave call targets; none is missing and
+no unresolved dynamic call remains. Enhancements contributes texture/shader
+rules but no cave code. This audit is saved with source locations in the private
+`generated/packs_report.json`; local disassembly and a readable copy live in
+`build/task2-cave-audit.txt`.
+
+Synthetic execution tests compile generated C++ with the actual `RETURN()` LR
+guard. They cover text `bla` to cave A, A `bl`/`bla` or constant `bctrl` to B,
+saved stack frames, a backward conditional loop, and returns through both
+levels. They also cover constant CTR calls from patched text, exclusion of
+`.float`/`.int` data, rejection of calls to cave data, and branch destination
+verification. No guard bypass or pack selection change is needed. Console
+startup through the first GX2 frame still requires verification on Series X.
+
+Validation for this fix: the Remaster Series X recompile exits successfully
+with no unsupported instructions, undefined callees or analysis problems;
+39 pytest tests and 33 subtests pass; the portable C++ pack and dispatch tests
+pass; and `nice ninja -C build/local-uwp-game -j4` links `BotWRecomp.exe`.
+
 ## Compiler and runtime behavior
 
 - Codecaves start at `0x01800000`, with a maximum of 1 MiB per pack and an

@@ -259,6 +259,7 @@ class Assembler:
 
 def compile_patch(statements, symbols, assembler):
     writes, jobs = [], []
+    branch_targets = {}
     previous_code = False
     previous_end, previous_file = None, None
     for statement in statements:
@@ -364,6 +365,7 @@ def compile_patch(statements, symbols, assembler):
                         raise PackError("non-integer instruction operand")
                     value = int(value)
                     if branch and i == len(operands) - 1:
+                        branch_targets[address] = value
                         absolute = op in ("ba", "bla") and 0 <= value < 0x02000000
                         if not absolute:
                             value -= address
@@ -374,7 +376,13 @@ def compile_patch(statements, symbols, assembler):
                             raise PackError(
                                 f"branch target out of range or unaligned: {op} at {address:#x} offset {value:#x}"
                             )
-                    result.append(str(value))
+                    # LLVM parses `blt -16` as the prediction-hint mnemonic
+                    # `blt- 16`. Parentheses keep the displacement signed.
+                    result.append(
+                        f"({value})"
+                        if branch and i == len(operands) - 1
+                        else str(value)
+                    )
             if op in ("ba", "bla") and not absolute:
                 op = "bl" if op == "bla" else "b"
             elif branch and not absolute:
@@ -382,7 +390,7 @@ def compile_patch(statements, symbols, assembler):
             if op in ("b", "bl", "ba", "bla") and len(result) == 1:
                 # LLVM rejects negative numeric operands for b/bl. Encode the
                 # already range-checked I-form directly, retaining AA and LK.
-                word = 0x48000000 | (int(result[0]) & 0x03FFFFFC)
+                word = 0x48000000 | (int(result[0].strip("()")) & 0x03FFFFFC)
                 word |= 2 * absolute | int(op in ("bl", "bla"))
                 writes.append(Write(address, struct.pack(">I", word), source, True))
                 continue
@@ -392,6 +400,13 @@ def compile_patch(statements, symbols, assembler):
             raise PackError(f"{source}: {exc}") from exc
     for (statement, _), data in zip(jobs, assembler.encode_many([i for _, i in jobs])):
         writes.append(Write(statement.address, data, statement.source, True))
+    from cafe import ppc
+
+    for write in writes:
+        if write.address in branch_targets:
+            decoded = ppc.decode(int.from_bytes(write.data, "big"), write.address)
+            if decoded.target != branch_targets[write.address]:
+                raise PackError(f"{write.source}: assembled branch target mismatch")
     return sorted(writes, key=lambda w: w.address)
 
 

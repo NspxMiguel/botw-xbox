@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from cafe import ppc
+from tools.packs.audit import audit_cave_calls, constant_ctr_target
 from tools.packs.build import (
     apply_to_image,
     emit_snapshot,
@@ -43,6 +44,17 @@ def configure_hook(driver, config, assembler, rpx_bytes):
             state.update(plan=plan, overwritten=overwritten)
 
     class PackAnalyzer(original_analyzer):
+        def discover_entries(self):
+            super().discover_entries()
+            # Pack addresses are assembled constants, so unlike original text
+            # they need not have an ADDR16_LO relocation to seed discovery.
+            for address in self.img.pack_code:
+                instruction = self.insn(address)
+                if instruction.op == "bcctr" and instruction.LK:
+                    target = constant_ctr_target(self.img, address)
+                    if target is not None and self.img.is_text(target):
+                        self.entries.add(target)
+
         def insn(self, address):
             # Caves interleave constants and instructions. Data is never gap-compiled.
             if not self.img.is_text(address):
@@ -68,6 +80,9 @@ def configure_hook(driver, config, assembler, rpx_bytes):
 
         def run(self):
             super().run()
+            state["cave_calls"] = audit_cave_calls(
+                self.img, state["plan"], self.functions
+            )
             state["redirect_callees"] = {
                 entry: {
                     self.img.lr_redirects[a]
@@ -199,6 +214,7 @@ def main():
         "external_timing": plan.external_timing,
         "writes": len(plan.writes),
         "packs": plan.packs,
+        "cave_calls": state["cave_calls"],
     }
     driver.write_if_changed(
         str(args.output / "packs_report.json"), json.dumps(report, indent=2) + "\n"
