@@ -102,6 +102,12 @@ struct RecordingProbe
 
 static void OwnershipTests()
 {
+	Context host;
+	std::thread latte([&] { host.BindFrontThread(); host.CheckFront(); host.CheckBack(); host.BeginOperation(); });
+	latte.join();
+	host.BindFrontThread();
+	host.CheckFront();
+	host.CheckBack();
 	Context context;
 	std::atomic<bool> entered{false}, checked{false};
 	std::thread back([&] {
@@ -383,7 +389,7 @@ static std::vector<uint64_t> DrawRoundTrip(bool queued, size_t capacity)
 {
 	setenv("CEMU_LATTE_PIPELINE", queued ? "1" : "0", 1);
 	Context context;
-	Stream stream(capacity, 256);
+	Stream stream(capacity, 256, 1);
 	MockDrawRecorder recorder;
 	for (uint32_t i = 0; i < 100; ++i)
 	{
@@ -433,8 +439,250 @@ static std::vector<uint64_t> DrawRoundTrip(bool queued, size_t capacity)
 	return recorder.commands;
 }
 
+struct ThreadedRecorder
+{
+	Context &context;
+	Stream &stream;
+	ThreadedRecorder(Context &c, Stream &s) : context(c), stream(s)
+	{
+	}
+	Registry registry{16};
+	StateBlocks<uint64_t, 4> blocks;
+	uint64_t next = 0;
+	std::atomic<bool> hold{false}, entered{false};
+	struct Work
+	{
+		ResourceId id;
+		BlockId block;
+		Span bytes;
+		uint64_t value;
+		bool fail = false;
+	};
+	void Record(const Work &work, const Arena &arena)
+	{
+		context.CheckBack();
+		entered.store(true);
+		while (hold.load())
+			std::this_thread::yield();
+		if (work.fail)
+			throw std::runtime_error("Injected device loss");
+		assert(work.value == next++);
+		assert(*registry.Get<uint64_t>(work.id) == work.value);
+		assert(blocks.Get(work.block) == work.value);
+		assert(arena.Read(work.bytes)[0] == std::byte(work.value & 255));
+		registry.Use(work.id, stream.ActiveHeader().sequence, next);
+		registry.Release(work.id);
+		registry.Retire(stream.ActiveHeader().sequence, next, &stream.RetiredResources());
+		stream.Submitted(stream.Progress().recorded);
+		stream.Completed(stream.Progress().submitted);
+		stream.Result().words[0] = work.value;
+	}
+};
+
+static void WorkerTests()
+{
+	setenv("CEMU_LATTE_PIPELINE", "2", 1);
+	for (size_t capacity : {1, 2, 3, 8})
+	{
+		Context context;
+		Stream stream(capacity, 256, 1);
+		ThreadedRecorder recorder{context, stream};
+		uint64_t replies = 0;
+		stream.SetCompletionHandler([&](const Completion &result) {
+			context.CheckFront();
+			recorder.registry.Recycle(result.retiredResources);
+			assert(result.words[0] == replies++);
+			assert(result.tickets.recorded == replies);
+			assert(result.tickets.completed <= result.tickets.submitted);
+			assert(result.tickets.submitted < result.tickets.recorded);
+		});
+		stream.Start(context, recorder, [] {}, [] {});
+		std::array<uint64_t, 4> values{}, leases{};
+		for (uint64_t value = 0; value < 20000; ++value)
+		{
+			stream.Poll();
+			auto block = recorder.blocks.Intern(value, context.Sequence() + 1, stream.Progress().recorded);
+			while (!block)
+			{
+				stream.Wait(stream.Progress().recorded + 1);
+				block = recorder.blocks.Intern(value, context.Sequence() + 1, stream.Progress().recorded);
+			}
+			// Four immutable CPU slots, reused only after reverse acknowledgment.
+			if (leases[value % 4] > stream.Progress().recorded)
+				stream.Wait(leases[value % 4]);
+			values[value % 4] = value;
+			Span span;
+			const std::array<std::byte, 32> bytes{std::byte(value & 255)};
+			if (!stream.Staging().Copy(bytes, span))
+			{
+				stream.Finish();
+				stream.Staging().ResetEmpty();
+				assert(stream.Staging().Copy(bytes, span));
+			}
+			auto id = recorder.registry.Insert(&values[value % 4]);
+			ThreadedRecorder::Work work{id, block, span, value};
+			leases[value % 4] = stream.Execute<ThreadedRecorder::Work, &ThreadedRecorder::Record>(context, Opcode::Draw, work, recorder, value % 113 == 0);
+			if (value % 113 == 0)
+			{
+				stream.Finish();
+				const auto reply = stream.TakeReply(leases[value % 4]);
+				assert(reply.words[0] == value);
+				stream.Exclusive(context, [&] { context.CheckBack(); assert(recorder.next == value + 1); });
+			}
+		}
+		// Stop is out-of-band; it must drain even if no control slot is free.
+		stream.Stop(context, recorder);
+		assert(replies == 20000 && recorder.next == replies);
+		assert(stream.Metrics().highWater <= capacity);
+		context.CheckBack();
+	}
+	for (bool cancel : {false, true})
+	{
+		struct HeldRecorder
+		{
+			std::atomic<bool> entered{false}, release{false};
+			uint64_t count = 0;
+			void Record(const uint64_t &, const Arena &)
+			{
+				entered.store(true);
+				while (!release.load())
+					std::this_thread::yield();
+				++count;
+			}
+		} held;
+		Context context;
+		Stream stream(1, 64, 1);
+		stream.Start(context, held, [] {}, [] {});
+		stream.Execute<uint64_t, &HeldRecorder::Record>(context, Opcode::Draw, 0, held);
+		while (!held.entered.load())
+			std::this_thread::yield();
+		// The consumer still holds the only slot until Record returns.
+		assert(stream.Occupancy() == 1);
+		std::thread release([&] {
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+			held.release.store(true);
+		});
+		if (cancel)
+			stream.Cancel();
+		bool failed = false;
+		try
+		{
+			stream.Stop(context, held);
+		}
+		catch (const std::runtime_error &)
+		{
+			failed = true;
+		}
+		release.join();
+		assert(failed == cancel && held.count == 1);
+	}
+	// Cross-thread UI handoffs also drain a submitted prefix and restore owner.
+	{
+		struct Counter
+		{
+			uint64_t value = 0;
+			void Record(const uint32_t &, const Arena &)
+			{
+				++value;
+			}
+		} counter;
+		Context context;
+		Stream stream(2, 64);
+		std::atomic<uint32_t> idleCalls{0};
+		stream.Start(context, counter, [&] { ++idleCalls; }, [] {});
+		stream.Execute<uint32_t, &Counter::Record>(context, Opcode::Draw, 1, counter);
+		std::thread ui([&] { stream.Exclusive(context, [&] { context.CheckBack(); assert(counter.value == 1); }); });
+		ui.join();
+		stream.Execute<uint32_t, &Counter::Record>(context, Opcode::Draw, 1, counter);
+		stream.Finish();
+		stream.Exclusive(context, [&] {
+			context.RunFrontCallback([&] {
+				context.CheckFront();
+				context.CheckBack();
+				Throws([&] { stream.Execute<uint32_t, &Counter::Record>(context, Opcode::Draw, 1, counter); });
+			});
+		});
+		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		stream.Stop(context, counter);
+		assert(counter.value == 2 && idleCalls.load() < 1000);
+	}
+	{
+		struct Recorder
+		{
+			void Record(const uint32_t &, const Arena &)
+			{
+			}
+		} recorder;
+		Context context;
+		Stream stream(1, 64);
+		stream.Start(context, recorder, [] {}, [] {});
+		bool failed = false;
+		try
+		{
+			stream.Exclusive(context, [] { throw std::runtime_error("Injected surface/device failure"); });
+		}
+		catch (const std::runtime_error &)
+		{
+			failed = true;
+		}
+		assert(failed);
+		try
+		{
+			stream.Stop(context, recorder);
+		}
+		catch (const std::runtime_error &)
+		{
+		}
+	}
+	{
+		Arena arena(64);
+		std::array<std::byte, 32> bytes{};
+		Span first, second;
+		assert(arena.Copy(bytes, first));
+		arena.Retire(arena.End());
+		assert(!arena.Prepare(48));
+		arena.ResetEmpty();
+		assert(arena.Prepare(48));
+		assert(arena.Copy(std::span(bytes).first(16), first));
+		assert(arena.Copy(bytes, second));
+		assert(second.position == first.position + 16);
+		assert(arena.Read(first).size() == 16 && arena.Read(second).size() == 32);
+		assert(!arena.Prepare(64));
+	}
+	// A back exception wakes capacity/reply waiters and fails every later ticket.
+	{
+		Context context;
+		Stream stream(1, 64);
+		ThreadedRecorder recorder{context, stream};
+		stream.Start(context, recorder, [] {}, [] {});
+		ThreadedRecorder::Work work{};
+		work.fail = true;
+		const auto ticket = stream.Execute<ThreadedRecorder::Work, &ThreadedRecorder::Record>(context, Opcode::Draw, work, recorder);
+		bool failed = false;
+		try
+		{
+			stream.Wait(ticket);
+		}
+		catch (const std::runtime_error &)
+		{
+			failed = true;
+		}
+		assert(failed);
+		try
+		{
+			stream.Stop(context, recorder);
+		}
+		catch (const std::runtime_error &)
+		{
+		}
+	}
+	unsetenv("CEMU_LATTE_PIPELINE");
+	std::cout << "Latte worker: tiny rings, ordered replies, concurrent generations, handoff, full-ring shutdown, reverse saturation, cancellation, idle sleep and device failure passed\n";
+}
+
 int main()
 {
+	WorkerTests();
 	OwnershipTests();
 	RingTests();
 	RegistryPublicationTest();

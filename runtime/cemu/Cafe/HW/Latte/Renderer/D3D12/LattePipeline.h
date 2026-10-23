@@ -6,6 +6,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <thread>
+#include <chrono>
+#include <condition_variable>
+#include <exception>
+#include <functional>
 
 // Platform-neutral handoff contracts, also exercised by the host tests.
 namespace LattePipeline
@@ -24,7 +28,11 @@ class Context
 	}
 	bool Queued() const
 	{
-		return m_queued;
+		return m_mode != 0;
+	}
+	bool Threaded() const
+	{
+		return m_mode == 2;
 	}
 	void CheckFront() const
 	{
@@ -33,18 +41,43 @@ class Context
 		if (!m_checks)
 			return;
 #endif
-		if (m_backActive.load(std::memory_order_acquire) && m_back == std::this_thread::get_id())
+		if (s_recording == this && s_frontCallback != this)
 		{
 			std::fputs("Latte pipeline: front access from recorder\n", stderr);
 			std::abort();
 		}
 	}
+	template <class F>
+	void RunFrontCallback(F function)
+	{
+		Check(m_front, "front callback");
+		CheckBack();
+		const auto previous = s_frontCallback;
+		s_frontCallback = this;
+		try
+		{
+			function();
+		}
+		catch (...)
+		{
+			s_frontCallback = previous;
+			throw;
+		}
+		s_frontCallback = previous;
+	}
 	void CheckBack() const
 	{
 		Check(m_back, "back");
 	}
-	// Ownership handoff is only legal at a drained lifecycle boundary. Phase 3
-	// leaves both owners on the command thread; no worker is started here.
+	// Construction belongs to the CoreWindow caller; Initialize transfers both
+	// actors to Latte before starting its worker. No packets may be live here.
+	void BindFrontThread()
+	{
+		if (m_backActive.load(std::memory_order_acquire))
+			std::abort();
+		m_front = m_back = std::this_thread::get_id();
+	}
+	// Ownership handoff is only legal at a drained lifecycle boundary.
 	void BindBackThread()
 	{
 		if (m_backActive.load(std::memory_order_acquire))
@@ -55,12 +88,18 @@ class Context
 	{
 		CheckBack();
 		if (ChecksEnabled())
+		{
+			s_recording = this;
 			m_backActive.store(true, std::memory_order_release);
+		}
 	}
 	void LeaveRecording()
 	{
 		if (ChecksEnabled())
+		{
+			s_recording = nullptr;
 			m_backActive.store(false, std::memory_order_release);
+		}
 	}
 	uint64_t BeginOperation()
 	{
@@ -102,10 +141,13 @@ class Context
 			std::abort();
 		}
 	}
-	const std::thread::id m_front;
+	std::thread::id m_front;
 	std::thread::id m_back;
 	const bool m_checks = EnvironmentFlag("CEMU_LATTE_PIPELINE_CHECKS");
-	const bool m_queued = EnvironmentFlag("CEMU_LATTE_PIPELINE");
+	const unsigned m_mode = [] { const char *v = std::getenv("CEMU_LATTE_PIPELINE");
+		return v && std::strcmp(v, "2") == 0 ? 2u : EnvironmentFlag("CEMU_LATTE_PIPELINE") ? 1u : 0u; }();
+	inline static thread_local const Context *s_recording = nullptr;
+	inline static thread_local const Context *s_frontCallback = nullptr;
 	std::atomic<bool> m_backActive{false};
 	uint64_t m_sequence = 0;
 	uint64_t m_frame = 1;
@@ -222,7 +264,7 @@ class Registry
 		Get<void>(id);
 		m_entries[id.slot].retiring = true;
 	}
-	void Retire(uint64_t consumed, uint64_t completed)
+	void Retire(uint64_t consumed, uint64_t completed, std::vector<ResourceId> *ready = nullptr)
 	{
 		std::lock_guard lock(m_allocationMutex);
 		const auto count = m_count.load(std::memory_order_acquire);
@@ -237,8 +279,29 @@ class Registry
 			if (e.generation != std::numeric_limits<uint32_t>::max())
 			{
 				++e.generation;
-				m_free.push_back(i);
+				if (ready)
+					ready->push_back({i, e.generation});
+				else
+					m_free.push_back(i);
 			}
+		}
+	}
+
+	// Threaded retirement transfers free generations through reverse messages.
+	// Front returns them to the shared allocation pool after consuming that reply.
+	void Recycle(std::span<const ResourceId> ready)
+	{
+		if (ready.empty())
+			return;
+		std::lock_guard lock(m_allocationMutex);
+		for (auto id : ready)
+		{
+			if (!id || id.slot >= m_capacity)
+				throw std::logic_error("Invalid Latte recycled resource ID");
+			const auto &entry = m_entries[id.slot];
+			if (entry.object || entry.retiring || entry.generation != id.generation)
+				throw std::logic_error("Live Latte resource recycled");
+			m_free.push_back(id.slot);
 		}
 	}
 
@@ -293,8 +356,9 @@ class StateBlocks
 			last.sequence = sequence;
 			return {last.generation * Capacity + m_last};
 		}
-		for (size_t i = 0; i < Capacity; ++i)
+		for (size_t offset = 0; offset < Capacity; ++offset)
 		{
+			const auto i = (m_last + offset) % Capacity;
 			auto &entry = m_entries[i];
 			if (entry.sequence <= consumed && entry.generation != UINT64_MAX / Capacity)
 			{
@@ -369,9 +433,22 @@ class Ring
 		const auto *slot = Peek();
 		if (!slot)
 			return false;
-		value = *slot;
+		value = std::move(*const_cast<T *>(slot));
 		ReleaseRead();
 		return true;
+	}
+	uint64_t Published() const
+	{
+		return m_producer.load(std::memory_order_acquire);
+	}
+	uint64_t Consumed() const
+	{
+		return m_consumer.load(std::memory_order_acquire);
+	}
+	uint64_t Size() const
+	{
+		const auto read = Consumed();
+		return Published() - read;
 	}
 	bool Empty() const
 	{
@@ -422,6 +499,22 @@ class Arena
 			std::memcpy(m_bytes.get() + destination, bytes.data(), bytes.size());
 		out = {start, static_cast<uint32_t>(bytes.size()), 0};
 		m_written = start + bytes.size();
+		return true;
+	}
+	// Reserve a contiguous operation group before writing any of its spans.
+	// Skipping a tail is part of the next published arenaEnd, never a reset of
+	// live worker bytes. Draw uniforms cannot straddle a capacity-sized gap.
+	bool Prepare(size_t bytes)
+	{
+		if (bytes > m_capacity)
+			return false;
+		const auto read = m_consumed.load(std::memory_order_acquire);
+		const auto offset = Offset(m_written);
+		const auto aligned = (offset + 15) & ~uint64_t{15};
+		const auto start = m_written + (aligned + bytes > m_capacity ? m_capacity - offset : aligned - offset);
+		if (start + bytes - read > m_capacity)
+			return false;
+		m_written = start;
 		return true;
 	}
 	std::span<const std::byte> Read(Span span) const
@@ -549,24 +642,86 @@ inline size_t CapacityFromEnvironment(const char *name, size_t fallback, size_t 
 	return end != value && !*end && parsed >= minimum && parsed <= maximum ? static_cast<size_t>(parsed) : fallback;
 }
 
-// Phase 3: a synchronous consumer. There is deliberately no worker, condition
-// variable or implicit CPU/GPU wait. Phase 4 replaces Drain's caller and adds
-// completion transport without changing packet contents or SPSC ordering.
+// Notifications are not ordering edges. Arm under the wait mutex, recheck the
+// atomic epoch/cursors, then sleep. The hot path takes no mutex unless a sleeper
+// has armed the event. Timed waits also service output deadlines without work.
+class Event
+{
+  public:
+	uint64_t Epoch() const
+	{
+		return m_epoch.load(std::memory_order_seq_cst);
+	}
+	void Signal()
+	{
+		m_epoch.fetch_add(1, std::memory_order_seq_cst);
+		if (m_waiting.load(std::memory_order_seq_cst))
+		{
+			std::lock_guard lock(m_mutex);
+			m_cv.notify_all();
+		}
+	}
+	void Wait(uint64_t epoch)
+	{
+		std::unique_lock lock(m_mutex);
+		m_waiting.fetch_add(1, std::memory_order_seq_cst);
+		m_cv.wait_for(lock, std::chrono::milliseconds(1), [&] { return Epoch() != epoch; });
+		m_waiting.fetch_sub(1, std::memory_order_seq_cst);
+	}
+
+  private:
+	std::atomic<uint64_t> m_epoch{0};
+	std::atomic<uint32_t> m_waiting{0};
+	std::mutex m_mutex;
+	std::condition_variable m_cv;
+};
+
+struct Completion
+{
+	uint64_t sequence = 0;
+	uint64_t backBusyNs = 0, backIdleNs = 0, completedFence = 0;
+	Tickets tickets;
+	uint32_t kind = 0;
+	bool replyRequested = false;
+	ResourceId resource;
+	std::array<uint64_t, 8> words{};
+	// Only exceptional CPU-visible readbacks/profile snapshots allocate bytes.
+	std::vector<std::byte> bytes;
+	std::vector<ResourceId> retiredResources;
+};
+struct PipelineTiming
+{
+	uint64_t backBusyNs = 0, backIdleNs = 0;
+	uint64_t backpressureNs = 0, replyWaitNs = 0, highWater = 0;
+};
+
 class Stream
 {
   public:
-	Stream(size_t capacity = 1024, size_t arenaBytes = 16 * 1024 * 1024) : m_ring(capacity), m_arena(arenaBytes)
+	Stream(size_t capacity = 1024, size_t arenaBytes = 16 * 1024 * 1024, size_t completionCapacity = 0)
+		: m_ring(capacity), m_completions(completionCapacity ? completionCapacity : capacity + 32), m_arena(arenaBytes)
 	{
+	}
+	~Stream()
+	{
+		// Also safe during exception unwinding: failure/stop use out-of-band
+		// channels and cannot be stuck behind a full operation/completion ring.
+		RequestExit();
+		if (m_worker.joinable())
+			m_worker.join();
 	}
 	bool Recording() const
 	{
-		return m_consuming.load(std::memory_order_acquire) && m_consumerOwner == std::this_thread::get_id();
+		return s_recording == this;
+	}
+	bool Running() const
+	{
+		return m_running.load(std::memory_order_acquire);
 	}
 	void BindConsumerThread()
 	{
-		if (m_consuming.load(std::memory_order_acquire))
+		if (m_consuming.load())
 			std::abort();
-		m_consumerOwner = std::this_thread::get_id();
 	}
 	const Header &ActiveHeader() const
 	{
@@ -578,24 +733,127 @@ class Stream
 	}
 	void Submitted(uint64_t sequence)
 	{
-		m_tickets.Submit(sequence);
+		m_backTickets.Submit(sequence);
+	}
+	void SetCompletedFence(uint64_t fence)
+	{
+		m_backCompletedFence = fence;
+	}
+	uint64_t CompletedFence() const
+	{
+		return m_frontCompletedFence;
 	}
 	void Completed(uint64_t sequence)
 	{
-		m_tickets.Complete(sequence);
+		m_backTickets.Complete(sequence);
 	}
 	const Tickets &Progress() const
 	{
-		return m_tickets;
+		return Recording() ? m_backTickets : m_frontTickets;
+	}
+	std::vector<ResourceId> &RetiredResources()
+	{
+		assert(Recording());
+		return m_retiredResources;
+	}
+	Completion &Result()
+	{
+		assert(Recording());
+		return m_result;
+	}
+	Completion TakeReply(uint64_t sequence)
+	{
+		if (m_reply.sequence != sequence)
+			throw std::logic_error("Mismatched Latte reply sequence");
+		return std::move(m_reply);
+	}
+	const PipelineTiming &Metrics() const
+	{
+		return m_frontPipelineTiming;
+	}
+	void Wake()
+	{
+		m_work.Signal();
+	}
+	uint64_t Occupancy() const
+	{
+		return m_ring.Size();
+	}
+	void Cancel()
+	{
+		Fail(std::make_exception_ptr(std::runtime_error("Latte recording cancelled")));
+		RequestExit();
+	}
+	void SetCompletionHandler(std::function<void(const Completion &)> handler)
+	{
+		m_handler = std::move(handler);
+	}
+
+	template <class Owner, class Idle, class Begin>
+	void Start(Context &context, Owner &owner, Idle idle, Begin begin, std::function<void()> end = {})
+	{
+		context.CheckFront();
+		if (!context.Threaded() || Running())
+			return;
+		m_exit.store(false);
+		m_threaded = true;
+		m_running.store(true, std::memory_order_release);
+		m_worker = std::thread([&, idle, begin, end] {
+			try
+			{
+				context.BindBackThread();
+				BindConsumerThread();
+				begin();
+				while (!m_exit.load(std::memory_order_acquire))
+				{
+					if (PauseWorker(context))
+						continue;
+					const auto epoch = m_work.Epoch();
+					if (ConsumeOne(context, owner))
+						continue;
+					{
+						NativeScope scope(*this, context);
+						const auto start = Clock::now();
+						idle();
+						m_backPipelineTiming.backBusyNs += Ns(start);
+						PublishProgress();
+					}
+					if (m_ring.Empty() && !m_exit.load())
+					{
+						const auto start = Clock::now();
+						m_work.Wait(epoch);
+						m_backPipelineTiming.backIdleNs += Ns(start);
+					}
+				}
+			}
+			catch (...)
+			{
+				Fail(std::current_exception());
+			}
+			if (end)
+				end();
+			{
+				std::lock_guard lock(m_pauseMutex);
+				m_running.store(false, std::memory_order_release);
+				m_pauseCV.notify_all();
+			}
+			m_space.Signal();
+		});
 	}
 	template <class T, auto Record, class Owner>
-	void Execute(Context &context, Opcode opcode, const T &value, Owner &owner)
+	uint64_t Execute(Context &context, Opcode opcode, const T &value, Owner &owner, bool reply = false)
 	{
 		static_assert(std::is_trivially_copyable_v<T> && sizeof(T) <= 208);
 		context.CheckFront();
+		if (Recording())
+			throw std::logic_error("Publish from Latte native callback");
+		if (m_threaded)
+			Poll();
+		else
+			CheckFailure();
 		if (m_stopped)
 			throw std::logic_error("Publish after Latte shutdown");
-		const Header header{opcode, static_cast<uint16_t>(sizeof(T)), 0, context.BeginOperation(), context.Frame()};
+		const Header header{opcode, static_cast<uint16_t>(sizeof(T)), reply ? 1u : 0u, context.BeginOperation(), context.Frame()};
 		auto prepare = [&](Packet &packet) {
 			packet.header = header;
 			packet.arenaEnd = m_arena.End();
@@ -605,81 +863,361 @@ class Stream
 		if (context.Queued())
 		{
 			auto *slot = m_ring.TryWrite();
-			while (!slot)
+			if (!slot)
 			{
-				Drain(context, owner);
-				slot = m_ring.TryWrite();
+				const auto start = Clock::now();
+				do
+				{
+					if (m_threaded)
+					{
+						const auto epoch = m_space.Epoch();
+						Poll();
+						CheckFailure();
+						slot = m_ring.TryWrite();
+						if (!slot)
+							m_space.Wait(epoch);
+					}
+					else
+					{
+						Drain(context, owner);
+						slot = m_ring.TryWrite();
+					}
+				} while (!slot);
+				m_frontPipelineTiming.backpressureNs += Ns(start);
 			}
 			prepare(*slot);
+			const auto occupancy = m_ring.Size() + 1;
 			m_ring.PublishWrite();
-			Drain(context, owner);
+			m_lastPublished = header.sequence;
+			m_frontPipelineTiming.highWater = std::max(m_frontPipelineTiming.highWater, occupancy);
+			if (m_threaded)
+				m_work.Signal();
+			else
+				Drain(context, owner);
 		}
 		else
 		{
 			Packet packet;
 			prepare(packet);
 			Consume(context, packet, owner);
+			if (m_handler || reply)
+				Accept(std::move(m_result));
+			else
+				m_frontTickets = m_backTickets;
 		}
+		return header.sequence;
 	}
-
+	void Poll()
+	{
+		Completion completion;
+		while (m_completions.Pop(completion))
+		{
+			Accept(std::move(completion));
+			m_space.Signal();
+		}
+		CheckFailure();
+	}
+	void Wait(uint64_t sequence)
+	{
+		WaitFor(sequence, false);
+	}
+	void WaitCapacity(uint64_t sequence = 0)
+	{
+		WaitFor(sequence ? sequence : m_lastPublished, true);
+	}
+	void WaitFor(uint64_t sequence, bool capacity)
+	{
+		auto last = Clock::now();
+		while (m_frontTickets.recorded < sequence)
+		{
+			const auto epoch = m_space.Epoch();
+			const auto now = Clock::now();
+			(capacity ? m_frontPipelineTiming.backpressureNs : m_frontPipelineTiming.replyWaitNs) += std::chrono::duration_cast<std::chrono::nanoseconds>(now - last).count();
+			last = now;
+			Poll();
+			if (m_frontTickets.recorded < sequence)
+				m_space.Wait(epoch);
+		}
+		(capacity ? m_frontPipelineTiming.backpressureNs : m_frontPipelineTiming.replyWaitNs) += Ns(last);
+	}
+	void Finish()
+	{
+		if (m_lastPublished)
+			Wait(m_lastPublished);
+	}
 	template <class Owner>
 	void Drain(Context &context, Owner &owner)
 	{
 		context.CheckBack();
-		while (const auto *packet = m_ring.Peek())
+		while (ConsumeOne(context, owner))
 		{
-			try
-			{
-				Consume(context, *packet, owner);
-			}
-			catch (...)
-			{
-				m_ring.ReleaseRead();
-				throw;
-			}
-			m_ring.ReleaseRead();
 		}
+		if (m_threaded)
+			Poll();
 	}
 	template <class Owner>
 	void Stop(Context &context, Owner &owner)
 	{
-		Drain(context, owner);
+		context.CheckFront();
+		if (m_worker.joinable())
+		{
+			try
+			{
+				Finish();
+			}
+			catch (...)
+			{
+				RequestExit();
+				m_worker.join();
+				context.BindBackThread();
+				throw;
+			}
+			RequestExit();
+			m_worker.join();
+			context.BindBackThread();
+			BindConsumerThread();
+			Poll();
+		}
+		else
+			Drain(context, owner);
 		m_stopped = true;
 	}
 
-  private:
-	template <class Owner>
-	void Consume(Context &context, const Packet &packet, Owner &owner)
+	// Rare synchronous native handoff. The worker consumes the published prefix,
+	// then parks. Producers may fill the bounded ring but cannot record. This is
+	// also the CoreWindow/UI-thread creation contract; it never adds a producer.
+	template <class F>
+	auto Exclusive(Context &context, F function) -> decltype(function())
 	{
-		context.CheckBack();
-		// Reentrant guest callbacks must not publish while an immutable packet is
-		// being recorded. Completion application belongs on front after recording.
-		if (m_consuming.load(std::memory_order_relaxed))
-			throw std::logic_error("Reentrant Latte recorder");
-		m_consuming.store(true, std::memory_order_release);
-		m_activeHeader = packet.header;
-		context.EnterRecording();
+		std::unique_lock serial(m_handoffMutex);
+		if (!Running())
+		{
+			CheckFailure();
+			NativeScope scope(*this, context);
+			return function();
+		}
+		{
+			std::unique_lock lock(m_pauseMutex);
+			m_pauseRequested = true;
+			m_pauseTarget = m_ring.Published();
+			m_work.Signal();
+			m_pauseCV.wait(lock, [&] { return m_paused || !Running(); });
+		}
+		CheckFailure();
+		context.BindBackThread();
+		auto resume = [&] {
+			std::unique_lock lock(m_pauseMutex);
+			m_pauseRequested = false;
+			m_pauseCV.notify_all();
+			m_pauseCV.wait(lock, [&] { return !m_paused || !Running(); });
+		};
 		try
 		{
-			packet.record(&owner, packet, m_arena);
+			if constexpr (std::is_void_v<decltype(function())>)
+			{
+				{
+					NativeScope scope(*this, context);
+					function();
+				}
+				resume();
+			}
+			else
+			{
+				auto value = [&] { NativeScope scope(*this, context); return function(); }();
+				resume();
+				return value;
+			}
 		}
 		catch (...)
 		{
-			context.LeaveRecording();
-			m_consuming.store(false, std::memory_order_release);
+			const auto error = std::current_exception();
+			resume();
+			Fail(error);
+			RequestExit();
 			throw;
 		}
-		context.LeaveRecording();
-		m_consuming.store(false, std::memory_order_release);
-		m_tickets.Record(packet.header.sequence);
+	}
+
+  private:
+	using Clock = std::chrono::steady_clock;
+	static uint64_t Ns(Clock::time_point start)
+	{
+		return std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - start).count();
+	}
+	class NativeScope
+	{
+	  public:
+		NativeScope(Stream &stream, Context &context) : s(stream), c(context)
+		{
+			c.CheckBack();
+			if (s.m_consuming.load(std::memory_order_relaxed))
+				throw std::logic_error("Reentrant Latte recorder");
+			s.m_consuming.store(true, std::memory_order_release);
+			s_recording = &s;
+			c.EnterRecording();
+		}
+		~NativeScope()
+		{
+			c.LeaveRecording();
+			s_recording = nullptr;
+			s.m_consuming.store(false, std::memory_order_release);
+		}
+
+	  private:
+		Stream &s;
+		Context &c;
+	};
+	bool PauseWorker(Context &context)
+	{
+		if (!m_pauseRequested.load(std::memory_order_acquire))
+			return false;
+		std::unique_lock lock(m_pauseMutex);
+		if (!m_pauseRequested || m_ring.Consumed() < m_pauseTarget)
+			return false;
+		m_paused = true;
+		m_pauseCV.notify_all();
+		m_pauseCV.wait(lock, [&] { return !m_pauseRequested; });
+		context.BindBackThread();
+		m_paused = false;
+		m_pauseCV.notify_all();
+		return true;
+	}
+	void RequestExit()
+	{
+		m_exit.store(true, std::memory_order_release);
+		m_work.Signal();
+		m_space.Signal();
+		std::lock_guard lock(m_pauseMutex);
+		m_pauseCV.notify_all();
+	}
+	void Fail(std::exception_ptr error)
+	{
+		{
+			std::lock_guard lock(m_failureMutex);
+			m_failure = error;
+		}
+		m_failed.store(true, std::memory_order_release);
+		m_space.Signal();
+		m_work.Signal();
+	}
+	void CheckFailure() const
+	{
+		if (m_failed.load(std::memory_order_acquire))
+		{
+			std::lock_guard lock(m_failureMutex);
+			std::rethrow_exception(m_failure);
+		}
+	}
+	void Accept(Completion &&completion)
+	{
+		m_frontTickets = completion.tickets;
+		m_frontCompletedFence = completion.completedFence;
+		m_frontPipelineTiming.backBusyNs = completion.backBusyNs;
+		m_frontPipelineTiming.backIdleNs = completion.backIdleNs;
+		if (m_handler && (completion.kind != UINT32_MAX || !completion.retiredResources.empty()))
+			m_handler(completion);
+		if (completion.replyRequested)
+			m_reply = std::move(completion);
+	}
+	void PublishProgress()
+	{
+		if (m_backTickets.submitted == m_notifiedTickets.submitted && m_backTickets.completed == m_notifiedTickets.completed && m_backCompletedFence == m_notifiedFence && m_retiredResources.empty())
+			return;
+		// Idle fence progress is coalescible. Never block a UI handoff on this
+		// informational message when the front is paused/not polling.
+		if (auto *slot = m_completions.TryWrite())
+		{
+			*slot = {};
+			slot->kind = UINT32_MAX;
+			slot->tickets = m_backTickets;
+			slot->retiredResources = std::move(m_retiredResources);
+			slot->completedFence = m_backCompletedFence;
+			m_notifiedFence = m_backCompletedFence;
+			slot->backBusyNs = m_backPipelineTiming.backBusyNs;
+			slot->backIdleNs = m_backPipelineTiming.backIdleNs;
+			m_notifiedTickets = m_backTickets;
+			m_completions.PublishWrite();
+			m_space.Signal();
+		}
+	}
+	template <class Owner>
+	bool ConsumeOne(Context &context, Owner &owner)
+	{
+		const auto *packet = m_ring.Peek();
+		if (!packet)
+			return false;
+		Consume(context, *packet, owner);
+		const bool deliver = m_handler || (packet->header.reserved & 1);
+		m_ring.ReleaseRead();
+		if (m_threaded)
+		{
+			while (!m_completions.TryWrite())
+			{
+				if (m_exit.load())
+					return true;
+				const auto epoch = m_space.Epoch();
+				if (!m_completions.TryWrite())
+					m_space.Wait(epoch);
+			}
+			*m_completions.TryWrite() = std::move(m_result);
+			m_completions.PublishWrite();
+			m_space.Signal();
+		}
+		else if (deliver)
+			Accept(std::move(m_result));
+		else
+			m_frontTickets = m_backTickets;
+		return true;
+	}
+	template <class Owner>
+	void Consume(Context &context, const Packet &packet, Owner &owner)
+	{
+		const auto start = m_threaded ? Clock::now() : Clock::time_point{};
+		NativeScope scope(*this, context);
+		m_activeHeader = packet.header;
+		const bool resultNeeded = m_threaded || m_handler || (packet.header.reserved & 1);
+		if (resultNeeded)
+			m_result = {};
+		packet.record(&owner, packet, m_arena);
+		m_backTickets.Record(packet.header.sequence);
 		m_arena.Retire(packet.arenaEnd);
+		if (resultNeeded)
+		{
+			m_result.retiredResources = std::move(m_retiredResources);
+			m_result.replyRequested = (packet.header.reserved & 1) != 0;
+			m_result.sequence = packet.header.sequence;
+			m_result.completedFence = m_backCompletedFence;
+			m_notifiedFence = m_backCompletedFence;
+			m_result.tickets = m_backTickets;
+			m_notifiedTickets = m_backTickets;
+			if (m_threaded)
+				m_backPipelineTiming.backBusyNs += Ns(start);
+			m_result.backBusyNs = m_backPipelineTiming.backBusyNs;
+			m_result.backIdleNs = m_backPipelineTiming.backIdleNs;
+		}
 	}
 	Ring<Packet> m_ring;
+	Ring<Completion> m_completions;
 	Arena m_arena;
-	Tickets m_tickets;
+	Tickets m_backTickets, m_frontTickets, m_notifiedTickets;
+	uint64_t m_backCompletedFence = 0, m_frontCompletedFence = 0, m_notifiedFence = 0;
+	Completion m_result, m_reply;
+	std::vector<ResourceId> m_retiredResources;
 	Header m_activeHeader{};
-	std::thread::id m_consumerOwner = std::this_thread::get_id();
-	std::atomic<bool> m_consuming{false};
-	bool m_stopped = false;
+	PipelineTiming m_frontPipelineTiming, m_backPipelineTiming;
+	std::function<void(const Completion &)> m_handler;
+	inline static thread_local Stream *s_recording = nullptr;
+	std::atomic<bool> m_consuming{false}, m_running{false}, m_exit{false}, m_failed{false};
+	Event m_work, m_space;
+	std::thread m_worker;
+	mutable std::mutex m_failureMutex;
+	std::exception_ptr m_failure;
+	std::mutex m_handoffMutex, m_pauseMutex;
+	std::condition_variable m_pauseCV;
+	std::atomic<bool> m_pauseRequested{false};
+	bool m_paused = false;
+	uint64_t m_pauseTarget = 0;
+	uint64_t m_lastPublished = 0;
+	bool m_stopped = false, m_threaded = false;
 };
 } // namespace LattePipeline
