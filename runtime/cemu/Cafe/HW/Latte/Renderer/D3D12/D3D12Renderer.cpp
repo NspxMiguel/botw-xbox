@@ -289,6 +289,7 @@ void D3D12Renderer::CreateDevice()
 	D3D12_FEATURE_DATA_D3D12_OPTIONS options{};
 	if (SUCCEEDED(m_device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, &options, sizeof(options))))
 		m_bindingTier = options.ResourceBindingTier;
+	cemuLog_log(LogType::Force, "D3D12: shader model {:x}, resource binding tier {}", (uint32)m_highestShaderModel, (uint32)m_bindingTier);
 	if (m_bindingTier < D3D12_RESOURCE_BINDING_TIER_3)
 		cemuLog_log(LogType::Force, "D3D12: Resource binding tier {} detected. Tier 3 is recommended, shaders that use more than 14 uniform blocks per stage may fail", (uint32)m_bindingTier);
 	D3D12Format::InitFormatSupport(m_device.Get(), m_formatSupport);
