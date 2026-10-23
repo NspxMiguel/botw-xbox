@@ -18,6 +18,8 @@
 
 #include <boost/container/small_vector.hpp>
 
+std::atomic<uint64> g_latteIdleNs{0};
+
 void LatteCP_DebugPrintCmdBuffer(uint32be* bufferPtr, uint32 size);
 
 #define CP_TIMER_RECHECK	1024
@@ -168,9 +170,18 @@ void LatteCP_signalEnterWait()
 uint32 LatteCP_readU32Deprc()
 {
 	// no display list active
+	uint32 cmdWord;
+	if ( TCL::TCLGPUReadRBWord(cmdWord) )
+		return cmdWord;
+	// Time the Latte thread waits for the game to submit commands (D3D12 present diagnostics report it).
+	const auto idleStart = std::chrono::steady_clock::now();
+	struct IdleTimer
+	{
+		std::chrono::steady_clock::time_point start;
+		~IdleTimer() { g_latteIdleNs += std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count(); }
+	} idleTimer{idleStart};
 	while (true)
 	{
-		uint32 cmdWord;
 		if ( TCL::TCLGPUReadRBWord(cmdWord) )
 			return cmdWord;
 
