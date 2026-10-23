@@ -62,6 +62,27 @@ inline constexpr uint32 kStageTableOffsetSRV = kMaxCBVsPerStage;
 inline constexpr uint32 kStageTableOffsetUAV = kMaxCBVsPerStage + kMaxSRVsPerStage;
 inline constexpr uint32 kMaxSamplersPerStage = LATTE_NUM_MAX_TEX_UNITS;
 
+// Four low CBV registers per graphics stage retain the shader-register ABI.
+// 6 tables + 16 runtime DWORDs + 16 push DWORDs + 3 * 4 * 2 root-CBV DWORDs = 62 <= 64.
+inline constexpr uint32 kRootCBVsPerStage = 4;
+inline constexpr uint32 RootCBVCount(Stage stage)
+{
+	return stage == Stage::Count ? 0 : kRootCBVsPerStage;
+}
+// Stage::Count is the full-table layout used by FFX/FSR's independent signatures.
+inline constexpr uint32 StageTableOffsetSRV(Stage stage)
+{
+	return kStageTableOffsetSRV - RootCBVCount(stage);
+}
+inline constexpr uint32 StageTableOffsetUAV(Stage stage)
+{
+	return kStageTableOffsetUAV - RootCBVCount(stage);
+}
+inline constexpr uint32 StageTableSize(Stage stage)
+{
+	return kStageTableSize - RootCBVCount(stage);
+}
+
 // root parameter indices
 inline constexpr uint32 RootParamStageTable(Stage stage)
 {
@@ -71,12 +92,21 @@ inline constexpr uint32 RootParamStageSamplers(Stage stage)
 {
 	return (uint32)stage * 2 + 1;
 }
-inline constexpr uint32 kRootParamRuntimeData = 6;
-inline constexpr uint32 kRootParamPushConstants = 7;
-inline constexpr uint32 kRootParamCount = 8;
+inline constexpr uint32 RootParamStageRootCBV(Stage stage, uint32 reg)
+{
+	return 6 + (uint32)stage * kRootCBVsPerStage + reg;
+}
+inline constexpr uint32 kRootParamRuntimeData = 6 + (uint32)Stage::Count * kRootCBVsPerStage;
+inline constexpr uint32 kRootParamPushConstants = kRootParamRuntimeData + 1;
+inline constexpr uint32 kRootParamCount = kRootParamPushConstants + 1;
 
 inline constexpr uint32 kRuntimeDataDwords = 16; // also large enough for spirv_to_dxil's dxil_spirv_vertex_runtime_data
 inline constexpr uint32 kPushConstantDwords = 16;
+inline constexpr uint32 kRootSignatureDwords = 6 + kRuntimeDataDwords + kPushConstantDwords + (uint32)Stage::Count * kRootCBVsPerStage * 2;
+static_assert(kRootSignatureDwords <= 64);
+static_assert(kRootCBVsPerStage < kMaxCBVsPerStage);
+// Root CBVs have no bounds; reserve enough backing bytes for any legal cbuffer.
+inline constexpr uint32 kMaxConstantBufferBytes = 64 * 1024;
 } // namespace D3D12Const
 
 // Result of rewriting the descriptor bindings of a SPIR-V module.

@@ -296,6 +296,7 @@ float4 Display(float4 position : SV_Position) : SV_Target {
 		renderer.TransitionResource(source, sourceState, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
 		renderer.TransitionResource(target, targetState, D3D12_RESOURCE_STATE_RENDER_TARGET);
 		renderer.FlushBarriers();
+		renderer.GetStagingViewHeap().NotifyDescriptorWrite();
 		renderer.GetDevice()->CreateShaderResourceView(source, nullptr, depthSRV);
 		renderer.BindRootSignatureAndHeaps();
 		auto *cmd = renderer.GetCommandList();
@@ -323,6 +324,7 @@ float4 Display(float4 position : SV_Position) : SV_Target {
 		view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		view.Texture2D.MipLevels = 1;
+		renderer.GetStagingViewHeap().NotifyDescriptorWrite();
 		renderer.GetDevice()->CreateShaderResourceView(depth->GetResource(), &view, depthSRV);
 		renderer.BindRootSignatureAndHeaps();
 		auto *cmd = renderer.GetCommandList();

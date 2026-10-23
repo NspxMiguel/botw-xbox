@@ -126,7 +126,11 @@ D3D12GpuViewHeap::Table D3D12GpuViewHeap::AllocateTable(uint32 count)
 		cemuLog_log(LogType::Force, "D3D12: Shader visible descriptor heap exhausted by a single command list");
 		cemu_assert(false);
 	}
-	// A cached table is only reused within this recording interval and allocation lap.
+	// Every reuse of old slots is preceded by a generation bump: the empty-ring
+	// reset above, a lap below, or OnSubmit. Retirement only frees submitted slots;
+	// it never frees this recording's tables. Cache hits allocate nothing and stay
+	// within this recording, so their original marker protects all readers. Never
+	// reuse cached tables across OnSubmit without extending retirement markers.
 	if (start < m_head)
 		++m_generation;
 	m_head = start + count;

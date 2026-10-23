@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12DescriptorHeaps.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12StageTable.h"
 #include <iostream>
 struct Tracker : D3D12SubmissionTracker
 {
@@ -19,7 +20,10 @@ int main()
 	ID3D12Device device;
 	Tracker tracker;
 	D3D12StagingDescriptorHeap staging(&device, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV, 4, "test");
-	const auto sourceEpoch = staging.GetGeneration();
+	auto sourceEpoch = staging.GetGeneration();
+	staging.NotifyDescriptorWrite();
+	assert(sourceEpoch != staging.GetGeneration());
+	sourceEpoch = staging.GetGeneration();
 	const auto source = staging.Allocate();
 	staging.Free(source);
 	const auto recycledSource = staging.Allocate();
@@ -28,14 +32,21 @@ int main()
 	{
 		D3D12GpuViewHeap heap(&device, &tracker, 16);
 		auto epoch = heap.GetGeneration();
-		heap.AllocateTable(10);
+		D3D12StageTableCache<4> cache;
+		D3D12StageTableDesc key{};
+		const auto first = heap.AllocateTable(10);
+		cache.Store(key, first.gpu, heap.GetGeneration(), staging.GetGeneration());
+		assert(cache.Find(key, heap.GetGeneration(), staging.GetGeneration())->ptr == first.gpu.ptr);
 		heap.OnSubmit(1);
 		assert(epoch != heap.GetGeneration());
+		assert(!cache.Find(key, heap.GetGeneration(), staging.GetGeneration()));
 		epoch = heap.GetGeneration();
 		const auto previousLap = heap.AllocateTable(4);
+		cache.Store(key, previousLap.gpu, heap.GetGeneration(), staging.GetGeneration());
 		heap.Retire(1);
 		const auto wrapped = heap.AllocateTable(4);
 		assert(wrapped.gpu.ptr < previousLap.gpu.ptr);
+		assert(!cache.Find(key, heap.GetGeneration(), staging.GetGeneration()));
 		assert(epoch != heap.GetGeneration());
 		epoch = heap.GetGeneration();
 		heap.OnSubmit(2);

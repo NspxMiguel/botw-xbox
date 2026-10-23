@@ -18,8 +18,10 @@ for test in latte_indices latte_index_cache_associativity; do
   "$cxx" "${common[@]}" "${indices[@]}" -Iruntime/cemu "tools/tests/${test}_test.cpp" "$index_source" -o "build/tests/${test}_test"
   "build/tests/${test}_test"
 done
-"$cxx" "${common[@]}" -Itools/tests/d3d12_stubs -Iruntime/cemu tools/tests/latte_stage_table_test.cpp -o build/tests/latte_stage_table_test
-build/tests/latte_stage_table_test
+for test in latte_stage_table latte_root_signature; do
+  "$cxx" "${common[@]}" -Itools/tests/d3d12_stubs -Iruntime/cemu "tools/tests/${test}_test.cpp" -o "build/tests/${test}_test"
+  "build/tests/${test}_test"
+done
 "$cxx" "${common[@]}" -Wno-unused-private-field -DENABLE_D3D12 -Itools/tests/d3d12_stubs -Iruntime/cemu tools/tests/latte_descriptor_heap_test.cpp runtime/cemu/Cafe/HW/Latte/Renderer/D3D12/D3D12DescriptorHeaps.cpp -o build/tests/latte_descriptor_heap_test
 build/tests/latte_descriptor_heap_test
 

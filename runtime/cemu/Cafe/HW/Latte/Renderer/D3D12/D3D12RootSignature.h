@@ -5,7 +5,8 @@
 
 #pragma once
 
-// The one root signature shared by every pipeline (see the binding model in D3D12BindingModel.h).
+// Shared by game and translated internal graphics pipelines (see D3D12BindingModel.h).
+// FFX/FSR and compute helpers have independent root signatures.
 // Header-only and free of Cemu dependencies so standalone tests can build exactly the same root signature.
 
 #include <d3d12.h>
@@ -26,8 +27,8 @@ inline HRESULT D3D12_SerializeCemuRootSignature(ID3DBlob **blobOut, ID3DBlob **e
 		const Stage stage = (Stage)s;
 		auto &r = viewRanges[s];
 		r[0].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_CBV;
-		r[0].NumDescriptors = kMaxCBVsPerStage;
-		r[0].BaseShaderRegister = 0;
+		r[0].NumDescriptors = kMaxCBVsPerStage - RootCBVCount(stage);
+		r[0].BaseShaderRegister = RootCBVCount(stage);
 		r[0].RegisterSpace = RegisterSpace(stage, BindingClass::CBV);
 		r[0].Flags = viewFlags;
 		r[0].OffsetInDescriptorsFromTableStart = kStageTableOffsetCBV;
@@ -36,19 +37,29 @@ inline HRESULT D3D12_SerializeCemuRootSignature(ID3DBlob **blobOut, ID3DBlob **e
 		r[1].BaseShaderRegister = 0;
 		r[1].RegisterSpace = RegisterSpace(stage, BindingClass::SRV);
 		r[1].Flags = viewFlags;
-		r[1].OffsetInDescriptorsFromTableStart = kStageTableOffsetSRV;
+		r[1].OffsetInDescriptorsFromTableStart = StageTableOffsetSRV(stage);
 		r[2].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
 		r[2].NumDescriptors = kMaxUAVsPerStage;
 		r[2].BaseShaderRegister = 0;
 		r[2].RegisterSpace = RegisterSpace(stage, BindingClass::UAV);
 		r[2].Flags = viewFlags;
-		r[2].OffsetInDescriptorsFromTableStart = kStageTableOffsetUAV;
+		r[2].OffsetInDescriptorsFromTableStart = StageTableOffsetUAV(stage);
 
 		auto &tableParam = params[RootParamStageTable(stage)];
 		tableParam.ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
 		tableParam.DescriptorTable.NumDescriptorRanges = 3;
 		tableParam.DescriptorTable.pDescriptorRanges = r;
 		tableParam.ShaderVisibility = visibility[s];
+
+		for (uint32 i = 0; i < RootCBVCount(stage); ++i)
+		{
+			auto &cbv = params[RootParamStageRootCBV(stage, i)];
+			cbv.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+			cbv.Descriptor.ShaderRegister = i;
+			cbv.Descriptor.RegisterSpace = RegisterSpace(stage, BindingClass::CBV);
+			cbv.Descriptor.Flags = D3D12_ROOT_DESCRIPTOR_FLAG_DATA_VOLATILE;
+			cbv.ShaderVisibility = visibility[s];
+		}
 
 		auto &sr = samplerRanges[s];
 		sr.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER;

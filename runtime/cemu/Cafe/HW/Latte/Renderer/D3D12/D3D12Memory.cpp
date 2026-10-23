@@ -33,7 +33,9 @@ static ComPtr<ID3D12Resource> _CreateMappedBuffer(ID3D12Device *device, D3D12_HE
 D3D12UploadRing::D3D12UploadRing(ID3D12Device *device, D3D12SubmissionTracker *tracker, uint64 size, const char *debugName)
 	: m_device(device), m_tracker(tracker), m_size(size)
 {
-	m_buffer = _CreateMappedBuffer(device, D3D12_HEAP_TYPE_UPLOAD, size, &m_cpuBase, debugName);
+	// Preserve ring occupancy/fence rules while allowing a full root cbuffer read
+	// at the final allocation. Overflow allocations need the same physical tail.
+	m_buffer = _CreateMappedBuffer(device, D3D12_HEAP_TYPE_UPLOAD, size + D3D12Const::kMaxConstantBufferBytes, &m_cpuBase, debugName);
 	m_gpuBase = m_buffer->GetGPUVirtualAddress();
 }
 
@@ -91,14 +93,14 @@ D3D12UploadAllocation D3D12UploadRing::Allocate(uint64 size, uint64 alignment)
 		Overflow overflow;
 		overflow.submissionId = m_tracker->GetRecordingSubmissionId();
 		uint8 *cpuPtr = nullptr;
-		overflow.buffer = _CreateMappedBuffer(m_device, D3D12_HEAP_TYPE_UPLOAD, AlignUp<uint64>(size, 256), &cpuPtr, "UploadRingOverflow");
+		overflow.buffer = _CreateMappedBuffer(m_device, D3D12_HEAP_TYPE_UPLOAD, AlignUp<uint64>(size, 256) + D3D12Const::kMaxConstantBufferBytes, &cpuPtr, "UploadRingOverflow");
 		allocation.cpuPtr = cpuPtr;
 		allocation.gpuAddress = overflow.buffer->GetGPUVirtualAddress();
 		allocation.resource = overflow.buffer.Get();
 		allocation.offset = 0;
 		allocation.size = size;
 		m_overflow.emplace_back(std::move(overflow));
-		m_recordingOverflowBytes += AlignUp<uint64>(size, 256);
+		m_recordingOverflowBytes += AlignUp<uint64>(size, 256) + D3D12Const::kMaxConstantBufferBytes;
 		if (!m_loggedOverflow)
 		{
 			m_loggedOverflow = true;
