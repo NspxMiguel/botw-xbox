@@ -45,7 +45,7 @@ your own computer from your own already extracted and decrypted dump; the genera
 resulting package must stay there. Setup accepts decrypted `code/`, `content/`, `meta/` folders,
 already decrypted `.wua` archives and `.zip` folders. Extract `.7z` or an archive containing `.wua`
 on a PC first. Base + update 1.5.0 (v208) + optional DLC merging and USB auto-detection are supported.
-Launcher artwork comes from your dump's `meta/` files, with a local fallback.
+Launcher artwork comes from your dump's `meta/` files; disc art is fetched from GameTDB when online.
 
 ## Credits and license
 

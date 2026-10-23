@@ -131,6 +131,69 @@ std::optional<uwp::ArtImage> read_art(StorageFolder const &meta, wchar_t const *
     }
 }
 
+template <class Operation> auto art_wait(Operation operation) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    while (operation.Status() == AsyncStatus::Started) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            operation.Cancel();
+            throw hresult_canceled();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return operation.get();
+}
+std::optional<uwp::ArtImage> download_disc(StorageFolder const &local, StorageFolder const &game) {
+    try {
+        auto meta = child(game, L"meta");
+        auto identity = uwp::disc_identity(uwp::setup::read_text(meta, L"meta.xml"));
+        if (!identity)
+            return {};
+        auto cache = local.CreateFolderAsync(L"art", CreationCollisionOption::OpenIfExists).get();
+        if (uwp::setup::read_text(cache, L"disc-id.txt") == identity->id) {
+            if (auto image = read_art(cache, L"disc.png", true))
+                return image;
+        }
+        using namespace winrt::Windows::Web::Http;
+        using namespace winrt::Windows::Storage::Streams;
+        HttpClient client;
+        for (auto kind : {"discM", "disc"}) {
+            try {
+                auto url = "https://art.gametdb.com/wiiu/" + std::string(kind) + "/" + identity->region +
+                           "/" + identity->id + ".png";
+                auto response = art_wait(
+                    client.GetAsync(Uri(to_hstring(url)), HttpCompletionOption::ResponseHeadersRead));
+                if (response.StatusCode() != HttpStatusCode::Ok ||
+                    response.RequestMessage().RequestUri().SchemeName() != L"https")
+                    continue;
+                auto stream = art_wait(response.Content().ReadAsInputStreamAsync());
+                std::vector<uint8_t> bytes;
+                for (;;) {
+                    auto buffer =
+                        art_wait(stream.ReadAsync(Buffer(65536), 65536, InputStreamOptions::Partial));
+                    if (!buffer.Length())
+                        break;
+                    if (bytes.size() + buffer.Length() > uwp::art_byte_limit)
+                        throw hresult_invalid_argument();
+                    std::vector<uint8_t> chunk(buffer.Length());
+                    DataReader::FromBuffer(buffer).ReadBytes(chunk);
+                    bytes.insert(bytes.end(), chunk.begin(), chunk.end());
+                }
+                auto image = uwp::decode_art_png(bytes);
+                if (!image)
+                    continue;
+                auto file =
+                    cache.CreateFileAsync(L"disc.png", CreationCollisionOption::ReplaceExisting).get();
+                FileIO::WriteBytesAsync(file, bytes).get();
+                uwp::setup::write_text(cache, L"disc-id.txt", identity->id);
+                return image;
+            } catch (...) {
+            }
+        }
+    } catch (...) {
+    }
+    return {};
+}
+
 struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     bool pt = false, menu_open = false, running = false, boot_attempted = false;
     bool failed = false, foreground = true, suspended = false, opening = false;
@@ -702,6 +765,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 loaded_art.drc = read_art(meta, L"bootDrcTex.tga");
                 break;
             }
+        }
+        if (decision.game) {
+            if (auto downloaded = download_disc(local, active_folder))
+                loaded_art.icon = std::move(downloaded);
         }
         co_await resume_foreground(dispatcher);
         art = std::move(loaded_art);

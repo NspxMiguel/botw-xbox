@@ -2,7 +2,7 @@
 
 Setup now accepts game files the player has already extracted and decrypted from their own Wii U.
 The key handling and encrypted source readers, their diagnostics and fixtures, the Python disc
-extractor and its tests, and runtime artwork fetching have been removed. The four guide pages
+extractor and its tests have been removed. GameTDB disc art download is kept (owner's decision). The four guide pages
 contain neutral preparation instructions in English and Portuguese, without external guide links.
 
 ## Player behavior
@@ -18,9 +18,8 @@ and receive the same PC extraction guidance; direct nested archive extraction wa
 in the previous setup reader. Once extracted on a PC, the resulting folder or `.wua` follows the
 normal setup path.
 
-Artwork uses `meta/iconTex.tga`, `meta/bootTvTex.tga` and `meta/bootDrcTex.tga`, with the existing local
-fallback. Previously downloaded artwork is no longer read or refreshed; setup performs no artwork
-network requests. The generic QR utility remains, with a neutral URL fixture, but setup generates no QR.
+Artwork uses `meta/iconTex.tga`, `meta/bootTvTex.tga` and `meta/bootDrcTex.tga`; the disc art is still
+fetched from GameTDB when online (kept by the owner's decision). The generic QR utility remains, with a neutral URL fixture, but setup generates no QR.
 
 ## Setup screens in English and Portuguese
 
@@ -93,7 +92,7 @@ No separate completion screen was added; setup returns to the launcher home.
 
 Paths below are relative to the repository; UWP paths share `runtime/src/host/uwp/`.
 
-- `app.cpp`: removes online artwork loading, external guide URLs and QR generation, key-related
+- `app.cpp`: removes external guide URLs and QR generation, key-related
   screen branches and errors; keeps local art and decrypted setup.
 - `setup.h`, `setup_storage.h`, `diagnostics.h`: remove encrypted source discovery, key scanning,
   decryption and associated diagnostics; retain folder and archive setup, merging and stable format IDs.
@@ -101,7 +100,6 @@ Paths below are relative to the repository; UWP paths share `runtime/src/host/uw
   streaming extraction and title layering; remove encrypted filesystem readers.
 - `strings.h`: replaces guide text and accepted-format descriptions in both languages and removes
   obsolete enum entries together with their matching table rows.
-- `polish.h`, `tests/polish_tests.cc`: remove unused remote artwork identity parsing and its fixture.
 - `Package.appxmanifest`: removes encrypted image and encrypted metadata associations; retains WUA,
   ZIP, 7z and decrypted game content access. Internet permission remains for mod downloads.
 - `tests/setup_tests.cc`, `tests/diagnostic_tests.cc`: remove encrypted fixtures; retain synthetic

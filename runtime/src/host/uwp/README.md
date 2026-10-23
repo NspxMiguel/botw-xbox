@@ -132,8 +132,8 @@ The pre-boot home screen reads `meta/bootTvTex.tga`, `meta/iconTex.tga` and
 `meta/bootDrcTex.tga` from the **same detected game folder** selected by the launcher.
 Reads use its brokered `StorageFolder`, including the remembered picker grant;
 art loading does not rely on CRT access to an external path. Artwork is never bundled or copied
-into the repository. Artwork comes only from the player's local dump; each read and decoded image
-is limited to 16 MiB. Missing, inaccessible or malformed images
+into the repository. The launcher optionally downloads disc art from GameTDB into a per-title
+LocalState cache. Each read and decoded image is limited to 16 MiB. Missing, inaccessible or malformed images
 are ignored independently; without a valid game/meta the home stays true black
 with the title and a folder-selection action. DRC art is decoded and retained for
 the future DRC presentation handoff; the TV hero uses only TV art.
@@ -150,8 +150,11 @@ surface. Settings and Mods are 48px circles at (56, 56) and (56, 120).
 Up/Left from the disc focuses Settings; Down from Settings focuses Mods;
 Down/Right from Mods returns to the disc. Menu opens Settings.
 
-The disc uses the dump's `iconTex.tga`, with the existing generated fallback when it is unavailable.
-No runtime artwork download or network cache is used.
+`meta/meta.xml` product and company codes form the six-character GameTDB ID.
+Regions E/P/J map to US/EN/JA. HTTPS requests try `wiiu/discM`, then `wiiu/disc`;
+PNG decoding and downloads are bounded to 16 MiB. Successful downloads are cached
+as `LocalState/art/disc.png` with `disc-id.txt` preventing stale cross-title art.
+Missing metadata, network failure or bad PNGs retain the dump's `iconTex.tga`.
 
 The Direct2D 1.1 device context draws a transparent-holed disc plane through the
 3D perspective effect. Right-stick pitch/yaw use damped springs (10 rad/s,
