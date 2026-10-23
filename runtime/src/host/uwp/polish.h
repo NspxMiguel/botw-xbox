@@ -46,40 +46,6 @@ inline std::array<Triangle, 3> triforce_geometry() {
              {{{x - w / 4, y}, {x - w / 2, y + h / 2}, {x, y + h / 2}}},
              {{{x + w / 4, y}, {x, y + h / 2}, {x + w / 2, y + h / 2}}}}};
 }
-struct DiscIdentity {
-    std::string id, region;
-};
-inline std::optional<DiscIdentity> disc_identity(std::string_view xml) {
-    auto field = [&](std::string_view key) -> std::string {
-        auto start = xml.find("<" + std::string(key));
-        if (start == xml.npos)
-            return {};
-        auto end = xml.find('>', start);
-        if (end == xml.npos)
-            return {};
-        auto close = xml.find("</" + std::string(key) + ">", end);
-        if (close == xml.npos)
-            return {};
-        auto s = xml.substr(end + 1, close - end - 1);
-        auto a = s.find_first_not_of(" \t\r\n"), b = s.find_last_not_of(" \t\r\n");
-        return a == s.npos ? "" : std::string(s.substr(a, b - a + 1));
-    };
-    auto product = field("product_code"), company = field("company_code");
-    if (product.size() >= 4)
-        product = product.substr(product.size() - 4);
-    if (company.size() >= 2)
-        company = company.substr(company.size() - 2);
-    auto valid = [](std::string const &s) {
-        return std::all_of(s.begin(), s.end(),
-                           [](char c) { return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'); });
-    };
-    if (product.size() != 4 || company.size() != 2 || !valid(product) || !valid(company))
-        return {};
-    std::string region = product[3] == 'E' ? "US" : product[3] == 'P' ? "EN" : product[3] == 'J' ? "JA" : "";
-    if (region.empty())
-        return {};
-    return DiscIdentity{product + company, region};
-}
 // The packaged WAV has already had 350 ms removed. Blend its tail into the steady loop head.
 inline size_t prepare_drive_loop(std::vector<float> &samples, unsigned rate = 48000) {
     size_t start = size_t(8.65 * rate), overlap = rate / 10;

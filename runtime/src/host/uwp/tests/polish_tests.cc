@@ -36,17 +36,6 @@ int main() {
     CHECK(launch_motion(.1).z < 0 && launch_motion(3.2).z == 60);
     CHECK(launch_motion(2.2).fade == 0 && launch_motion(3.2).fade == 1);
     CHECK(std::abs((launch_motion(4.001).angle - launch_motion(4).angle) / .001 + 792) < 1e-6);
-    for (char region : {'E', 'P', 'J'}) {
-        std::string xml = "<product_code type=\"string\"> WUP-P-ALZ" + std::string(1, region) +
-                          " </product_code><company_code>0001</company_code>";
-        auto id = disc_identity(xml);
-        CHECK(id && id->id == "ALZ" + std::string(1, region) + "01");
-        CHECK(id->region == (region == 'E' ? "US" : region == 'P' ? "EN" : "JA"));
-    }
-    for (auto xml : {"", "<product_code>ALZE</product_code>",
-                     "<product_code>../E</product_code><company_code>01</company_code>",
-                     "<product_code>ALZX</product_code><company_code>01</company_code>"})
-        CHECK(!disc_identity(xml));
     auto faces = triforce_geometry();
     float min = 9999, max = 0, area = 0;
     for (auto t : faces) {

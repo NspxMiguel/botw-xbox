@@ -59,16 +59,18 @@ void recognition_tests(const fs::path &root) {
     auto p = filesystem_probe(root);
     write(root, "photos.zip", zip_fixture("holiday/photo.jpg"));
     write(root, "game.zip", zip_fixture("dump/code/U-King.rpx", true));
+    write(root, "wrapped.zip", zip_fixture("dump/game.wua"));
+    write(root, "wrapped.7z", seven_fixture("dump/game.WUA"));
     write(root, "photos.7z", seven_fixture("holiday/photo.jpg"));
     write(root, "game.7z", seven_fixture("dump/content/Bootup.pack"));
-    write(root, "random.wud", "unrelated");
     assert(!looks_like_title(p, Format::zip, "photos.zip"));
     assert(looks_like_title(p, Format::zip, "game.zip"));
     assert(!looks_like_title(p, Format::seven_zip, "photos.7z"));
     assert(looks_like_title(p, Format::seven_zip, "game.7z"));
-    assert(!looks_like_title(p, Format::wud, "random.wud"));
+    assert(looks_like_title(p, Format::zip, "wrapped.zip"));
+    assert(looks_like_title(p, Format::seven_zip, "wrapped.7z"));
     auto tree = diagnose_tree(root);
-    assert(tree.size() == 2);
+    assert(tree.size() == 4);
     int reads = 0;
     auto reader = p.reader;
     p.reader = [&](auto &name) {
@@ -91,17 +93,6 @@ void recognition_tests(const fs::path &root) {
     assert(!scan("photos.zip", 100, 1));
     first = reads;
     assert(!scan("photos.zip", 100, 1) && reads == first);
-    auto disc = p;
-    disc.reader = [](auto &) { return uwp::formats::Reader{0x5d3a00000ull, {}}; };
-    cache.begin();
-    auto d = cache.get(disc, root.string(), Format::wud, "game.wud", 0x5d3a00000ull, 1);
-    assert(d && d->issues.size() == 2);
-    assert(issue_text(d->issues[0], false).starts_with(L"Keys missing"));
-    assert(d->issues[0].path == "game.key / keys.txt");
-    write(root, "game.key");
-    write(root, "otp.bin");
-    assert(!cache.get(disc, root.string(), Format::wud, "game.wud", 0x5d3a00000ull, 1)->incomplete());
-    cache.end();
     cache.begin();
     cache.end();
     assert(cache.entries.empty());
@@ -112,8 +103,6 @@ void discovery_tests(const fs::path &root) {
     write(unrelated, "content/unrelated.bin");
     write(unrelated, "code/app.xml", "<title_id>0005000012345678</title_id>");
     assert(!looks_unpacked(filesystem_probe(unrelated), "1145360"));
-    write(unrelated, "title.tmd", "unrelated");
-    assert(!looks_nus(filesystem_probe(unrelated), "1145360"));
     assert(!game_name("1145360") && !game_name("0005000012345678"));
     auto metadata = root / "metadata";
     for (auto family : {"00050000", "0005000e", "0005000c"})
@@ -263,45 +252,11 @@ int main() {
     exact(diagnose(layered_probe({filesystem_probe(folder), filesystem_probe(update)}), folder.string(),
                    Format::folder),
           {{"aoc/", IssueKind::optional}});
-    auto nus = root / "install";
-    std::string tmd(0xb04 + 3 * 0x30, '\0');
-    auto put = [&](size_t at, uint64_t value, size_t n) {
-        for (size_t i = 0; i < n; ++i)
-            tmd[at + n - i - 1] = char(value >> (8 * i));
-    };
-    put(0x1de, 3, 2);
-    for (unsigned i = 0; i < 3; ++i) {
-        auto at = 0xb04 + i * 0x30;
-        put(at, i + 1, 4);
-        put(at + 4, i, 2);
-        put(at + 6, i == 1 ? 2 : 0, 2);
-        put(at + 8, 4, 8);
-    }
-    write(nus, "title.tmd", tmd);
-    write(nus, "00000001.app", "1234");
-    write(nus, "00000003.app", "12");
-    exact(diagnose(filesystem_probe(nus), nus.string(), Format::nus),
-          {{"title.tik", IssueKind::missing},
-           {"title.cert", IssueKind::missing},
-           {"00000002.app", IssueKind::missing},
-           {"00000002.h3", IssueKind::missing},
-           {"00000003.app", IssueKind::wrong_size}});
-    write(nus, "title.tmd", "short");
-    exact(diagnose(filesystem_probe(nus), nus.string(), Format::nus), {{"title.tik", IssueKind::missing},
-                                                                       {"title.cert", IssueKind::missing},
-                                                                       {"title.tmd", IssueKind::incomplete}});
-    auto disc = root / "disc";
-    fs::create_directories(disc);
-    for (auto format : {Format::wud, Format::wux}) {
-        exact(diagnose(filesystem_probe(disc), disc.string(), format, "game.wud"),
-              {{"game.key / keys.txt", IssueKind::keys}, {"otp.bin / common.key", IssueKind::keys}});
-    }
-    write(disc, "custom.key");
-    write(disc, "common.key");
-    exact(diagnose(filesystem_probe(disc), disc.string(), Format::wux, "custom.wux"), {});
+    auto archive = root / "archive";
+    fs::create_directories(archive);
     for (auto name : {"dump.wua", "dump.zip", "dump.7z"}) {
-        write(disc, name, "truncated");
-        exact(diagnose(filesystem_probe(disc), disc.string(),
+        write(archive, name, "truncated");
+        exact(diagnose(filesystem_probe(archive), archive.string(),
                        *file_format(fs::path(name).extension().string()), name),
               {{name, IssueKind::incomplete}});
     }
@@ -335,5 +290,5 @@ int main() {
     uwp::quick_menu.paused = false;
     assert(waiter.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
     waiter.get();
-    std::cout << "PASS: exact folder/NUS/disc/archive diagnostics, depth, held chord and scale caps\n";
+    std::cout << "PASS: exact folder/archive diagnostics, depth, held chord and scale caps\n";
 }

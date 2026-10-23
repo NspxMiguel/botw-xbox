@@ -1,17 +1,10 @@
 # Boot crash after AXInit: inherited update files
 
 The USA v208 executable can have the correct SHA-256 while the merged content is
-corrupt. The old FST readers in `tools/wud_extract.py` and the Xbox setup reader treated inherited update files
-as ordinary files. They copied unrelated patch-cluster bytes over base files.
-Cluster hash checks can still pass: the bytes are intact, but belong to a
-different file.
-
-The high byte of an FST entry's first word contains both the directory bit `0x01`
-and the link bit `0x80`. A linked file belongs to the base title and must not be
-extracted from the update. Linked directories still participate in traversal.
-This follows Cemu's [FST type/flag decoding](https://github.com/cemu-project/Cemu/blob/a53cf0ece75964aa361056edab46f281dcc0bc44/src/Cafe/Filesystem/FST/FST.h)
-and [filesystem device](https://github.com/cemu-project/Cemu/blob/a53cf0ece75964aa361056edab46f281dcc0bc44/src/Cafe/Filesystem/fscDeviceWud.cpp),
-which declines opens through update links so the base mount can supply the file.
+corrupt. An earlier extraction overwrote inherited base files with unrelated update bytes.
+A valid executable hash therefore does not guarantee that the content folder is intact.
+Use files already extracted and decrypted from your own Wii U; the launcher accepts the resulting
+folders or decrypted archives and overlays the update on the base without parsing console filesystems.
 
 In the affected v208 extraction, 11,081 linked files were overwritten. For example:
 
@@ -19,9 +12,6 @@ In the affected v208 extraction, 11,081 linked files were overwritten. For examp
 | --- | ---: | --- | --- |
 | `content/Sound/DummySound.bfsar` | 2,108 | `Yaz0 000e78b0` | `FSAR feff0040` |
 | `content/System/RegionLangMask.txt` | 288 | `Yaz0 001df6e0` | Text with `USen USes USfr` |
-
-The update FST entry for `DummySound.bfsar` is type `0x80`, offset zero, size
-`0x83c`, cluster `0xaa`. That offset does not identify its data in the update.
 
 ## Guest fault and HLE boundary
 
@@ -45,10 +35,9 @@ file's actual bytes; adding automatic decompression would hide the wrong data.
 
 ## Repair and regression checks
 
-Rebuild the merged game in a clean directory: extract the base, extract the
-update into a fresh directory with the fixed reader, then overlay the update.
-Do not overlay an old extraction: its stale inherited files are already corrupt,
-and skipping links on a subsequent extraction does not remove those stale files.
+Rebuild the merged game in a clean directory from intact, already extracted and decrypted base
+and update folders, then overlay the update. Do not reuse a corrupted merged folder: stale files
+can survive an overlay.
 No game content, keys, or generated guest code belong in Git.
 
 Alternatively, restore only the linked paths from an intact extraction of the
@@ -64,12 +53,10 @@ playable control as well. Its 112-second run rendered around 30 fps and was clos
 after capturing the game window; no fatal error was logged.
 
 ```sh
-uv run --with cryptography python -m unittest discover -s tools/tests -v
-cmake -S runtime/src/host/uwp/tests -B build-bootfix-tests -G Ninja -DCMAKE_BUILD_TYPE=Release
-ninja -C build-bootfix-tests -j2 uwp_setup_tests
-ctest --test-dir build-bootfix-tests -R '^uwp_setup_tests$' --output-on-failure
+cmake -S runtime/src/host/uwp/tests -B build-setup-tests -G Ninja
+cmake --build build-setup-tests --parallel 2
+ctest --test-dir build-setup-tests --output-on-failure
 ```
 
-Both fixtures cover a linked file with a plausible patch offset, a linked child
-with an invalid offset, a linked directory, and ordinary files inside and after
-that directory. The runtime must never create an extraction operation for a link.
+The retained fixtures cover decrypted archive integrity, base/update precedence, DLC mapping,
+version checks and folder diagnostics. They contain only synthetic data.

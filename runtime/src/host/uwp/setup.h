@@ -171,16 +171,13 @@ struct State {
         return internal.fits(size) && mode == Mode::copy ? 1 : 0;
     }
 };
-enum class Format { folder, wua, wud, wux, nus, zip, seven_zip };
+// Retain numeric IDs: source identities and extraction journals include the format value.
+enum class Format { folder = 0, wua = 1, zip = 5, seven_zip = 6 };
 inline std::optional<Format> file_format(std::string extension) {
     std::transform(extension.begin(), extension.end(), extension.begin(),
                    [](unsigned char c) { return char(std::tolower(c)); });
     if (extension == ".wua")
         return Format::wua;
-    if (extension == ".wud")
-        return Format::wud;
-    if (extension == ".wux")
-        return Format::wux;
     if (extension == ".zip")
         return Format::zip;
     if (extension == ".7z")
@@ -200,10 +197,6 @@ inline std::vector<Found> detect(const std::filesystem::path &root) {
         if (fs::is_regular_file(p / "code/U-King.rpx", ec) && fs::is_directory(p / "content", ec) &&
             fs::is_directory(p / "meta", ec)) {
             result.push_back({p, Format::folder});
-            return;
-        }
-        if (fs::is_regular_file(p / "title.tmd", ec) && fs::is_regular_file(p / "title.tik", ec)) {
-            result.push_back({p, Format::nus});
             return;
         }
         for (auto &entry : fs::directory_iterator(p, fs::directory_options::skip_permission_denied, ec)) {

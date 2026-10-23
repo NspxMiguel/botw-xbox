@@ -2,8 +2,8 @@
 #pragma once
 #include "reader.h"
 namespace uwp::formats {
-// An archive/Loadiine title set becomes one logical tree. Update replaces base,
-// while DLC content is mapped to aoc/. No key or encrypted metadata is exported.
+// A decrypted archive/folder title set becomes one logical tree. Update replaces base,
+// while DLC content is mapped to aoc/.
 inline std::vector<Entry> merge_titles(std::vector<Entry> input) {
     struct Layer {
         std::string root;
@@ -28,7 +28,7 @@ inline std::vector<Entry> merge_titles(std::vector<Entry> input) {
             add(root, priority);
         }
     }
-    // WUA uses title ID folders. Loadiine commonly uses [DLC]/[Update].
+    // WUA uses title ID folders. Decrypted folders commonly use [DLC]/[Update].
     for (auto &entry : input) {
         auto slash = entry.path.find('/');
         if (slash == entry.path.npos)

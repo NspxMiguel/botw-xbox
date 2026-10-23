@@ -77,4 +77,4 @@ else
   echo "SKIP: app.cpp requires Microsoft SDK/C++/WinRT"
   if [ "${UWP_REQUIRE_SDK:-0}" = 1 ]; then exit 1; fi
 fi
-echo "PASS: portable host, art, audio, strings, setup/formats/crypto/QR, polish and Direct2D/WIC syntax"
+echo "PASS: portable host, art, audio, strings, setup/formats/QR, polish and Direct2D/WIC syntax"

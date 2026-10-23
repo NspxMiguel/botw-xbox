@@ -32,7 +32,6 @@
             <uap:DisplayName>Wii U game files</uap:DisplayName>
             <uap:SupportedFileTypes>
               <uap:FileType>.7z</uap:FileType>
-              <uap:FileType>.app</uap:FileType>
               <uap:FileType>.bars</uap:FileType>
               <uap:FileType>.bfanm</uap:FileType>
               <uap:FileType>.bffnt</uap:FileType>
@@ -51,9 +50,6 @@
               <uap:FileType>.bnsh</uap:FileType>
               <uap:FileType>.bntx</uap:FileType>
               <uap:FileType>.byml</uap:FileType>
-              <uap:FileType>.cert</uap:FileType>
-              <uap:FileType>.h3</uap:FileType>
-              <uap:FileType>.key</uap:FileType>
               <uap:FileType>.msbt</uap:FileType>
               <uap:FileType>.mstats</uap:FileType>
               <uap:FileType>.pack</uap:FileType>
@@ -74,12 +70,8 @@
               <uap:FileType>.ssarc</uap:FileType>
               <uap:FileType>.szs</uap:FileType>
               <uap:FileType>.tga</uap:FileType>
-              <uap:FileType>.tik</uap:FileType>
-              <uap:FileType>.tmd</uap:FileType>
               <uap:FileType>.txt</uap:FileType>
               <uap:FileType>.wua</uap:FileType>
-              <uap:FileType>.wud</uap:FileType>
-              <uap:FileType>.wux</uap:FileType>
               <uap:FileType>.xml</uap:FileType>
               <uap:FileType>.zip</uap:FileType>
               <uap:FileType>.aamp</uap:FileType>
@@ -184,6 +176,6 @@
       </Extensions>
     </Application>
   </Applications>
-  <!-- broadFileSystemAccess is unsupported on Xbox; internetClient is used for optional GameTDB art and mod downloads. -->
+  <!-- broadFileSystemAccess is unsupported on Xbox; internetClient is used for mod downloads. -->
   <Capabilities><Capability Name="internetClient" /><uap:Capability Name="removableStorage" /></Capabilities>
 </Package>

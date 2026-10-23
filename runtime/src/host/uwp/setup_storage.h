@@ -46,7 +46,7 @@ struct Progress {
 };
 inline Reader open_reader(File file) {
     uint64_t size = file.GetBasicPropertiesAsync().get().Size();
-    // Real broker-granted handles avoid an RPC for every megabyte of a disc image.
+    // Real broker-granted handles avoid an RPC for every megabyte of an archive.
     HANDLE handle = INVALID_HANDLE_VALUE;
     try {
         auto parent = file.GetParentAsync().get();
@@ -218,7 +218,6 @@ inline std::vector<Item> scan(Folder local, Folder remembered = nullptr, LogMemo
         Folder folder{nullptr}, drive{nullptr};
         uint64_t id = 0;
         unsigned version = 0;
-        Format format = Format::folder;
     };
     std::vector<Title> titles;
     try {
@@ -244,14 +243,6 @@ inline std::vector<Item> scan(Folder local, Folder remembered = nullptr, LogMemo
                 result.push_back({root, drive, nullptr, Format::folder, std::wstring(root.Name())});
                 return;
             }
-            if (root.TryGetItemAsync(L"title.tmd").get() && root.TryGetItemAsync(L"title.tik").get()) {
-                auto ticket = small_file(root, L"title.tik"),
-                     tmd = small_file(root, L"title.tmd", 8 * 1024 * 1024);
-                titles.push_back(
-                    {root, drive, integer(ticket, 0x1dc, 8), unsigned(integer(tmd, 0x1dc, 2)), Format::nus});
-                result.push_back({root, drive, nullptr, Format::nus, std::wstring(root.Name())});
-                return;
-            }
             for (auto file : root.GetFilesAsync().get())
                 if (auto format = file_format(winrt::to_string(file.FileType())))
                     result.push_back({root, drive, file, *format, std::wstring(file.Name())});
@@ -271,10 +262,9 @@ inline std::vector<Item> scan(Folder local, Folder remembered = nullptr, LogMemo
     if (remembered)
         walk(remembered, remembered, 0);
     search_removable(walk, memo);
-    // Pair split Loadiine/Dumpling folders by title family, never by translated display name.
+    // Pair split decrypted folders by title family, never by translated display name.
     for (auto &item : result) {
-        if ((item.format != Format::folder && item.format != Format::nus) ||
-            item.drive.Path() == local.Path() ||
+        if (item.format != Format::folder || item.drive.Path() == local.Path() ||
             std::wstring_view(item.folder.Name()).starts_with(L"BotW-extracted-"))
             continue;
         std::optional<uint64_t> id;
@@ -285,8 +275,7 @@ inline std::vector<Item> scan(Folder local, Folder remembered = nullptr, LogMemo
             continue;
         std::optional<Title> update, dlc;
         for (auto &title : titles) {
-            if (title.format != item.format || title.drive.Path() != item.drive.Path() ||
-                uint32_t(title.id) != uint32_t(*id) ||
+            if (title.drive.Path() != item.drive.Path() || uint32_t(title.id) != uint32_t(*id) ||
                 std::wstring_view(title.folder.Name()).starts_with(L"BotW-extracted-"))
                 continue;
             if ((title.id >> 32) == 0x0005000e && (!update || title.version > update->version))
@@ -368,12 +357,11 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
                 !root.TryGetItemAsync(L"setup-complete.txt").get())
                 return;
             auto p = storage_probe(root);
-            bool nus = p.file("title.tmd").has_value() && looks_nus(p, winrt::to_string(root.Name()));
             bool unpacked = looks_unpacked(p, winrt::to_string(root.Name()));
             auto path = winrt::to_string(root.Path());
-            if (nus || unpacked || game_folder(root)) {
-                auto d = diagnose(p, path, nus ? Format::nus : Format::folder);
-                if (nus || unpacked || !d.incomplete()) {
+            if (unpacked || game_folder(root)) {
+                auto d = diagnose(p, path, Format::folder);
+                if (unpacked || !d.incomplete()) {
                     log_diagnosis(d, memo);
                     result.push_back(std::move(d));
                 } else
@@ -391,7 +379,7 @@ inline std::vector<Diagnosis> scan_diagnostics(Folder local, DiagnosticCache &ca
                     } else
                         log_verdict(memo, path + "/" + winrt::to_string(file.Name()), "ignored");
                 }
-            if (!nus && depth < kSearchDepth && std::chrono::steady_clock::now() < deadline)
+            if (depth < kSearchDepth && std::chrono::steady_clock::now() < deadline)
                 for (auto folder : root.GetFoldersAsync().get()) {
                     auto name = folder.Name();
                     if (!unpacked ||
@@ -472,69 +460,23 @@ inline std::vector<Entry> source_entries(const Item &item, Progress &progress) {
             progress.done = done;
             progress.total = total;
         }));
-    if (item.format == Format::zip)
-        return merge_titles(zip(progress_reader(item.file)));
+    if (item.format == Format::zip) {
+        auto archive = zip(progress_reader(item.file));
+        bool folder = std::any_of(archive.begin(), archive.end(), [](auto &entry) {
+            return entry.path == "code/U-King.rpx" || entry.path.ends_with("/code/U-King.rpx");
+        });
+        if (!folder && std::any_of(archive.begin(), archive.end(), [](auto &entry) {
+                auto name = entry.path;
+                std::transform(name.begin(), name.end(), name.begin(),
+                               [](unsigned char c) { return char(std::tolower(c)); });
+                return name.ends_with(".wua");
+            }))
+            throw std::runtime_error("Extract archive containing .wua on a PC");
+        return merge_titles(std::move(archive));
+    }
     if (item.format == Format::seven_zip)
         throw std::runtime_error("Extract .7z on a PC");
-    std::optional<Key> common;
-    std::vector<Key> keys;
-    // Keys never leave their source drive or enter logs/settings.
-    std::function<void(Folder, unsigned)> search = [&](Folder folder, unsigned depth) {
-        for (auto file : folder.GetFilesAsync().get()) {
-            progress.check();
-            auto name = winrt::to_string(file.Name());
-            std::transform(name.begin(), name.end(), name.begin(),
-                           [](unsigned char c) { return char(std::tolower(c)); });
-            if (name != "otp.bin" && name != "common.key" && name != "keys.txt" && !name.ends_with(".key"))
-                continue;
-            auto reader = open_reader(file);
-            if (reader.size > 1024 * 1024)
-                continue;
-            auto bytes = reader.bytes(0, size_t(reader.size));
-            if (name == "otp.bin" || name == "common.key") {
-                if (auto parsed = parse_common(bytes))
-                    common = parsed;
-            } else {
-                auto parsed = parse_keys(bytes, name != "keys.txt");
-                keys.insert(keys.end(), parsed.begin(), parsed.end());
-            }
-        }
-        if (depth < kSearchDepth)
-            for (auto child : folder.GetFoldersAsync().get())
-                search(child, depth + 1);
-    };
-    search(item.drive, 0);
-    require(common.has_value(), "Missing or invalid otp.bin / common.key");
-    if (item.format == Format::nus) {
-        auto decrypt = [&](Folder folder) {
-            return nus(small_file(folder, L"title.tmd", 8 * 1024 * 1024), small_file(folder, L"title.tik"),
-                       *common, [folder](const std::string &name) {
-                           return open_reader(folder.GetFileAsync(winrt::to_hstring(name)).get());
-                       });
-        };
-        if (item.layers.empty())
-            return merge_titles(decrypt(item.folder));
-        for (auto &layer : item.layers) {
-            auto title = decrypt(layer.folder);
-            for (auto &entry : title) {
-                entry.path = layer.prefix + entry.path;
-                entries.push_back(std::move(entry));
-            }
-        }
-        return merge_titles(std::move(entries));
-    }
-    require(!keys.empty(), "Missing disc key: game.key / keys.txt");
-    auto reader = progress_reader(item.file);
-    for (auto key : keys) {
-        progress.check();
-        try {
-            return merge_titles(wud(reader, key, *common));
-        } catch (std::runtime_error const &error) {
-            if (std::string_view(error.what()) != "Wrong disc key")
-                throw;
-        }
-    }
-    throw std::runtime_error("No disc key decrypted this image");
+    throw std::runtime_error("Unsupported game format");
 }
 inline std::string source_identity(const Item &item, Progress &progress) {
     packs::Sha256 hash;

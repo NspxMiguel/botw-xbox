@@ -67,7 +67,7 @@ enum class Text {
     setup_welcome,
     setup_intro,
     setup_guide,
-    guide_aroma,
+    guide_source,
     guide_dump,
     guide_merge,
     guide_usb,
@@ -100,9 +100,6 @@ enum class Text {
     setup_extract,
     setup_copy,
     setup_cancel,
-    setup_keys,
-    missing_common,
-    missing_disc,
     setup_failed,
     remove_question,
     version_found,
@@ -112,17 +109,12 @@ enum class Text {
     copy_missing_end,
     diagnostic_hints,
     fix_missing,
-    keys_missing,
-    fix_keys,
     fix_size,
     fix_incomplete,
     fix_title,
     fix_version,
     fix_version_end,
-    own_keys,
     accepted_folder,
-    accepted_disc,
-    accepted_nus,
     accepted_wua,
     accepted_archive,
     scale_restart,
@@ -266,29 +258,29 @@ inline std::wstring_view text(Text key, bool pt) {
           L"Já existe uma pasta de jogo interna. Remova a cópia importada nos Ajustes primeiro."},
          {L"More settings", L"Mais ajustes"},
          {L"Welcome", L"Boas-vindas"},
-         {L"Play your own Wii U copy of Breath of the Wild on Xbox.\nYou need your own Wii U dump of Breath "
-          L"of the Wild 1.5.0 (v208).",
-          L"Jogue sua cópia de Breath of the Wild do Wii U no Xbox.\nVocê precisa do seu próprio dump do Wii "
-          L"U de Breath of the Wild 1.5.0 (v208)."},
-         {L"How to get your game files", L"Como obter os arquivos do jogo"},
-         {L"On your Wii U, follow wiiu.hacks.guide to set up Aroma.\nThen install Dumpling and open it from "
-          L"the Wii U menu.",
-          L"No seu Wii U, siga wiiu.hacks.guide para configurar o Aroma.\nDepois instale o Dumpling e abra "
-          L"pelo menu do Wii U."},
-         {L"In Dumpling, choose Dump a game → Breath of the Wild.\nSelect Game, Update (1.5.0 / v208) and "
-          L"DLC, if you own it.",
-          L"No Dumpling, escolha Dump a game → Breath of the Wild.\nMarque Game, Update (1.5.0 / v208) e "
-          L"DLC, se você tiver."},
+         {L"Play your own Wii U copy of Breath of the Wild on Xbox.\nUse game files you already extracted "
+          L"and decrypted yourself, updated to 1.5.0 (v208).",
+          L"Jogue sua cópia de Breath of the Wild do Wii U no Xbox.\nUse os arquivos que você já extraiu e "
+          L"descriptografou, atualizados para 1.5.0 (v208)."},
+         {L"Prepare your game files", L"Prepare os arquivos do jogo"},
+         {L"Use a copy of the game you extracted yourself from your own Wii U.\nStart with a decrypted "
+          L"folder containing code/, content/ and meta/.",
+          L"Use uma cópia do jogo que você mesmo extraiu do seu próprio Wii U.\nComece com uma pasta "
+          L"descriptografada contendo code/, content/ e meta/."},
+         {L"Use your already extracted and decrypted base game and update 1.5.0 (v208).\nInclude your "
+          L"decrypted DLC if you own it; DLC is optional.",
+          L"Use o jogo base e a atualização 1.5.0 (v208) que você já extraiu e descriptografou.\nInclua seu "
+          L"DLC descriptografado se você o tiver; ele é opcional."},
          {L"Copy the base game, then copy the update over it, replacing files.\nKeep the DLC content/ as "
           L"aoc/, beside code/, content/ and meta/.",
           L"Copie o jogo base e depois a atualização por cima, substituindo arquivos.\nGuarde content/ do "
           L"DLC como aoc/, ao lado de code/, content/ e meta/."},
-         {L"Copy the merged folder to a USB drive as BotW/. Decrypted dumps need no keys.\nFor .wud/.wux on "
-          L"a PC: use otp.bin + game.key from your console.\nXbox can also extract encrypted images using "
-          L"those files on the same USB.",
-          L"Copie a pasta unida para o USB como BotW/. Dumps descriptografados não precisam de chaves.\nPara "
-          L".wud/.wux no PC: use otp.bin + game.key do seu console.\nO Xbox também extrai imagens "
-          L"criptografadas com esses arquivos no mesmo USB."},
+         {L"Copy the merged decrypted folder to a USB drive as BotW/.\nYou can also use a decrypted .wua or "
+          L"a .zip containing a decrypted folder. Extract .7z or an archive containing .wua on a PC "
+          L"first.\nKeep the USB drive connected during setup.",
+          L"Copie a pasta descriptografada unida para o USB como BotW/.\nVocê também pode usar um .wua "
+          L"descriptografado ou um .zip contendo uma pasta descriptografada. Extraia .7z ou um arquivo "
+          L"contendo .wua no PC primeiro.\nMantenha o USB conectado durante a configuração."},
          {L"Insert the USB drive with your game", L"Conecte o USB com seu jogo"},
          {L"Looking for your game… Keep the USB drive connected.",
           L"Buscando seu jogo… Mantenha o USB conectado."},
@@ -300,10 +292,10 @@ inline std::wstring_view text(Text key, bool pt) {
           L"O USB foi removido. Conecte novamente para continuar."},
          {L"That folder doesn't contain Breath of the Wild.", L"Essa pasta não contém o Breath of the Wild."},
          {L"Checking your game", L"Conferindo seu jogo"},
-         {L"This executable is not version 1.5.0 (v208).\nUpdate the game on your Wii U, dump the update "
-          L"again and merge it over the base game.",
-          L"Este executável não é da versão 1.5.0 (v208).\nAtualize o jogo no Wii U, faça o dump da "
-          L"atualização e copie por cima do jogo base."},
+         {L"This executable is not version 1.5.0 (v208).\nUse your already extracted and decrypted update "
+          L"1.5.0 (v208) and merge it over the base game.",
+          L"Este executável não é da versão 1.5.0 (v208).\nUse a atualização 1.5.0 (v208) que você já "
+          L"extraiu e descriptografou e copie por cima do jogo base."},
          {L"Where would you like to play?", L"Onde você quer jogar?"},
          {L"Play from the USB drive", L"Jogar pelo USB"},
          {L"Import to internal storage", L"Importar para o armazenamento interno"},
@@ -328,15 +320,6 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Preparing your game on the USB drive", L"Preparando seu jogo no USB"},
          {L"Copying your game", L"Copiando seu jogo"},
          {L"B: cancel · Keep the USB drive connected", L"B: cancelar · Mantenha o USB conectado"},
-         {L"Encrypted images need otp.bin (or common.key) and a disc key (game.key or keys.txt) on the same "
-          L"USB.\nGet otp.bin with Dumpling → Dump online files / console files; game.key comes with your "
-          L"disc dump.",
-          L"Imagens criptografadas precisam de otp.bin (ou common.key) e uma chave do disco (game.key ou "
-          L"keys.txt) no mesmo USB.\nObtenha otp.bin no Dumpling → Dump online files / console files; "
-          L"game.key vem com o dump do disco."},
-         {L"Missing or invalid otp.bin / common.key.", L"Falta otp.bin / common.key válido."},
-         {L"Missing or incorrect disc key: game.key / keys.txt.",
-          L"Falta a chave correta do disco: game.key / keys.txt."},
          {L"Unable to prepare the game. Check the USB, files and free space, then try again.",
           L"Não foi possível preparar o jogo. Confira o USB, os arquivos e o espaço livre e tente "
           L"novamente."},
@@ -350,9 +333,6 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Ⓐ Scan again  Ⓑ Back  Ⓧ What can I use? · ↑/↓ Scroll",
           L"Ⓐ Buscar novamente  Ⓑ Voltar  Ⓧ O que posso usar? · ↑/↓ Rolar"},
          {L"Copy this item from your own dump.", L"Copie este item do seu próprio dump."},
-         {L"Keys missing", L"Faltam chaves"},
-         {L"Keys missing — provide one of these exact key files from your own console.",
-          L"Faltam chaves — forneça um destes arquivos de chave do seu próprio console."},
          {L"wrong size — copy the complete file again",
           L"tamanho incorreto — copie o arquivo completo de novo"},
          {L"incomplete or unreadable — copy the complete file again",
@@ -361,19 +341,14 @@ inline std::wstring_view text(Text key, bool pt) {
          {L" is version v", L" é versão v"},
          {L"), needs v208 = 1.5.0: copy the update over the base game",
           L"), precisa de v208 = 1.5.0: copie a atualização sobre o jogo base"},
-         {L"Keys must come from your own Wii U console.",
-          L"As chaves devem vir do seu próprio console Wii U."},
-         {L"Unpacked folder: code/ + content/ + meta/ (+ optional aoc/). Decrypted; no keys.",
-          L"Pasta extraída: code/ + content/ + meta/ (+ aoc/ opcional). Descriptografada; sem chaves."},
-         {L".wud / .wux: disc image + game.key (or same basename .key / keys.txt) + otp.bin or common.key.",
-          L".wud / .wux: imagem do disco + game.key (ou mesmo nome .key / keys.txt) + otp.bin ou "
-          L"common.key."},
-         {L"Installable dump from your own console (Dumpling): title.tmd + title.tik + title.cert + every <id>.app (+ <id>.h3 for hashed contents).",
-          L"Dump instalável do seu próprio console (Dumpling): title.tmd + title.tik + title.cert + todos os <id>.app (+ <id>.h3 nos conteúdos com "
-          L"hash)."},
-         {L".wua: complete Cemu archive.", L".wua: arquivo completo do Cemu."},
-         {L".zip / .7z: complete archive containing any form above.",
-          L".zip / .7z: arquivo completo contendo qualquer formato acima."},
+         {L"Decrypted folder: code/ + content/ + meta/ (+ optional aoc/).",
+          L"Pasta descriptografada: code/ + content/ + meta/ (+ aoc/ opcional)."},
+         {L".wua: complete, already decrypted Cemu archive.",
+          L".wua: arquivo completo do Cemu, já descriptografado."},
+         {L".zip / .7z: archive containing a decrypted folder or .wua. Extract .7z or an archive containing "
+          L".wua on a PC first.",
+          L".zip / .7z: arquivo contendo uma pasta descriptografada ou .wua. Extraia .7z ou um arquivo "
+          L"contendo .wua no PC primeiro."},
          {L"next launch", L"próxima abertura"},
          {L"Unable to restart. Close and reopen the app to return to the launcher.",
           L"Não foi possível reiniciar. Feche e abra o app para voltar ao menu inicial."},

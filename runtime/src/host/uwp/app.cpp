@@ -18,7 +18,6 @@
 #include "host.h"
 #include "launcher.h"
 #include "mod_network.h"
-#include "qr.h"
 #include "quick_view.h"
 #include "recorder.h"
 #include "runtime.h"
@@ -130,69 +129,6 @@ std::optional<uwp::ArtImage> read_art(StorageFolder const &meta, wchar_t const *
     } catch (hresult_error const &) {
         return std::nullopt;
     }
-}
-
-template <class Operation> auto art_wait(Operation operation) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(4);
-    while (operation.Status() == AsyncStatus::Started) {
-        if (std::chrono::steady_clock::now() >= deadline) {
-            operation.Cancel();
-            throw hresult_canceled();
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    return operation.get();
-}
-std::optional<uwp::ArtImage> download_disc(StorageFolder const &local, StorageFolder const &game) {
-    try {
-        auto meta = child(game, L"meta");
-        auto identity = uwp::disc_identity(uwp::setup::read_text(meta, L"meta.xml"));
-        if (!identity)
-            return {};
-        auto cache = local.CreateFolderAsync(L"art", CreationCollisionOption::OpenIfExists).get();
-        if (uwp::setup::read_text(cache, L"disc-id.txt") == identity->id) {
-            if (auto image = read_art(cache, L"disc.png", true))
-                return image;
-        }
-        using namespace winrt::Windows::Web::Http;
-        using namespace winrt::Windows::Storage::Streams;
-        HttpClient client;
-        for (auto kind : {"discM", "disc"}) {
-            try {
-                auto url = "https://art.gametdb.com/wiiu/" + std::string(kind) + "/" + identity->region +
-                           "/" + identity->id + ".png";
-                auto response = art_wait(
-                    client.GetAsync(Uri(to_hstring(url)), HttpCompletionOption::ResponseHeadersRead));
-                if (response.StatusCode() != HttpStatusCode::Ok ||
-                    response.RequestMessage().RequestUri().SchemeName() != L"https")
-                    continue;
-                auto stream = art_wait(response.Content().ReadAsInputStreamAsync());
-                std::vector<uint8_t> bytes;
-                for (;;) {
-                    auto buffer =
-                        art_wait(stream.ReadAsync(Buffer(65536), 65536, InputStreamOptions::Partial));
-                    if (!buffer.Length())
-                        break;
-                    if (bytes.size() + buffer.Length() > uwp::art_byte_limit)
-                        throw hresult_invalid_argument();
-                    std::vector<uint8_t> chunk(buffer.Length());
-                    DataReader::FromBuffer(buffer).ReadBytes(chunk);
-                    bytes.insert(bytes.end(), chunk.begin(), chunk.end());
-                }
-                auto image = uwp::decode_art_png(bytes);
-                if (!image)
-                    continue;
-                auto file =
-                    cache.CreateFileAsync(L"disc.png", CreationCollisionOption::ReplaceExisting).get();
-                FileIO::WriteBytesAsync(file, bytes).get();
-                uwp::setup::write_text(cache, L"disc-id.txt", identity->id);
-                return image;
-            } catch (...) {
-            }
-        }
-    } catch (...) {
-    }
-    return {};
 }
 
 struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
@@ -767,10 +703,6 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 break;
             }
         }
-        if (decision.game) {
-            if (auto downloaded = download_disc(local, active_folder))
-                loaded_art.icon = std::move(downloaded);
-        }
         co_await resume_foreground(dispatcher);
         art = std::move(loaded_art);
         candidates = std::move(found);
@@ -1002,23 +934,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (choice >= 0)
                     state.next();
             } else if (state.step == Step::guide) {
-                const Text pages[] = {Text::guide_aroma, Text::guide_dump, Text::guide_merge,
+                const Text pages[] = {Text::guide_source, Text::guide_dump, Text::guide_merge,
                                       Text::guide_usb};
                 setup_page(Text::setup_guide,
-                           setup_label(pages[state.page]) +
-                               L"\n\nhttps://wiiu.hacks.guide/\nhttps://github.com/emiyl/dumpling\n\n" +
-                               std::to_wstring(state.page + 1) + L" / 4",
+                           setup_label(pages[state.page]) + L"\n\n" + std::to_wstring(state.page + 1) +
+                               L" / 4",
                            {setup_label(Text::setup_next)});
                 home.loading_text = setup_label(Text::guide_hints);
                 setup_guide = true;
-                const std::string url = "https://wiiu.hacks.guide/";
-                auto qr = qrcodegen::QrCode::encodeSegments(
-                    {qrcodegen::QrSegment::makeBytes(std::vector<uint8_t>(url.begin(), url.end()))},
-                    qrcodegen::QrCode::Ecc::MEDIUM, 1, 5, -1, false);
-                home.qr_modules.resize(qr.getSize(), std::vector<bool>(qr.getSize()));
-                for (int y = 0; y < qr.getSize(); ++y)
-                    for (int x = 0; x < qr.getSize(); ++x)
-                        home.qr_modules[y][x] = qr.getModule(x, y);
                 int choice = co_await setup_choice();
                 if (choice == -2 || choice == -3)
                     state.back();
@@ -1115,7 +1038,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                         kinds.push_back(kind);
                         item_rows.push_back(item);
                     };
-                    bool partial = false, keys_only = true;
+                    bool partial = false;
                     if (valid_items.empty()) {
                         row(setup_label(Text::select_game_folder),
                             setup_label(wrong_pick ? Text::wrong_folder : Text::game_not_found), -1, -2);
@@ -1125,32 +1048,23 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                     for (auto &d : diagnoses)
                         if (valid_items.empty() && d.incomplete()) {
                             partial = true;
-                            keys_only &= std::all_of(d.issues.begin(), d.issues.end(), [](auto &issue) {
-                                return issue.kind == uwp::setup::IssueKind::keys;
-                            });
                             row(to_hstring(d.source.empty() ? d.folder : d.folder + "/" + d.source).c_str(),
                                 L"");
                             for (auto &issue : d.issues)
                                 row(to_hstring(issue.path).c_str(), uwp::setup::issue_text(issue, pt),
                                     int(issue.kind));
-                            if (d.format == uwp::setup::Format::wud || d.format == uwp::setup::Format::wux)
-                                row(setup_label(Text::keys_missing), setup_label(Text::own_keys));
-                            else
-                                row(setup_label(Text::copy_missing) + std::wstring(to_hstring(d.folder)) +
-                                        setup_label(Text::copy_missing_end),
-                                    L"");
+                            row(setup_label(Text::copy_missing) + std::wstring(to_hstring(d.folder)) +
+                                    setup_label(Text::copy_missing_end),
+                                L"");
                         }
                     for (auto i : valid_items)
                         row(items[size_t(i)].name, std::wstring(items[size_t(i)].folder.Path()), -1, i);
                     if (valid_items.empty() && accepted_forms) {
-                        for (auto key : {Text::accepted_folder, Text::accepted_disc, Text::accepted_nus,
-                                         Text::accepted_wua, Text::accepted_archive})
+                        for (auto key : {Text::accepted_folder, Text::accepted_wua, Text::accepted_archive})
                             row(setup_label(key), L"");
                     }
                     bool diagnostics_mode = partial || (valid_items.empty() && accepted_forms);
-                    auto heading =
-                        setup_label(partial ? (keys_only ? Text::keys_missing : Text::files_missing)
-                                            : Text::setup_insert);
+                    auto heading = setup_label(partial ? Text::files_missing : Text::setup_insert);
                     auto detail = valid_items.empty()
                                       ? setup_label(wrong_pick ? Text::wrong_folder : Text::game_not_found)
                                       : L"";
@@ -1238,18 +1152,10 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                             setup_progress, true);
                     });
                     if (!setup_error.empty()) {
-                        Text message = setup_error.find("otp.bin") != std::string::npos ? Text::missing_common
-                                       : setup_error.find("disc key") != std::string::npos
-                                           ? Text::missing_disc
-                                       : setup_error == "USB space" ? Text::usb_space_insufficient
-                                                                    : Text::setup_failed;
+                        Text message =
+                            setup_error == "USB space" ? Text::usb_space_insufficient : Text::setup_failed;
                         if (setup_error != "cancelled") {
-                            setup_page(Text::setup_extract,
-                                       setup_label(message) +
-                                           ((message == Text::missing_common || message == Text::missing_disc)
-                                                ? L"\n\n" + setup_label(Text::setup_keys)
-                                                : L""),
-                                       {setup_label(Text::retry)});
+                            setup_page(Text::setup_extract, setup_label(message), {setup_label(Text::retry)});
                             if (selected.file && message == Text::setup_failed) {
                                 home.heading = setup_label(Text::files_missing);
                                 home.diagnostics_mode = true;
@@ -1259,7 +1165,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                         setup_label(Text::copy_missing_end)};
                                 home.issue_kinds = {-1, int(uwp::setup::IssueKind::incomplete), -1};
                                 home.issue_notes = {L"",
-                                                    setup_error == "Extract .7z on a PC"
+                                                    (setup_error == "Extract .7z on a PC" ||
+                                                     setup_error == "Extract archive containing .wua on a PC")
                                                         ? setup_label(Text::unsupported)
                                                         : setup_label(Text::fix_incomplete),
                                                     L""};

@@ -10,7 +10,7 @@
 #include <set>
 #include <tuple>
 namespace uwp::setup {
-enum class IssueKind { missing, wrong_size, version, title, incomplete, optional, keys };
+enum class IssueKind { missing, wrong_size, version, title, incomplete, optional };
 struct Issue {
     std::string path;
     IssueKind kind;
@@ -90,22 +90,6 @@ inline bool looks_unpacked(const Probe &p, const std::string &name) {
             auto bytes = r.bytes(0, size_t(r.size));
             auto id = title_id(std::string(bytes.begin(), bytes.end()));
             if (id && botw_title(*id))
-                return true;
-        } catch (...) {
-        }
-    }
-    return false;
-}
-inline bool looks_nus(const Probe &p, const std::string &name) {
-    if (looks_unpacked(p, name))
-        return true;
-    // NUS has binary title metadata rather than app.xml/meta.xml.
-    for (auto [path, offset] : {std::pair{"title.tik", 0x1dc}, std::pair{"title.tmd", 0x18c}}) {
-        try {
-            if (!p.file(path))
-                continue;
-            auto r = p.reader(path);
-            if (r.size >= unsigned(offset) + 8 && botw_title(formats::integer(r.bytes(offset, 8), 0, 8)))
                 return true;
         } catch (...) {
         }
@@ -212,36 +196,6 @@ inline Diagnosis diagnose(const Probe &p, std::string folder, Format format, con
         }
         if (!p.directory("aoc"))
             d.issues.push_back({"aoc/", IssueKind::optional});
-    } else if (format == Format::nus) {
-        need("title.tik");
-        need("title.cert");
-        try {
-            auto tmd = bytes("title.tmd", 8 * 1024 * 1024);
-            size_t count = size_t(formats::integer(tmd, 0x1de, 2));
-            formats::require(count && tmd.size() >= 0xb04 && count <= (tmd.size() - 0xb04) / 0x30,
-                             "Truncated TMD");
-            for (size_t i = 0; i < count; ++i) {
-                size_t at = 0xb04 + i * 0x30;
-                auto stem = hex_id(formats::integer(tmd, at, 4), 8);
-                auto size = p.file(stem + ".app");
-                if (!size)
-                    d.issues.push_back({stem + ".app", IssueKind::missing});
-                else if (*size != formats::integer(tmd, at + 8, 8))
-                    d.issues.push_back({stem + ".app", IssueKind::wrong_size});
-                if (formats::integer(tmd, at + 6, 2) & 2)
-                    need(stem + ".h3");
-            }
-        } catch (...) {
-            d.issues.push_back({"title.tmd", IssueKind::incomplete});
-        }
-    } else if (format == Format::wud || format == Format::wux) {
-        auto key = std::filesystem::path(name).replace_extension(".key").generic_string();
-        if (!p.file("game.key") && !p.file(key) && !p.file("keys.txt"))
-            d.issues.push_back(
-                {(key == "game.key" ? "game.key / keys.txt" : "game.key / " + key + " / keys.txt"),
-                 IssueKind::keys});
-        if (!p.file("otp.bin") && !p.file("common.key"))
-            d.issues.push_back({"otp.bin / common.key", IssueKind::keys});
     } else {
         try {
             auto r = p.reader(name);
@@ -286,7 +240,7 @@ inline bool title_member(std::string path) {
     std::string part;
     while (std::getline(parts, part, '/'))
         if (((part == "code" || part == "content" || part == "meta") && !parts.eof()) ||
-            part == "title.tmd" || part == "title.tik" || part == "title.cert" || part == "u-king.rpx")
+            part.ends_with(".wua") || part == "u-king.rpx")
             return true;
     return false;
 }
@@ -296,14 +250,6 @@ inline bool looks_like_title(const Probe &p, Format format, const std::string &n
     bool found = false;
     try {
         auto r = p.reader(name);
-        if (format == Format::wud)
-            return r.size == 0x5d3a00000ull;
-        if (format == Format::wux) {
-            auto h = r.bytes(0, 24);
-            return formats::integer(h, 0, 4, true) == 0x30585557 &&
-                   formats::integer(h, 4, 4, true) == 0x1099d02e &&
-                   formats::integer(h, 16, 8, true) == 0x5d3a00000ull;
-        }
         if (format == Format::zip) {
             (void)formats::zip(r, [&](auto &path) { found |= title_member(path); });
         } else if (format == Format::seven_zip) {
@@ -366,8 +312,7 @@ inline bool looks_like_title(const Probe &p, Format format, const std::string &n
     }
     return found;
 }
-// One bounded scan session owns this cache. Disc key checks stay live so copying
-// keys beside an unchanged image clears the issue immediately.
+// One bounded scan session owns this cache; archive size and timestamps invalidate entries.
 struct DiagnosticCache {
     struct Entry {
         uint64_t size;
@@ -399,15 +344,11 @@ struct DiagnosticCache {
         entry.seen = true;
         if (!entry.title)
             return {};
-        if (format == Format::wud || format == Format::wux)
-            return diagnose(p, folder, format, name);
         return entry.diagnosis;
     }
 };
 inline std::wstring issue_text(const Issue &i, bool pt) {
     auto t = [pt](Text k) { return std::wstring(text(k, pt)); };
-    if (i.kind == IssueKind::keys)
-        return t(Text::fix_keys);
     if (i.kind == IssueKind::optional)
         return t(Text::dlc_optional);
     if (i.kind == IssueKind::version) {
@@ -457,10 +398,9 @@ inline std::vector<Diagnosis> diagnose_tree(const std::filesystem::path &root) {
     std::vector<Diagnosis> result;
     std::function<void(std::filesystem::path, unsigned)> visit = [&](auto dir, unsigned depth) {
         auto p = filesystem_probe(dir);
-        bool nus = p.file("title.tmd").has_value() && looks_nus(p, dir.filename().string());
         bool unpacked = looks_unpacked(p, dir.filename().string());
-        if (nus || unpacked)
-            result.push_back(diagnose(p, dir.generic_string(), nus ? Format::nus : Format::folder));
+        if (unpacked)
+            result.push_back(diagnose(p, dir.generic_string(), Format::folder));
         std::error_code ec;
         for (auto &e : std::filesystem::directory_iterator(
                  dir, std::filesystem::directory_options::skip_permission_denied, ec)) {
@@ -470,7 +410,7 @@ inline std::vector<Diagnosis> diagnose_tree(const std::filesystem::path &root) {
                 if (auto f = file_format(e.path().extension().string());
                     f && looks_like_title(p, *f, e.path().filename().string()))
                     result.push_back(diagnose(p, dir.generic_string(), *f, e.path().filename().string()));
-            } else if (!nus && depth < kSearchDepth && e.is_directory(ec)) {
+            } else if (depth < kSearchDepth && e.is_directory(ec)) {
                 auto name = e.path().filename().string();
                 if (!unpacked || (name != "code" && name != "content" && name != "meta" && name != "aoc"))
                     visit(e.path(), depth + 1);

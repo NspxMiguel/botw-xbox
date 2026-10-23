@@ -31,25 +31,6 @@ template <class F> void rejects(F f) {
     }
     assert(rejected);
 }
-Bytes fst(std::string name, uint64_t size, uint16_t index = 0, bool hashed = false) {
-    Bytes b(0x20 + 0x20 * (index + 1) + 32 + name.size() + 2);
-    put(b, 0, 0x46535400);
-    put(b, 4, 1);
-    put(b, 8, index + 1);
-    for (unsigned i = 0; i <= index; ++i) {
-        put(b, 0x20 + i * 0x20, 2);
-        put(b, 0x24 + i * 0x20, hashed ? 2 : 1);
-        put(b, 0x34 + i * 0x20, hashed ? 2 : 0, 1);
-    }
-    size_t tree = 0x20 + 0x20 * (index + 1);
-    put(b, tree, 0x01000000);
-    put(b, tree + 8, 2);
-    put(b, tree + 16, 1);
-    put(b, tree + 24, size);
-    put(b, tree + 30, index, 2);
-    std::copy(name.begin(), name.end(), b.begin() + tree + 33);
-    return b;
-}
 void hashes() {
     std::string abc = "abc";
     auto data = reinterpret_cast<const uint8_t *>(abc.data());
@@ -62,240 +43,7 @@ void hashes() {
     Bytes million(1000000, 'a');
     assert(packs::sha256_bytes(million.data(), million.size()) ==
            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
-    Key key{}, iv{};
-    for (unsigned i = 0; i < 16; ++i) {
-        key[i] = uint8_t(i);
-        iv[i] = uint8_t(15 - i);
-    }
-    Bytes plain(256);
-    for (unsigned i = 0; i < 256; ++i)
-        plain[i] = uint8_t(i);
-    assert(aes_cbc(key, iv, aes_cbc(key, iv, plain, true)) == plain);
-    // NIST SP800-38A, unrelated public test key, never Wii U key material.
-    auto nist = *hex_key("2b7e151628aed2a6abf7158809cf4f3c");
-    auto vector_iv = *hex_key("000102030405060708090a0b0c0d0e0f");
-    auto vector_plain = *hex_key("6bc1bee22e409f96e93d7e117393172a");
-    auto vector_cipher = *hex_key("7649abac8119b246cee98e9b12e9197d");
-    assert(aes_cbc(nist, vector_iv, vector_plain, true) == Bytes(vector_cipher.begin(), vector_cipher.end()));
-    std::string keys = " # ignored\n000102030405060708090a0b0c0d0e0f # "
-                       "synthetic\ninvalid\nffffffffffffffffffffffffffffffff\r\n";
-    auto parsed = parse_keys(std::span(reinterpret_cast<const uint8_t *>(keys.data()), keys.size()), false);
-    assert(parsed.size() == 2 && parsed[0] == key);
-    assert(!hex_key("not a key"));
-    assert(!parse_common(Bytes(1024)));
-    assert(!parse_common(Bytes(16)));
-    assert(!parse_common(Bytes(1023)));
-    Bytes otp(1024);
-    copy(otp, 0xe0, key);
-    assert(!parse_common(otp));
-    auto synthetic_digest = packs::sha256_bytes(key.data(), key.size());
-    assert(parse_common(otp, synthetic_digest) == key);
-    otp[0xe1] ^= 1;
-    assert(!parse_common(otp, synthetic_digest));
-    // Positive OTP parsing uses a synthetic digest; no production common key is present.
-    std::cout << "PASS: shared streaming SHA-256, AES-CBC NIST vector, keys.txt, wrong otp.bin rejected\n";
-}
-void wux_test() {
-    Bytes image(64 + 3 * 64);
-    put(image, 0, 0x30585557, 4, true);
-    put(image, 4, 0x1099d02e, 4, true);
-    put(image, 8, 64, 4, true);
-    put(image, 16, 192, 8, true);
-    put(image, 32, 1, 4, true);
-    put(image, 36, 0, 4, true);
-    put(image, 40, 1, 4, true);
-    std::fill(image.begin() + 64, image.begin() + 128, 'a');
-    std::fill(image.begin() + 128, image.begin() + 192, 'b');
-    auto reader = disc_reader(memory_reader(image));
-    auto data = reader.bytes(60, 72);
-    assert(data.size() == 72);
-    assert(data[0] == 'b' && data[4] == 'a' && data[68] == 'b');
-    put(image, 32, 99, 4, true);
-    rejects([&] { disc_reader(memory_reader(image)); });
-    std::cout << "PASS: WUX index, deduplication, cross-sector and invalid index\n";
-}
-void wud_test() {
-    Key disc{}, common{}, title{};
-    disc[0] = 0x42;
-    common[0] = 0x24;
-    title[0] = 0x81;
-    Bytes image(0xa0000);
-    put(image, 0x10000, 0xcc549eb9);
-    Bytes pt(0x8000);
-    put(pt, 0, 0xcca6e67b);
-    put(pt, 0x1c, 2);
-    pt[0x800] = 'S';
-    pt[0x801] = 'I';
-    put(pt, 0x820, 4);
-    pt[0x880] = 'G';
-    pt[0x881] = 'M';
-    put(pt, 0x8a0, 12);
-    copy(image, 0x18000, aes_cbc(disc, {}, pt, true));
-    Bytes ticket(0x350);
-    ticket[0x1dc] = 0x12;
-    ticket[0x1e3] = 0x34;
-    Key iv{};
-    std::copy_n(ticket.begin() + 0x1dc, 8, iv.begin());
-    copy(ticket, 0x1bf, aes_cbc(common, iv, title, true));
-    auto si_fst = fst("title.tik", ticket.size());
-    // SI directory 01/title.tik.
-    size_t tree = 0x40;
-    si_fst.resize(0x40 + 48 + 14);
-    put(si_fst, tree + 8, 3);
-    put(si_fst, tree + 16, 0x01000001);
-    put(si_fst, tree + 20, 0);
-    put(si_fst, tree + 24, 3);
-    put(si_fst, tree + 32, 4);
-    put(si_fst, tree + 36, 0);
-    put(si_fst, tree + 40, ticket.size());
-    put(si_fst, tree + 46, 0, 2);
-    std::fill(si_fst.begin() + tree + 48, si_fst.end(), 0);
-    std::string names("\0"
-                      "01\0title.tik\0",
-                      14);
-    std::copy(names.begin(), names.end(), si_fst.begin() + tree + 48);
-    Bytes payload(300);
-    for (size_t i = 0; i < payload.size(); ++i)
-        payload[i] = uint8_t(i);
-    auto make_volume = [&](size_t base, Bytes f, Key key, Bytes data, bool hashed) {
-        put(image, base, 0xcc93a4f5);
-        put(image, base + 0x14, f.size());
-        put(image, base + 0x18, 1);
-        f.resize((f.size() + 15) / 16 * 16);
-        copy(image, base + 0x8000, aes_cbc(key, {}, f, true));
-        if (hashed) {
-            Bytes block(0xfc00);
-            copy(block, 0, data);
-            Bytes hashes(0x400);
-            auto digest = sha1(block);
-            copy(hashes, 0, digest);
-            Key block_iv{};
-            std::copy_n(digest.begin(), 16, block_iv.begin());
-            copy(image, base + 0x10000, aes_cbc(key, {}, hashes, true));
-            copy(image, base + 0x10400, aes_cbc(key, block_iv, block, true));
-        } else {
-            data.resize(0x8000);
-            copy(image, base + 0x10000, aes_cbc(key, {}, data, true));
-        }
-    };
-    make_volume(0x20000, si_fst, disc, ticket, false);
-    for (bool hashed : {false, true}) {
-        auto gm_fst = fst("sample.bin", payload.size(), 0, hashed);
-        make_volume(0x60000, gm_fst, title, payload, hashed);
-        auto entries = wud(memory_reader(image), disc, common);
-        assert(entries.size() == 1 && entries[0].path == "sample.bin" && output(entries[0]) == payload);
-    }
-    Bytes packed(0x8000);
-    put(packed, 0, 0x30585557, 4, true);
-    put(packed, 4, 0x1099d02e, 4, true);
-    put(packed, 8, 0x8000, 4, true);
-    put(packed, 16, image.size(), 8, true);
-    std::vector<Bytes> sectors;
-    for (size_t p = 0; p < image.size(); p += 0x8000) {
-        Bytes sector(image.begin() + p, image.begin() + p + 0x8000);
-        auto existing = std::find(sectors.begin(), sectors.end(), sector);
-        size_t index = size_t(existing - sectors.begin());
-        if (existing == sectors.end())
-            sectors.push_back(std::move(sector));
-        put(packed, 32 + p / 0x8000 * 4, index, 4, true);
-    }
-    for (auto &sector : sectors)
-        packed.insert(packed.end(), sector.begin(), sector.end());
-    auto from_wux = wud(memory_reader(packed), disc, common);
-    assert(output(from_wux.at(0)) == payload);
-    rejects([&] { wud(memory_reader(image), Key{}, common); });
-    std::cout << "PASS: synthetic encrypted WUD partition table, SI ticket, GM raw and hashed clusters\n";
-}
-void fst_links_test() {
-    // Update links refer to base files, even when their offsets fit a patch cluster.
-    Bytes table(0x40 + 6 * 16);
-    put(table, 0, 0x46535400);
-    put(table, 4, 1);
-    put(table, 8, 1);
-    auto entry = [&](size_t index, uint8_t type, const std::string &name, uint32_t offset, uint32_t size) {
-        size_t p = 0x40 + index * 16;
-        put(table, p, (uint32_t(type) << 24) | uint32_t(table.size() - 0x40 - 6 * 16));
-        put(table, p + 4, offset);
-        put(table, p + 8, size);
-        table.insert(table.end(), name.begin(), name.end());
-        table.push_back(0);
-    };
-    entry(0, 1, "", 0, 6);
-    entry(1, 0x80, "base.bin", 0, 4);
-    entry(2, 0x81, "inherited", 0, 5);
-    entry(3, 0x80, "child.bin", 0xffffffff, 4);
-    entry(4, 0, "patched.bin", 0, 4);
-    entry(5, 0, "root.bin", 0, 4);
-    Bytes patch{'n', 'e', 'w', '!'};
-    unsigned readers = 0;
-    auto entries = Fst(table).entries([&](uint16_t cluster) {
-        assert(cluster == 0);
-        ++readers;
-        return memory_reader(patch);
-    });
-    assert(readers == 2 && entries.size() == 2);
-    assert(entries[0].path == "inherited/patched.bin" && output(entries[0]) == patch);
-    assert(entries[1].path == "root.bin" && output(entries[1]) == patch);
-    std::cout << "PASS: FST update links preserve base files and directory traversal\n";
-}
-void nus_test() {
-    Key common{}, title{};
-    common[2] = 1;
-    title[3] = 2;
-    Bytes ticket(0x350);
-    ticket[0x1dc] = 1;
-    Key iv{};
-    iv[0] = 1;
-    copy(ticket, 0x1bf, aes_cbc(common, iv, title, true));
-    Bytes payload{'h', 'e', 'l', 'l', 'o'};
-    auto table = fst("test.bin", payload.size(), 1);
-    table.resize((table.size() + 15) / 16 * 16);
-    Bytes tmd(0xb04 + 96);
-    put(tmd, 0x1de, 2, 2);
-    put(tmd, 0xb04, 0xaa);
-    put(tmd, 0xb04 + 8, table.size(), 8);
-    put(tmd, 0xb34, 0xbb);
-    put(tmd, 0xb34 + 4, 1, 2);
-    put(tmd, 0xb34 + 8, payload.size(), 8);
-    auto first = aes_cbc(title, {}, table, true);
-    Bytes padded = payload;
-    padded.resize(16);
-    iv = {};
-    iv[1] = 1;
-    auto second = aes_cbc(title, iv, padded, true);
-    auto entries = nus(tmd, ticket, common,
-                       [&](auto name) { return memory_reader(name == "000000aa.app" ? first : second); });
-    assert(entries.size() == 1 && output(entries[0]) == payload);
-    // A hashed .app validates H0 -> H1 -> H2 -> external .h3.
-    Bytes block(0xfc00);
-    copy(block, 0, payload);
-    Bytes hashes(0x400);
-    copy(hashes, 0, sha1(block));
-    copy(hashes, 0x140, sha1(std::span(hashes).first(0x140)));
-    copy(hashes, 0x280, sha1(std::span(hashes).subspan(0x140, 0x140)));
-    auto top = sha1(std::span(hashes).subspan(0x280, 0x140));
-    Bytes h3(top.begin(), top.end());
-    Key block_iv{};
-    std::copy_n(hashes.begin(), 16, block_iv.begin());
-    auto hashed = aes_cbc(title, {}, hashes, true);
-    auto cipher = aes_cbc(title, block_iv, block, true);
-    hashed.insert(hashed.end(), cipher.begin(), cipher.end());
-    put(tmd, 0xb34 + 6, 2, 2);
-    put(tmd, 0xb34 + 8, hashed.size(), 8);
-    auto open = [&](const std::string &name) {
-        if (name == "000000aa.app")
-            return memory_reader(first);
-        if (name == "000000bb.h3")
-            return memory_reader(h3);
-        return memory_reader(hashed);
-    };
-    entries = nus(tmd, ticket, common, open);
-    assert(output(entries.at(0)) == payload);
-    h3[0] ^= 1;
-    entries = nus(tmd, ticket, common, open);
-    rejects([&] { output(entries.at(0)); });
-    std::cout << "PASS: NUS synthetic ticket, content-index IV, hashed .app + .h3 hierarchy and corruption "
-                 "rejection\n";
+    std::cout << "PASS: shared streaming SHA-256\n";
 }
 void wua_test() {
     Bytes data(65536);
@@ -430,24 +178,21 @@ void setup_test() {
     fs::create_directories(root / "one/Zelda/content");
     fs::create_directories(root / "one/Zelda/meta");
     std::ofstream(root / "one/Zelda/code/U-King.rpx") << "synthetic";
-    fs::create_directories(root / "install");
-    std::ofstream(root / "install/title.tmd") << "test";
-    std::ofstream(root / "install/title.tik") << "test";
-    for (auto ext : {".wua", ".wud", ".wux", ".zip", ".7z"})
+    for (auto ext : {".wua", ".zip", ".7z"})
         std::ofstream(root / (std::string("game") + ext)) << "synthetic";
     fs::create_directories(root / "a/b/c/deep/too-deep");
-    std::ofstream(root / "a/b/c/deep/found.wux") << "x";
-    std::ofstream(root / "a/b/c/deep/too-deep/ignored.wux") << "x";
+    std::ofstream(root / "a/b/c/deep/found.wua") << "x";
+    std::ofstream(root / "a/b/c/deep/too-deep/ignored.wua") << "x";
     auto found = detect(root);
-    assert(found.size() == 8);
+    assert(found.size() == 5);
     assert(std::any_of(found.begin(), found.end(),
-                       [](auto &item) { return item.path.filename() == "found.wux"; }));
+                       [](auto &item) { return item.path.filename() == "found.wua"; }));
     assert(std::none_of(found.begin(), found.end(),
-                        [](auto &item) { return item.path.filename() == "ignored.wux"; }));
+                        [](auto &item) { return item.path.filename() == "ignored.wua"; }));
     std::set<Format> formats;
     for (auto &item : found)
         formats.insert(item.format);
-    assert(formats.size() == 7);
+    assert(formats.size() == 4);
     fs::remove_all(root);
     assert(title_version("<app><title_version type=\"hexBinary\">0061</title_version></app>") == 97);
     assert(title_version("<title_version> 0x00d0 </title_version>") == 208);
@@ -501,7 +246,7 @@ void setup_test() {
 }
 void qr_test() {
     // Force byte-mode ECC M, mask 0 for a stable known vector; verify payload bits below.
-    const std::string value = "https://wiiu.hacks.guide/";
+    const std::string value = "https://example.com/help";
     auto qr = qrcodegen::QrCode::encodeSegments(
         {qrcodegen::QrSegment::makeBytes(Bytes(value.begin(), value.end()))}, qrcodegen::QrCode::Ecc::MEDIUM,
         1, 5, 0, false);
@@ -568,10 +313,6 @@ void qr_test() {
 }
 int main() {
     hashes();
-    wux_test();
-    wud_test();
-    fst_links_test();
-    nus_test();
     wua_test();
     zip_test();
     setup_test();

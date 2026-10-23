@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: MIT
 #pragma once
-#include "crypto.h"
+#include "../../../packs/sha256.h"
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdint>
 #include <functional>
 #include <limits>
 #include <map>
 #include <memory>
 #include <set>
+#include <span>
+#include <stdexcept>
 #include <string>
+#include <string_view>
+#include <vector>
 #include <zlib.h>
 #include <zstd.h>
 namespace uwp::formats {
+using Bytes = std::vector<uint8_t>;
 inline void require(bool valid, const char *message) {
     if (!valid)
         throw std::runtime_error(message);
@@ -90,96 +99,6 @@ inline void validate_entries(const std::vector<Entry> &entries) {
         total += entry.size;
     }
 }
-inline Reader disc_reader(Reader raw) {
-    if (raw.size < 32)
-        return raw;
-    auto header = raw.bytes(0, 32);
-    if (integer(header, 0, 4, true) != 0x30585557 || integer(header, 4, 4, true) != 0x1099d02e)
-        return raw;
-    uint64_t sector = integer(header, 8, 4, true), size = integer(header, 16, 8, true);
-    require(sector >= 16 && sector <= 16 * 1024 * 1024 && (sector & (sector - 1)) == 0,
-            "Invalid WUX sector size");
-    require(size > 0 && size <= 128ull * 1024 * 1024 * 1024, "Invalid WUX image size");
-    uint64_t count = (size + sector - 1) / sector;
-    require(count <= 16 * 1024 * 1024, "WUX index too large");
-    auto table = raw.bytes(32, size_t(count * 4));
-    uint64_t base = (32 + count * 4 + sector - 1) / sector * sector;
-    for (size_t i = 0; i < count; ++i) {
-        uint64_t off = base + integer(table, i * 4, 4, true) * sector;
-        require(off <= raw.size && sector <= raw.size - off, "Invalid WUX sector index");
-    }
-    return {
-        size, [raw, table = std::move(table), sector, base, size](uint64_t offset, std::span<uint8_t> out) {
-            require(offset <= size && out.size() <= size - offset, "Read outside WUX");
-            while (!out.empty()) {
-                size_t n = size_t(std::min<uint64_t>(out.size(), sector - offset % sector));
-                auto chunk = raw.bytes(base + integer(table, size_t(offset / sector * 4), 4, true) * sector +
-                                           offset % sector,
-                                       n);
-                std::copy(chunk.begin(), chunk.end(), out.begin());
-                out = out.subspan(n);
-                offset += n;
-            }
-        }};
-}
-inline Reader decrypted_cluster(Reader encrypted, Key key, uint16_t index, bool hashed, Bytes h3 = {}) {
-    if (!hashed)
-        return {encrypted.size, [encrypted, key, index](uint64_t offset, std::span<uint8_t> out) {
-                    require(offset <= encrypted.size && out.size() <= encrypted.size - offset,
-                            "Cluster overflow");
-                    while (!out.empty()) {
-                        uint64_t start = offset / 16 * 16;
-                        size_t count = size_t(std::min<uint64_t>(out.size() + offset % 16, 1024 * 1024));
-                        count = (count + 15) / 16 * 16;
-                        Key iv{};
-                        iv[0] = uint8_t(index >> 8);
-                        iv[1] = uint8_t(index);
-                        if (start) {
-                            auto prev = encrypted.bytes(start - 16, 16);
-                            std::copy(prev.begin(), prev.end(), iv.begin());
-                        }
-                        auto data = aes_cbc(key, iv, encrypted.bytes(start, count));
-                        size_t n = std::min(out.size(), data.size() - size_t(offset - start));
-                        std::copy_n(data.begin() + (offset - start), n, out.begin());
-                        out = out.subspan(n);
-                        offset += n;
-                    }
-                }};
-    require(encrypted.size % 0x10000 == 0, "Truncated hashed content");
-    return {
-        encrypted.size / 0x10000 * 0xfc00,
-        [encrypted, key, h3 = std::move(h3)](uint64_t offset, std::span<uint8_t> out) {
-            while (!out.empty()) {
-                uint64_t block = offset / 0xfc00;
-                auto raw = encrypted.bytes(block * 0x10000, 0x10000);
-                auto hashes = aes_cbc(key, {}, std::span(raw).first(0x400));
-                Key iv{};
-                std::copy_n(hashes.begin() + (block % 16) * 20, 16, iv.begin());
-                auto data = aes_cbc(key, iv, std::span(raw).subspan(0x400));
-                if (!h3.empty()) {
-                    auto h1 = sha1(std::span(hashes).first(0x140));
-                    auto h2 = sha1(std::span(hashes).subspan(0x140, 0x140));
-                    auto top = sha1(std::span(hashes).subspan(0x280, 0x140));
-                    require(std::equal(h1.begin(), h1.end(), hashes.begin() + 0x140 + (block / 16 % 16) * 20),
-                            "Content H1 mismatch");
-                    require(
-                        std::equal(h2.begin(), h2.end(), hashes.begin() + 0x280 + (block / 256 % 16) * 20),
-                        "Content H2 mismatch");
-                    require(block / 4096 * 20 <= h3.size() && 20 <= h3.size() - size_t(block / 4096 * 20),
-                            "Truncated .h3");
-                    require(std::equal(top.begin(), top.end(), h3.begin() + block / 4096 * 20),
-                            "Content H3 mismatch");
-                }
-                auto digest = sha1(data);
-                require(std::equal(digest.begin(), digest.end(), hashes.begin() + (block % 16) * 20),
-                        "Content H0 mismatch");
-                size_t within = size_t(offset % 0xfc00), n = std::min(out.size(), data.size() - within);
-                std::copy_n(data.begin() + within, n, out.begin());
-                out = out.subspan(n);
-                offset += n;
-            }
-        }};
-}
 inline void stream_range(const Reader &reader, uint64_t offset, uint64_t size, const Sink &sink) {
     while (size) {
         size_t n = size_t(std::min<uint64_t>(size, 1024 * 1024));
@@ -188,179 +107,6 @@ inline void stream_range(const Reader &reader, uint64_t offset, uint64_t size, c
         offset += n;
         size -= n;
     }
-}
-struct Fst {
-    struct Cluster {
-        uint64_t sector, size;
-        uint8_t mode;
-    };
-    std::vector<Cluster> clusters;
-    struct File {
-        std::string path;
-        uint64_t offset, size;
-        uint16_t cluster;
-    };
-    std::vector<File> files;
-    explicit Fst(std::span<const uint8_t> bytes) {
-        require(integer(bytes, 0, 4) == 0x46535400, "Invalid FST (wrong key?)");
-        uint64_t factor = integer(bytes, 4, 4), count = integer(bytes, 8, 4);
-        require(factor && factor <= 0x10000 && count <= 65536, "Invalid FST clusters");
-        for (size_t i = 0; i < count; ++i) {
-            size_t p = 0x20 + i * 0x20;
-            clusters.push_back(
-                {integer(bytes, p, 4), integer(bytes, p + 4, 4), uint8_t(integer(bytes, p + 0x14, 1))});
-        }
-        size_t tree = 0x20 + size_t(count) * 0x20;
-        size_t entries = size_t(integer(bytes, tree + 8, 4));
-        require(entries > 0 && entries <= 200000 && tree <= bytes.size() &&
-                    entries <= (bytes.size() - tree) / 16,
-                "Invalid FST entries");
-        size_t names = tree + entries * 16;
-        struct Parent {
-            size_t end;
-            std::string path;
-        };
-        std::vector<Parent> parents{{entries, ""}};
-        for (size_t i = 1; i < entries; ++i) {
-            while (!parents.empty() && i >= parents.back().end)
-                parents.pop_back();
-            require(!parents.empty(), "Invalid FST hierarchy");
-            size_t p = tree + i * 16;
-            uint64_t type = integer(bytes, p, 4);
-            size_t name = names + size_t(type & 0xffffff), end = name;
-            require(name < bytes.size(), "Invalid FST name");
-            while (end < bytes.size() && bytes[end])
-                ++end;
-            require(end < bytes.size(), "Unterminated FST name");
-            std::string component(reinterpret_cast<const char *>(bytes.data() + name), end - name);
-            require(component.find('/') == component.npos && safe_path(component), "Unsafe FST name");
-            auto path = parents.back().path + component;
-            uint64_t offset = integer(bytes, p + 4, 4), size = integer(bytes, p + 8, 4);
-            if ((type >> 24) & 1) {
-                require(size > i && size <= parents.back().end, "Invalid FST directory");
-                parents.push_back({size, path + "/"});
-            } else {
-                // Update links inherit the base file; their offsets are not patch data.
-                if (type & 0x80000000)
-                    continue;
-                uint16_t cluster = uint16_t(integer(bytes, p + 14, 2));
-                require(cluster < clusters.size(), "Invalid FST cluster");
-                files.push_back({path, offset * factor, size, cluster});
-            }
-        }
-    }
-    std::vector<Entry> entries(const std::function<Reader(uint16_t)> &cluster_reader) const {
-        std::vector<Entry> result;
-        for (auto &file : files) {
-            auto reader = cluster_reader(file.cluster);
-            require(file.offset <= reader.size && file.size <= reader.size - file.offset,
-                    "FST file outside cluster");
-            result.push_back(
-                {file.path, file.size, [reader, offset = file.offset, size = file.size](const Sink &sink) {
-                     stream_range(reader, offset, size, sink);
-                 }});
-        }
-        validate_entries(result);
-        return result;
-    }
-};
-inline std::vector<Entry> wud(Reader raw, Key disc, Key common) {
-    auto image = disc_reader(std::move(raw));
-    require(integer(image.bytes(0x10000, 4), 0, 4) == 0xcc549eb9, "Invalid WUD header");
-    auto table = aes_cbc(disc, {}, image.bytes(0x18000, 0x8000));
-    require(integer(table, 0, 4) == 0xcca6e67b, "Wrong disc key");
-    size_t count = size_t(integer(table, 0x1c, 4));
-    require(count <= 240, "Invalid partition count");
-    uint64_t si = 0, gm = 0;
-    size_t gm_index = 0;
-    for (size_t i = 0; i < count; ++i) {
-        size_t p = 0x800 + i * 0x80;
-        auto base = integer(table, p + 0x20, 4) * 0x8000;
-        if (table[p] == 'S' && table[p + 1] == 'I')
-            si = base;
-        if (table[p] == 'G' && table[p + 1] == 'M' && !gm) {
-            gm = base;
-            gm_index = i;
-        }
-    }
-    require(si && gm, "Missing SI/GM partition");
-    auto volume = [image](uint64_t base, Key key) {
-        auto header = image.bytes(base, 0x40);
-        require(integer(header, 0, 4) == 0xcc93a4f5, "Invalid partition header");
-        size_t size = size_t(integer(header, 0x14, 4));
-        uint64_t offset = integer(header, 0x18, 4) * 0x8000;
-        require(size > 0 && size <= 64 * 1024 * 1024, "Invalid FST size");
-        auto plain = aes_cbc(key, {}, image.bytes(base + offset, (size + 15) / 16 * 16));
-        plain.resize(size);
-        Fst fst(plain);
-        return fst.entries([image, base, key, clusters = fst.clusters](uint16_t index) {
-            auto cluster = clusters.at(index);
-            uint64_t offset = base + cluster.sector * 0x8000, size = cluster.size * 0x8000;
-            require(offset <= image.size && size <= image.size - offset, "Cluster outside disc");
-            require(cluster.mode <= 2, "Unsupported cluster hash mode");
-            Reader raw{size, [image, offset](uint64_t pos, std::span<uint8_t> out) {
-                           image.read(offset + pos, out);
-                       }};
-            return decrypted_cluster(raw, key, index, cluster.mode == 2);
-        });
-    };
-    auto system = volume(si, disc);
-    char hex[] = "0123456789abcdef";
-    std::string ticket_path;
-    ticket_path += hex[(gm_index >> 4) & 15];
-    ticket_path += hex[gm_index & 15];
-    ticket_path += "/title.tik";
-    Bytes ticket;
-    for (auto &file : system)
-        if (file.path == ticket_path) {
-            require(file.size < 1024 * 1024, "Ticket too large");
-            file.extract([&](auto data) { ticket.insert(ticket.end(), data.begin(), data.end()); });
-        }
-    return volume(gm, ticket_key(ticket, common));
-}
-// NUS content records are SHA-1 signed by the title metadata; encrypted bytes are never persisted internally.
-inline std::vector<Entry> nus(const Bytes &tmd, const Bytes &ticket, Key common,
-                              const std::function<Reader(const std::string &)> &open) {
-    auto key = ticket_key(ticket, common);
-    require(tmd.size() >= 0xb04, "Truncated title.tmd");
-    size_t count = size_t(integer(tmd, 0x1de, 2));
-    require(count > 0 && count <= 65535 && count <= (tmd.size() - 0xb04) / 48, "Invalid NUS content table");
-    struct Content {
-        uint32_t id;
-        uint16_t index, type;
-        uint64_t size;
-    };
-    std::vector<Content> contents;
-    for (size_t i = 0; i < count; ++i) {
-        size_t p = 0xb04 + i * 48;
-        contents.push_back({uint32_t(integer(tmd, p, 4)), uint16_t(integer(tmd, p + 4, 2)),
-                            uint16_t(integer(tmd, p + 6, 2)), integer(tmd, p + 8, 8)});
-    }
-    std::map<uint16_t, Reader> readers;
-    for (auto content : contents) {
-        char name[16];
-        std::snprintf(name, sizeof(name), "%08x.app", content.id);
-        auto encrypted = open(name);
-        bool hashed = (content.type & 2) != 0;
-        Bytes h3;
-        if (hashed) {
-            std::snprintf(name, sizeof(name), "%08x.h3", content.id);
-            auto hashes = open(name);
-            require(hashes.size > 0 && hashes.size <= 8 * 1024 * 1024, "Invalid .h3 size");
-            h3 = hashes.bytes(0, size_t(hashes.size));
-        }
-        auto plain = decrypted_cluster(encrypted, key, content.index, hashed, std::move(h3));
-        require(content.size <= encrypted.size, "Truncated NUS content");
-        readers.emplace(content.index, std::move(plain));
-    }
-    require(readers.contains(0), "Missing NUS FST content");
-    auto &fst_reader = readers.at(0);
-    require(fst_reader.size <= 64 * 1024 * 1024, "NUS FST too large");
-    Fst fst(fst_reader.bytes(0, size_t(fst_reader.size)));
-    return fst.entries([&](uint16_t index) {
-        require(readers.contains(index), "Missing .app content");
-        return readers.at(index);
-    });
 }
 // ZArchive v1 layout: https://github.com/Exzap/ZArchive (MIT-0).
 // Footer and 16-entry compression offset records are always big endian.

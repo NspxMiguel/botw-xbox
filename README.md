@@ -41,7 +41,11 @@ estimate, not a promise.
 ## Building
 
 See [docs/CI.md](docs/CI.md). CI builds only the game-free runtime. Recompiling the game happens on
-your own computer from your own dump; the generated code and the resulting package must stay there.
+your own computer from your own already extracted and decrypted dump; the generated code and the
+resulting package must stay there. Setup accepts decrypted `code/`, `content/`, `meta/` folders,
+already decrypted `.wua` archives and `.zip` folders. Extract `.7z` or an archive containing `.wua`
+on a PC first. Base + update 1.5.0 (v208) + optional DLC merging and USB auto-detection are supported.
+Launcher artwork comes from your dump's `meta/` files, with a local fallback.
 
 ## Credits and license
 

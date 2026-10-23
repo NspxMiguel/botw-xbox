@@ -130,8 +130,13 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
     g_user_root = user;
     LOG("prepare_runtime: game=%s user=%s", game.c_str(), user.c_str());
     // LocalState/latte-profile.txt turns the Latte profiler on (it reads its switch from the environment).
-    if (std::filesystem::exists(std::filesystem::path(user) / "latte-profile.txt"))
+    if (std::filesystem::exists(std::filesystem::path(user) / "latte-profile.txt")) {
+#if defined(_WIN32)
         _putenv_s("CEMU_LATTE_PROFILE", "1");
+#else
+        setenv("CEMU_LATTE_PROFILE", "1", 1);
+#endif
+    }
     try {
         mem::init();
         dispatch::init();
