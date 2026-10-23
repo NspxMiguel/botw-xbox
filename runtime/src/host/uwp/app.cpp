@@ -2449,6 +2449,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (!preferences.setup_complete)
             allow_auto = false;
         bool warned_missing = false;
+        int missing_rescans = 0;
         for (;;) {
             auto decision = uwp::decide(candidates, preferences, !allow_auto);
             if (selected_game)
@@ -2471,6 +2472,14 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 co_return;
             // Automatic start with no game (USB drive unplugged, folder gone): say so, then go to setup.
             if (allow_auto && !warned_missing && preferences.auto_launch && decision.select_game && !failed && !running) {
+                // A sleeping external drive can take ~10 s to answer the first scan; rescan before giving up.
+                if (missing_rescans < 3) {
+                    ++missing_rescans;
+                    LOG("menu: auto-launch found no game, rescanning (%d/3)", missing_rescans);
+                    co_await resume_after(std::chrono::seconds(2));
+                    co_await scan();
+                    continue;
+                }
                 warned_missing = true;
                 LOG("menu: auto-launch found no game, opening setup");
                 co_await choose(label(uwp::Text::title), label(uwp::Text::autoboot_missing),
