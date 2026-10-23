@@ -1057,10 +1057,20 @@ void D3D12Renderer::UpdatePresentDiagnostics(D3D12SwapChain *swapChain, bool int
 	{
 		extern std::atomic<uint64> g_latteIdleNs;
 		const double idleMs = g_latteIdleNs.exchange(0) / 1e6;
+		// This runs on the Latte thread: its CPU time against the wall clock shows preemption by other threads.
+		FILETIME created, exited, kernel, user;
+		double cpuMs = 0;
+		if (GetThreadTimes(GetCurrentThread(), &created, &exited, &kernel, &user))
+		{
+			const uint64 total = (uint64(kernel.dwHighDateTime) << 32 | kernel.dwLowDateTime) + (uint64(user.dwHighDateTime) << 32 | user.dwLowDateTime);
+			cpuMs = m_latteCpuTime ? (total - m_latteCpuTime) / 1e4 : 0;
+			m_latteCpuTime = total;
+		}
 		if (m_presentLogWindows % 5 == 0)
-			cemuLog_log(LogType::Force, "D3D12: {:.1f} presents/s, Present blocked {:.1f} ms/frame (max {:.1f}), GPU fence wait {:.1f} ms/frame, Latte idle {:.0f}%",
+			cemuLog_log(LogType::Force, "D3D12: {:.1f} presents/s, Present blocked {:.1f} ms/frame (max {:.1f}), GPU fence wait {:.1f} ms/frame, Latte idle {:.0f}%, Latte CPU {:.0f}%, {} cores",
 				stats.presents / seconds, stats.presents ? stats.blockedMs / stats.presents : 0.0, stats.maxBlockedMs,
-				stats.presents ? m_fenceWaitMs / stats.presents : 0.0, idleMs / (seconds * 10));
+				stats.presents ? m_fenceWaitMs / stats.presents : 0.0, idleMs / (seconds * 10), cpuMs / (seconds * 10),
+				std::thread::hardware_concurrency());
 	}
 	m_fenceWaitMs = 0;
 	if (!interpolationWanted)
