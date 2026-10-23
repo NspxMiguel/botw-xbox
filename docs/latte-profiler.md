@@ -206,3 +206,18 @@ canonical AUTO keys, overlap/release; real stage-table equality/epochs; view
 versions; profiler detail nesting/window resets; descriptor heap retirement.
 See [latte-perf3.md](latte-perf3.md) for estimates and device-validation limits,
 and [latte-bindless.md](latte-bindless.md) for the design-only SM 6.6 assessment.
+
+
+## Pipeline boundary counters
+
+The D3D12 profile also reports `sequence-end/frame`, `create-reply/frame`,
+`forced-readback/frame`, `query-wait/frame` and `upload B/frame`. Query waits count
+forced retrieval requests, including requests whose fence is already complete.
+Upload bytes include allocated upload alignment/row padding and index payloads;
+texture/buffer payload counters keep their existing definitions. Operation/frame
+IDs and recorded/submitted/completed sequence prefixes correlate the boundaries
+without treating a recording acknowledgment as GPU completion.
+
+The pipeline remains single threaded and opt-in. See
+[the phases 1–3 report](latte-pipeline-phase1-3.md) for runtime flags, packet sizes,
+host validation and the remaining worker-thread migration.
