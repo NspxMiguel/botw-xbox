@@ -8,6 +8,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Memory.h"
 
+#include <atomic>
 #include <unordered_map>
 
 // CPU-only (non shader-visible) descriptor heap with a free list.
@@ -23,6 +24,10 @@ class D3D12StagingDescriptorHeap
 	D3D12_DESCRIPTOR_HEAP_TYPE GetType() const
 	{
 		return m_type;
+	}
+	uint64 GetGeneration() const
+	{
+		return m_generation.load(std::memory_order_relaxed);
 	}
 	uint32 GetAllocatedCount() const
 	{
@@ -40,6 +45,7 @@ class D3D12StagingDescriptorHeap
 	std::vector<ComPtr<ID3D12DescriptorHeap>> m_blocks;
 	std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> m_freeList;
 	uint32 m_allocatedCount = 0;
+	std::atomic<uint64> m_generation{1};
 	std::mutex m_mutex;
 };
 
@@ -80,6 +86,11 @@ class D3D12GpuViewHeap
 		return h;
 	}
 
+	uint64 GetGeneration() const
+	{
+		return m_generation;
+	}
+
   private:
 	ID3D12Device *m_device;
 	D3D12SubmissionTracker *m_tracker;
@@ -88,6 +99,7 @@ class D3D12GpuViewHeap
 	uint32 m_incrementSize;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_cpuBase;
 	D3D12_GPU_DESCRIPTOR_HANDLE m_gpuBase;
+	uint64 m_generation = 1;
 	uint32 m_head = 0;
 	uint32 m_tail = 0;
 	bool m_recordingHasData = false;
@@ -121,6 +133,11 @@ class D3D12GpuSamplerHeap
 		return m_head;
 	}
 
+	uint64 GetGeneration() const
+	{
+		return m_generation;
+	}
+
   private:
 	ID3D12Device *m_device;
 	ComPtr<ID3D12DescriptorHeap> m_heap;
@@ -128,6 +145,7 @@ class D3D12GpuSamplerHeap
 	uint32 m_incrementSize;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_cpuBase;
 	D3D12_GPU_DESCRIPTOR_HANDLE m_gpuBase;
+	uint64 m_generation = 1;
 	uint32 m_head = 0;
 	struct TableKey
 	{

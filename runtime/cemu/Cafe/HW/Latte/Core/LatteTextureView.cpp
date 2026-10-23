@@ -113,8 +113,16 @@ inline uint32 _getViewBucketKeyNoRes(MPTR physAddress, uint32 pitch)
 LatteTexViewBucket texViewBucket[TEXTURE_VIEW_BUCKETS] = { };
 LatteTexViewBucket texViewBucket_nores[TEXTURE_VIEW_BUCKETS] = { };
 
+static uint64 s_viewLookupGeneration = 1;
+
+uint64 LatteTextureViewLookupCache::GetGeneration()
+{
+	return s_viewLookupGeneration;
+}
+
 void LatteTextureViewLookupCache::Add(LatteTextureView* view, uint32 baseMip, uint32 baseSlice)
 {
+	++s_viewLookupGeneration;
 	LatteTexViewLookupDesc desc(view);
 	if (baseMip != 0 || baseSlice != 0)
 		desc.SetParametersForSubTexture(baseMip, baseSlice);
@@ -130,6 +138,7 @@ void LatteTextureViewLookupCache::Add(LatteTextureView* view, uint32 baseMip, ui
 
 void LatteTextureViewLookupCache::RemoveAll(LatteTextureView* view)
 {
+	++s_viewLookupGeneration;
 	for (auto& key : view->viewLookUpCacheKeys)
 	{
 		auto& bucket = texViewBucket[key].list;

@@ -532,9 +532,16 @@ void D3D12Renderer::ProcessFinishedSubmissions()
 
 void D3D12Renderer::BindRootSignatureAndHeaps()
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::RootSignature);
 	ID3D12DescriptorHeap *heaps[] = {m_gpuViewHeap->GetHeap(), m_gpuSamplerHeap->GetHeap()};
 	m_cmdList->SetDescriptorHeaps(2, heaps);
 	m_cmdList->SetGraphicsRootSignature(m_rootSignature.Get());
+	// Internal passes can change root arguments even when they use the same signature.
+	for (auto &table : m_state.currentViewTables)
+		table = {};
+	for (auto &table : m_state.currentSamplerTables)
+		table = {};
+	m_state.runtimeDataValid = false;
 	m_state.rootSignatureBound = true;
 }
 

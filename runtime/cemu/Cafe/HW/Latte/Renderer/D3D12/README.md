@@ -69,9 +69,18 @@ One root signature for everything (`D3D12Renderer::CreateRootSignature`):
 | 6 | 16 root constants: vertex runtime data (base vertex, base instance for `gl_VertexIndex`/`gl_InstanceIndex`) |
 | 7 | 16 root constants: push constants for internal shaders |
 
-CBV/SRV/UAV tables are written per draw into a shader-visible ring heap. Sampler tables are deduplicated and cached
-(D3D12 caps shader-visible sampler heaps at 2048 entries); when the heap fills, the renderer submits, waits and resets
-it before recording any state for the next draw.
+CBV/SRV/UAV tables are cached by their complete descriptor contents within the recording submission. The cache
+compares the full key after hashing, and invalidates on submission, ring wrap/reset or staging descriptor recycling.
+On a miss, one bulk copy fills the table; per-stage/register staging CBVs are recreated only when their address,
+size or submission changes. Immutable upload bytes are reused for equal uniform variable blocks in the same submission.
+
+Sampler tables are deduplicated and cached (D3D12 caps shader-visible sampler heaps at 2048 entries). Unchanged
+per-stage sampler descriptions bypass the sampler lookup; heap reset advances an epoch and invalidates these hits.
+When the heap fills, the renderer submits, waits and resets it before recording draw state or transient uniform uploads.
+Root tables and runtime constants are rebound only on change, with all tracked root arguments invalidated on signature/heap
+binding after command list reset or an internal pass. The shared texture lookup fast path compares all seven register words
+and depth-compare usage against a cache generation advanced on every view lookup insertion/removal. It still runs texture
+content validation, dynamic alias updates, feedback barriers, usage tracking and texture scale updates on every bind.
 
 ### Mapping of Latte features
 

@@ -749,6 +749,7 @@ LatteCMDPtr LatteCP_itSetPredication(LatteCMDPtr cmd, uint32 nWords)
 LatteCMDPtr LatteCP_itDrawIndex2(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
+	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	cemu_assert_debug(nWords == 5);
 	uint32 ukn1 = LatteReadCMD();
 	MPTR physIndices = LatteReadCMD();
@@ -764,6 +765,7 @@ LatteCMDPtr LatteCP_itDrawIndex2(LatteCMDPtr cmd, uint32 nWords, DrawPassContext
 LatteCMDPtr LatteCP_itDrawIndexAuto(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
+	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	cemu_assert_debug(nWords == 2);
 	uint32 count = LatteReadCMD();
 	uint32 ukn = LatteReadCMD();
@@ -788,6 +790,7 @@ MPTR _tempIndexArrayMPTR = MPTR_NULL;
 LatteCMDPtr LatteCP_itDrawImmediate(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
+	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	uint32 count = LatteReadCMD();
 	uint32 ukn1 = LatteReadCMD();
 	// reserve array for index data	

@@ -19,7 +19,7 @@ inline HRESULT D3D12_SerializeCemuRootSignature(ID3DBlob **blobOut, ID3DBlob **e
 	D3D12_DESCRIPTOR_RANGE1 samplerRanges[3]{};
 	D3D12_ROOT_PARAMETER1 params[kRootParamCount]{};
 	static const D3D12_SHADER_VISIBILITY visibility[3] = {D3D12_SHADER_VISIBILITY_VERTEX, D3D12_SHADER_VISIBILITY_PIXEL, D3D12_SHADER_VISIBILITY_GEOMETRY};
-	// descriptors are rewritten for every draw, the driver can't make any assumptions about their content
+	// Descriptor contents can change between draws; keep the original volatile binding contract.
 	const D3D12_DESCRIPTOR_RANGE_FLAGS viewFlags = D3D12_DESCRIPTOR_RANGE_FLAG_DESCRIPTORS_VOLATILE | D3D12_DESCRIPTOR_RANGE_FLAG_DATA_VOLATILE;
 	for (uint32 s = 0; s < 3; s++)
 	{
