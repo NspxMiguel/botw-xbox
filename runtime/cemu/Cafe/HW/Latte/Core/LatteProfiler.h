@@ -59,6 +59,11 @@ enum class Counter : size_t
 	PipelineStateHits,
 	Submissions,
 	EmptySubmissions,
+	SequenceEndings,
+	ResourceCreateReplies,
+	ForcedReadbacks,
+	QueryWaits,
+	UploadBytes,
 	Count,
 };
 

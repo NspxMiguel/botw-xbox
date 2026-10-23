@@ -46,6 +46,7 @@ static_assert(sizeof(dxil_spirv_vertex_runtime_data) <= D3D12Const::kRuntimeData
 
 void D3D12Renderer::draw_beginSequence()
 {
+	m_pipeline.BeginOperation();
 	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Sequence);
 	ServicePendingPresent(false); // frame interpolation without vsync: the previous real frame may be due
 	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
@@ -98,6 +99,8 @@ void D3D12Renderer::draw_beginSequence()
 
 void D3D12Renderer::draw_endSequence()
 {
+	m_pipeline.BeginOperation();
+	LatteProfiler::Add(LatteProfiler::Counter::SequenceEndings);
 	LatteDecompilerShader *pixelShader = LatteSHRC_GetActivePixelShader();
 	if (pixelShader)
 		LatteRenderTarget_trackUpdates();
@@ -643,6 +646,7 @@ void D3D12Renderer::draw_applyRenderTargets()
 
 void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext &drawcallContext)
 {
+	m_pipeline.BeginOperation();
 	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	LatteGPUState.drawCallCounter++;
 	if (m_state.skipDrawSequence)

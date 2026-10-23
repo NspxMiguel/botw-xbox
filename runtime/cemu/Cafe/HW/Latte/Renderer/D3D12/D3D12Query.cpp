@@ -177,6 +177,8 @@ void D3D12Renderer::occlusionQuery_destroy(LatteQueryObject *queryObj)
 
 void D3D12Renderer::occlusionQuery_flush()
 {
+	m_pipeline.BeginOperation();
+	LatteProfiler::Add(LatteProfiler::Counter::QueryWaits);
 	auto &oq = m_occlusionQueries;
 	if (oq.lastSubmission > m_lastSubmittedFenceValue)
 		SubmitCommandList(false);

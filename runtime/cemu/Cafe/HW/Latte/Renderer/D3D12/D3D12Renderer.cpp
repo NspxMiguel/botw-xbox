@@ -441,6 +441,7 @@ uint64 D3D12Renderer::GetCompletedSubmissionId()
 
 void D3D12Renderer::WaitForSubmission(uint64 submissionId)
 {
+	m_pipeline.CheckBack();
 	cemu_assert_debug(submissionId <= m_lastSubmittedFenceValue);
 	if (GetCompletedSubmissionId() >= submissionId)
 		return;
@@ -493,6 +494,7 @@ void D3D12Renderer::ResetCommandList()
 
 void D3D12Renderer::SubmitCommandList(bool waitIdle)
 {
+	m_pipeline.CheckBack();
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Submit);
 	occlusionQuery_notifyEndCommandList();
 	LatteProfiler::Add(LatteProfiler::Counter::Submissions);
@@ -783,6 +785,7 @@ void D3D12Renderer::UAVBarrier(ID3D12Resource *resource)
 
 void D3D12Renderer::FlushBarriers()
 {
+	m_pipeline.CheckBack();
 	if (m_pendingBarriers.empty())
 		return;
 	m_cmdList->ResourceBarrier((UINT)m_pendingBarriers.size(), m_pendingBarriers.data());
@@ -1409,6 +1412,7 @@ void D3D12Renderer::TryEnableImplicitShaderCache()
 
 void D3D12Renderer::SwapBuffers(bool swapTV, bool swapDRC)
 {
+	m_pipeline.BeginOperation();
 	if (m_implicitCacheTesting && swapTV && ++m_implicitCacheTestFrames >= 1200)
 	{
 		// 20 s of frames, with pipelines created on the loading screen and in game: the driver took it
@@ -1448,6 +1452,7 @@ void D3D12Renderer::SwapBuffers(bool swapTV, bool swapDRC)
 	}
 	if (swapTV && m_pipelineCache)
 		m_pipelineCache->TickBackgroundPreload();
+	m_pipeline.EndFrame();
 	m_statDrawsPerFrame = 0;
 	m_statSubmitsPerFrame = 0;
 	m_statBarriersPerFrame = 0;
@@ -1640,6 +1645,8 @@ void D3D12Renderer::renderTarget_setScissor(sint32 scissorX, sint32 scissorY, si
 
 LatteCachedFBO *D3D12Renderer::rendertarget_createCachedFBO(uint64 key)
 {
+	m_pipeline.BeginOperation();
+	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	return new CachedFBOD3D12(this, key);
 }
 
@@ -1685,6 +1692,8 @@ TextureDecoder *D3D12Renderer::texture_chooseDecodedFormat(Latte::E_GX2SURFFMT f
 LatteTexture *D3D12Renderer::texture_createTextureEx(Latte::E_DIM dim, MPTR physAddress, MPTR physMipAddress, Latte::E_GX2SURFFMT format, uint32 width, uint32 height, uint32 depth, uint32 pitch, uint32 mipLevels,
 													 uint32 swizzle, Latte::E_HWTILEMODE tileMode, bool isDepth)
 {
+	m_pipeline.BeginOperation();
+	LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
 	return new LatteTextureD3D12(this, dim, physAddress, physMipAddress, format, width, height, depth, pitch, mipLevels, swizzle, tileMode, isDepth);
 }
 

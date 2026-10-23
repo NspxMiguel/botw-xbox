@@ -161,7 +161,7 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				"pipeline-miss/frame {:.2f}, texture-new/frame {:.2f}, texture-upload {:.0f} B/frame, buffer-upload {:.0f} B/frame; "
 				"descriptor-hit/frame {:.1f}, descriptor-fast/frame {:.1f}, descriptor-miss/frame {:.1f}; root-cbv-set/frame {:.1f}, root-cbv-skip/frame {:.1f}; "
 				"dynamic-state-hit/frame {:.1f}, dynamic-state-miss/frame {:.1f}; "
-				"transition-hit/frame {:.1f}, transition-miss/frame {:.1f}; index-hit/frame {:.1f}, index-miss/frame {:.1f}; fbo-hit/frame {:.1f}, fbo-miss/frame {:.1f}, pipeline-state-hit/frame {:.1f}; submit/frame {:.2f}, submit-empty/frame {:.2f}",
+				"transition-hit/frame {:.1f}, transition-miss/frame {:.1f}; index-hit/frame {:.1f}, index-miss/frame {:.1f}; fbo-hit/frame {:.1f}, fbo-miss/frame {:.1f}, pipeline-state-hit/frame {:.1f}; submit/frame {:.2f}, submit-empty/frame {:.2f}; sequence-end/frame {:.1f}, create-reply/frame {:.1f}, forced-readback/frame {:.1f}, query-wait/frame {:.1f}, upload {:.0f} B/frame",
 				seconds, frames, perFrame(Counter::Draws), s_state.drawTotalNs * msPerNsPerFrame,
 				ms(Slot::DrawOther), ms(Slot::ShaderPipeline), ms(Slot::TextureBinding), ms(Slot::TextureLoad), ms(Slot::BufferSync),
 				ms(Slot::Indices), ms(Slot::Uniforms), ms(Slot::Descriptors), ms(Slot::RenderTargets), ms(Slot::Submit), ms(Slot::Pm4),
@@ -174,7 +174,8 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				perFrame(Counter::DescriptorHits), perFrame(Counter::DescriptorFastHits), perFrame(Counter::DescriptorMisses), perFrame(Counter::RootCBVSets), perFrame(Counter::RootCBVSkips),
 				perFrame(Counter::DynamicStateHits), perFrame(Counter::DynamicStateMisses),
 				perFrame(Counter::TransitionHits), perFrame(Counter::TransitionMisses), perFrame(Counter::IndexHits), perFrame(Counter::IndexMisses),
-				perFrame(Counter::FramebufferHits), perFrame(Counter::FramebufferMisses), perFrame(Counter::PipelineStateHits), perFrame(Counter::Submissions), perFrame(Counter::EmptySubmissions));
+				perFrame(Counter::FramebufferHits), perFrame(Counter::FramebufferMisses), perFrame(Counter::PipelineStateHits), perFrame(Counter::Submissions), perFrame(Counter::EmptySubmissions),
+				perFrame(Counter::SequenceEndings), perFrame(Counter::ResourceCreateReplies), perFrame(Counter::ForcedReadbacks), perFrame(Counter::QueryWaits), perFrame(Counter::UploadBytes));
 	if (s_state.detailEnabled)
 	{
 		const auto detail = [&](Detail slot) { return s_state.detailNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };

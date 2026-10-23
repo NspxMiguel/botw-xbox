@@ -13,6 +13,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Format.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureD3D12.h"
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
 #include "util/math/vector2.h"
 
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
@@ -235,6 +236,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 
 	D3D12UploadAllocation AllocateUpload(uint64 size, uint64 alignment)
 	{
+		m_pipeline.CheckBack();
+		LatteProfiler::Add(LatteProfiler::Counter::UploadBytes, size);
 		return m_uploadRing->Allocate(size, alignment);
 	}
 	void ReleaseResourceDeferred(ComPtr<ID3D12Resource> resource);
@@ -319,6 +322,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	}
 
   private:
+	LattePipeline::Context m_pipeline;
 	struct DrawState;
 	struct StageBindings;
 

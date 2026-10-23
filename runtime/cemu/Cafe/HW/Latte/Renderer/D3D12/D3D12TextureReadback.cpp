@@ -76,6 +76,7 @@ bool LatteTextureReadbackInfoD3D12::IsFinished()
 
 void LatteTextureReadbackInfoD3D12::ForceFinish()
 {
+	LatteProfiler::Add(LatteProfiler::Counter::ForcedReadbacks);
 	if (m_submissionId > m_renderer->m_lastSubmittedFenceValue)
 		m_renderer->SubmitCommandList(false);
 	m_renderer->WaitForSubmission(m_submissionId);
