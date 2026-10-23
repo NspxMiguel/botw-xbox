@@ -29,6 +29,10 @@ constexpr Selection select(Console console, bool simulate_s, std::string_view ov
     return {path, limited_console, std::min(display_height, limited_console ? 1440 : 2160),
             limited_console ? 1.7f : 1.5f};
 }
+// Equal input/output dimensions are the SDK NativeAA mode (ratio 1.0).
+constexpr bool native_aa(Path path, int iw, int ih, int ow, int oh) {
+    return path == Path::Fsr31 && iw > 0 && ih > 0 && iw == ow && ih == oh;
+}
 // CoreWindow owns presentation and supports exact two-present cadence only.
 // Keep Series S/desktop on their existing path; unknown HDMI modes fail closed.
 constexpr unsigned core_window_fg_interval(Console console, int guest_fps, double mode_hz) {
