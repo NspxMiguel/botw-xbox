@@ -105,7 +105,7 @@ class Analyzer:
                     self.switch_bases.add(sw.table)
         for a in range(lo, hi, 4):
             i = self.insn(a)
-            if i.op == "b" and i.LK and not i.AA:
+            if i.op == "b" and i.LK:
                 if img.reloc_at.get(a) is not None:
                     continue  # REL24 to an import or a weak (null) symbol
                 if img.is_text(i.target):
@@ -116,7 +116,12 @@ class Analyzer:
             if r.type not in (1, 4):  # ADDR32, ADDR16_LO
                 continue
             t = img.reloc_target(r.offset)
-            if t is not None and lo <= t < hi and t % 4 == 0 and t not in self.switch_bases:
+            if (
+                t is not None
+                and img.is_text(t)
+                and t % 4 == 0
+                and t not in self.switch_bases
+            ):
                 self.entries.add(t)
 
     # ---- per-function control flow ------------------------------------------------------------
@@ -214,7 +219,7 @@ class Analyzer:
         a, hi = self.img.text_lo, self.img.text_hi
         self.gap_functions = 0
         while a < hi:
-            if a not in covered and a not in self.switch_bases:
+            if self.img.is_text(a) and a not in covered and a not in self.switch_bases:
                 i = self.insn(a)
                 if self.img.u32(a) != 0 and i.op != "illegal":
                     self.entries.add(a)

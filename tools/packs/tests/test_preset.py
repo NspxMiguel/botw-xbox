@@ -27,7 +27,7 @@ def graphic_packs(tmp_path):
             "FPS Limit": ["60FPS Limit (Default)", "30FPS Limit"],
         },
         "Graphics": {
-            "Resolution": ["1280x720 (Default)", "1920x1080"],
+            "Resolution": ["1280x720 (HD, Default)", "1920x1080"],
             "Shadows": ["Ultra (300%)", "Extreme (400%, Unstable)"],
             "Shadow Draw Distance": ["High (Default)", "Very High (Recommended)"],
             "Anti-Aliasing": ["Normal FXAA (Default)"],
@@ -111,7 +111,7 @@ class PresetTests(unittest.TestCase):
                     "FPS Limit": "60FPS Limit (Default)",
                 }
                 graphics = entries["Graphics"]["presets"]
-                assert graphics["Resolution"] == "1280x720 (Default)"
+                assert graphics["Resolution"] == "1280x720 (HD, Default)"
                 assert graphics["Anti-Aliasing"] == "Normal FXAA (Default)"
                 assert graphics["Shadows"] == (
                     "Ultra (300%)"
@@ -243,8 +243,8 @@ class PresetTests(unittest.TestCase):
         rules.write_text(
             rules.read_text()
             .replace(
-                'name = "1280x720 (Default)"\ndefault = 1',
-                'name = "1280x720 (Default)"\ndefault = 0\n$width = 1280\n$height = 720',
+                'name = "1280x720 (HD, Default)"\ndefault = 1',
+                'name = "1280x720 (HD, Default)"\ndefault = 0\n$width = 1280\n$height = 720',
             )
             .replace(
                 'name = "1920x1080"\ndefault = 0',

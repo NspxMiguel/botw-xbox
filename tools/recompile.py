@@ -72,8 +72,10 @@ def main() -> None:
         n = code.count("\n") + 1
         if n > BIG_LINES:
             key = f"{'huge' if n > HUGE_LINES else 'big'}_{entry:08x}"
+        elif entry < img.text.addr:
+            key = f"cave_{(entry - 0x01800000) // BUCKET:04x}"
         else:
-            key = f"fn_{(entry - img.text_lo) // BUCKET:04x}"
+            key = f"fn_{(entry - img.text.addr) // BUCKET:04x}"
         buckets.setdefault(key, []).append(code)
         callees_of.setdefault(key, set()).update(callees)
         defined.add(f"f_{entry:08x}")
@@ -87,7 +89,11 @@ def main() -> None:
         text = HEADER + "".join(f'extern "C" void {d}(PPCContext*);\n' for d in decls) + "\n" + "\n\n".join(codes) + "\n"
         written += write_if_changed(os.path.join(out, f"{key}.cpp"), text)
     for name in os.listdir(out):
-        if name.endswith(".cpp") and name.startswith(("fn_", "big_", "huge_")) and name[:-4] not in buckets:
+        if (
+            name.endswith(".cpp")
+            and name.startswith(("fn_", "cave_", "big_", "huge_"))
+            and name[:-4] not in buckets
+        ):
             os.remove(os.path.join(out, name))
 
     # every import gets a symbol (also the ones only referenced as data, e.g. function pointers)

@@ -1,5 +1,6 @@
-#include "../platform/host_file.h"
 #include "loaded_rpx.h"
+#include "../mem.h"
+#include "../platform/host_file.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -49,18 +50,22 @@ bool LoadedRpx::validate(uint32_t address, size_t size, uint32_t text_end,
   if (!size || size > 0x100000000ull - address)
     return false;
   const uint64_t end = uint64_t(address) + size;
-  // Mirror mem.h: only RPX text below data imports and loaded MEM2 data.
+  // Mirror mem.h: codecaves, RPX text below data imports and loaded MEM2 data.
   // Never accept the 4 GB reservation itself as proof of writability.
-  if (!((address >= 0x02000000 && end <= 0x0df00000) ||
+  if (!((address >= mem::kCodeCave && end <= mem::kText) ||
+        (address >= 0x02000000 && end <= 0x0df00000) ||
         (address >= 0x10000000 && end <= 0x50000000)))
     return false;
-  for (const auto &range : writable)
-    if (address >= range.begin && end <= range.end)
-      return true;
-  const uint64_t cave = (uint64_t(text_end) + 15) & ~uint64_t(15);
+  if (address >= mem::kText) {
+    for (const auto &range : writable)
+      if (address >= range.begin && end <= range.end)
+        return true;
+    return false;
+  }
+  const uint64_t cave = mem::kCodeCave;
   const uint64_t limit =
-      std::min(uint64_t(0x0df00000),
-               cave + std::min(pack_count, size_t(192)) * 0x100000ull);
+      cave +
+      std::min(pack_count, size_t(mem::kCodeCaveSize / 0x100000)) * 0x100000ull;
   if (!text_end || address < cave || end > limit)
     return false;
   // A codecave must not alias any original section, writable or otherwise.

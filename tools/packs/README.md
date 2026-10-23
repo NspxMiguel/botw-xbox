@@ -1,9 +1,8 @@
 # Graphic packs for static recompilation (W5)
 
 Players supply their own Cemu packs. This directory contains tools and synthetic tests,
-not packs, game binaries, patches copied from a game, or generated game code. Own changes
-are confined to `tools/packs/` and `runtime/src/packs/`; the shared recompiler, loader,
-renderer shims, and build files are untouched.
+not packs, game binaries, patches copied from a game, or generated game code. The pack compiler integrates with the shared analyzer, code generator, runtime
+dispatch, loader and D3D12 renderer.
 
 ## Compile with packs
 
@@ -65,7 +64,7 @@ point. Choices match the inspected official pack revision exactly:
 | Setting | Series S | Series X |
 | --- | --- | --- |
 | FPS++ Mode / FPS Limit | Normal Settings / 60FPS Limit (Default) | Same |
-| Graphics Resolution | 1280x720 (Default) | Same |
+| Graphics Resolution | 1280x720 (HD, Default) | Same |
 | Graphics Shadows | Ultra (300%) | Extreme (400%, Unstable) |
 | Graphics Shadow Draw Distance | High (Default) | Very High (Recommended) |
 | Graphics Anti-Aliasing | Normal FXAA (Default) | Same |
@@ -80,8 +79,9 @@ close to natural; Series S uses lower shadow and scene detail to reduce cost.
 Series X takes the highest shadow tier not labelled "Not Recommended" in this
 revision; upstream labels that tier **Unstable**, so this is not a stability or
 60 fps performance claim. Both consoles explicitly select native 1280x720
-Resolution so its size expressions resolve to identity; FSR owns render resolution. Texture Distance Detail (LOD) and Anisotropic Filtering are omitted
-because D3D12 rejects LOD/anisotropy/format overrides. "High" tree billboards
+Resolution so its size expressions resolve to identity; FSR owns render resolution. Texture Distance Detail (LOD) and Anisotropic Filtering retain the pack defaults
+(Normal LOD and Ultra 8x anisotropy in the inspected revision). D3D12 accepts
+these fields, including their unconditional rules. "High" tree billboards
 extend geometric detail without selecting texture LOD bias.
 
 No Workarounds are selected. AMDShaderCrash is explicitly OpenGL-only;
@@ -110,18 +110,29 @@ for that matching texture; other surfaces retain the selected scale.
 
 Selection validation does not prove a complete pack build or rendering. Omitting
 a category does not suppress default presets or unconditional `[TextureRedefine]`
-sections. Format, LOD and anisotropy overrides remain unsupported by D3D12 and
-are rejected rather than silently filtered. Player-supplied pack revisions that
-emit these fields still need adaptation before the full Remaster selection can
-run. The preset generator does not rewrite the player's rules.
+sections. D3D12 supports LOD and anisotropy overrides and the GUI precision conversion
+from RGB10A2 (0x19) to RGBA16 UNORM (0x1f). Other format conversions fail
+validation explicitly. The preset generator does not rewrite the player's rules.
 
 This entry point installs an invocation-local `Image` hook into `tools/recompile.py`:
 load/decompress/relocate RPX -> resolve packs -> assemble and validate every write ->
 patch the guest Image -> analyze PPC -> generate C++. The source RPX is never modified.
-Caves are placed after `.text`, bounded to 1 MiB per pack and below runtime memory,
+Caves start at Cemu's 0x01800000 address, bounded to 1 MiB per pack and
+8 MiB total below `.text`,
 with overlap and branch-range checks. Cave constants are excluded from function
 discovery. New import calls retain HLE relocation metadata; stale relocations covering
 replaced instructions are removed before analysis/codegen.
+
+Direct `bl`/`bla` targets use ordinary function discovery. Constant
+`li/mtctr/bctrl` and `lis/(addi|ori)/mtctr/bctrl` sequences in patched text or
+caves also seed function entries, without treating cave data as code.
+`packs_report.json` includes a `cave_calls` audit of every cave call and patched
+call into a cave, including source locations, resolved targets, imports and
+displaced-code continuations. Missing known code targets fail compilation.
+Conditional branch displacements are parenthesized before LLVM assembly:
+otherwise LLVM can parse `blt -16` as the prediction hint `blt- 16` and reverse
+the jump. Every assembled direct branch is decoded and its destination checked
+against the resolved patch expression.
 
 The normal generated sources are accompanied by `packs_generated.inc` (compiled runtime
 snapshot) and `packs_report.json` (selected presets, variables, CRC, hashes). These are
@@ -151,7 +162,11 @@ cache keys and launcher build metadata.
   `.int/.uint` embedded within an instruction stream are treated as raw instructions.
   LLVM encodes normal instructions; unresolved expressions, out-of-range branches,
   unsupported assembler/recompiler instructions, and overlapping writes are errors.
-  Absolute branches are translated to equivalent relative branches to nearby caves.
+  Absolute `ba`/`bla` targets below 0x02000000 keep their AA bit. Other branch
+  targets use range-checked relative encoding. Mnemonics/registers are case
+  insensitive; floating comparisons accept implicit cr0 and condition-bit
+  expressions accept cr0..cr7 and lt/gt/eq/so. `.align` inserts byte alignment;
+  `@lo`/`@hi` are aliases for `@l`/`@h`.
 - `[TextureRedefine]`: dimensions, formats/exclusions, tilemodes/exclusions, `inMEM1`,
   resolution/depth/format overrides, LOD biases and anisotropy. Numeric expressions are
   resolved into a build snapshot. The renderer casts dimensions toward zero as Cemu does.
@@ -174,10 +189,12 @@ needs compilation and gameplay validation with the matching executable.
 A pack named `FPS++` automatically owns timing; `timing: true` makes that explicit (or
 marks another timing pack). Only one timing pack may be enabled. Its code patches are
 compiled along with physics/timing fixes from **all matching patch files**, rather than
-replacing it with a simple frame-rate unlock. All `runtime/src/game/fps.cpp` host hooks
-are omitted from that generation to prevent double-scaling physics. Hooks on individual
-instructions replaced by any pack are omitted as well. The host must use the resolved
-`vsyncFrequency`, disable its independent 60 fps/scaling overrides, and expose no runtime
+replacing it with a simple frame-rate unlock. The timing/scaling hooks from `runtime/src/game/fps.cpp` are omitted to prevent
+double-scaling physics. The frame bookkeeping hook at 0x031fa97c remains
+active after FPS++'s replacement call: it handles UWP pause and CPU telemetry,
+and its host delta/scaling path is gated off for a compiled timing pack. Other
+hooks on instructions replaced by packs are omitted. The compiled pack owns guest timing and physics. Host `g_target_fps` controls
+presentation; it does not restore omitted physics hooks. There is no runtime
 PPC patch toggle. Selection changes require recompilation on the Mac/build host; Xbox
 only executes the resulting static code. No JIT or on-console compilation is involved.
 
@@ -202,7 +219,7 @@ if (!packs::install(plan, loaded_rpx_sha256, guest_memory_hooks, renderer_hooks,
 ```
 
 `GuestMemory` validates all ranges before any write. Validation must reject read-only,
-unmapped or runtime-owned regions and account for the appended caves. Writes initialize
+unmapped or runtime-owned regions and account for the separate codecave area. Writes initialize
 both patched original bytes and cave code/data after the ordinary loader would otherwise
 overwrite them. SHA mismatch is fatal. The generated PPC code is already patched; this
 initialization makes its data constants, pointers and guest code reads agree with it.
@@ -224,9 +241,8 @@ snapshot. The plan must outlive renderer pointers (the generated plan is static)
 - Route `Pack.control`'s `vsyncFrequency` to virtual vblank/frame pacing. The old 30/60 host
   settings must not independently change guest timing when FPS++ owns it.
 
-The portable module is not wired into the shared loader or Metal shims in this worktree;
-D3D12 and host owners must connect these calls. Merely linking `packs.cpp` does not activate
-packs. The launcher should show the compiled fingerprint/selection and require a new build
+The hosts install this snapshot through `packs/host_install.h` before guest
+startup. The Metal adapter still rejects texture/shader replacements. The launcher should show the compiled fingerprint/selection and require a new build
 for code-patch changes.
 
 ## Validation
@@ -241,12 +257,11 @@ presets and resolution expressions, invalid input, code/data layout, cross-file 
 branch encoding, CRC selection, conflicts and transactional failure, relocations/HLE,
 Image -> Analyzer -> Generator, compilation of the emitted snapshot, and the portable
 C++ runtime contract under AddressSanitizer and UndefinedBehaviorSanitizer. LLVM and
-`clang++` must be available. The upstream `cafe/rpx.py` currently emits ResourceWarnings
-for its unclosed input file; it is outside W5 ownership.
+`clang++` must be available. The upstream `cafe/rpx.py` may emit ResourceWarnings for its unclosed input file.
 
-No real RPX, community pack execution, 60 fps physics/cutscene correctness, Xbox/UWP build,
-or D3D12 rendering has been validated here. Those require the player's files and the
-remaining host/renderer integrations.
+The Remaster compiler has been run against the player's RPX and official packs.
+Console gameplay, D3D12 rendering, timing and performance still need device
+validation. See [Remaster validation](../../docs/remaster-validation.md).
 
 Format references: [Cemu patch format](https://wiki.cemu.info/wiki/Cemu_patches),
 [Cemu module CRC implementation](https://github.com/cemu-project/Cemu/blob/main/src/Cafe/OS/RPL/rpl.cpp),

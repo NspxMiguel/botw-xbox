@@ -78,7 +78,7 @@ def prepare(image, rpx_bytes, config, assembler=None):
     sha256 = hashlib.sha256(rpx_bytes).hexdigest()
     if config.get("rpx_sha256", sha256).lower() != sha256:
         raise PackError("manifest RPX SHA-256 does not match the input")
-    cave_base = cave_end = (image.text_hi + 15) & ~15
+    cave_base = cave_end = 0x01800000
     writes, packs, seen = [], [], set()
     external_timing = False
     assembler = assembler or Assembler()
@@ -170,10 +170,10 @@ def prepare(image, rpx_bytes, config, assembler=None):
             }
         )
     drop_identity_dimensions(packs)
-    if cave_end >= 0x0DF00000:
-        raise PackError("codecaves overlap runtime-owned memory")
+    if cave_end > 0x02000000:
+        raise PackError("codecaves exceed the 8 MiB area below .text")
     for base, buffer in image.secs.items():
-        if cave_base < base + len(buffer) and base < cave_end:
+        if cave_base < cave_end and cave_base < base + len(buffer) and base < cave_end:
             raise PackError("codecave overlaps another RPX section")
     content_hash.update(json.dumps(config, sort_keys=True).encode())
     content_hash.update(sha256.encode())
@@ -192,6 +192,61 @@ def prepare(image, rpx_bytes, config, assembler=None):
         cave_end,
         external_timing,
     )
+
+
+def continuation_targets(image, writes, cave_code, text_lo, text_hi):
+    """Recognize pack thunks returning to displaced code or redirecting LR.
+
+    Keep the original guest bytes. Only the static control-flow view changes;
+    LK still updates LR in the generated continuation branch.
+    """
+    from cafe import ppc
+
+    def insn(address):
+        return ppc.decode(image.u32(address) or 0, address)
+
+    resume_sites = {
+        w.address + offset
+        for w in writes
+        if w.executable and text_lo <= w.address < text_hi
+        if insn(w.address).op == "b"
+        and not insn(w.address).LK
+        and insn(w.address).target in cave_code
+        for offset in (4, 8)
+    }
+    ctr, lr = {}, {}
+    for address in cave_code:
+        branch = insn(address)
+        if branch.op not in ("bcctr", "bclr") or branch.BO != 20:
+            continue
+        if not all(address - offset in cave_code for offset in (4, 8, 12)):
+            continue
+        high, low, move = (insn(address - offset) for offset in (12, 8, 4))
+        if high.op != "addis" or high.rA != 0 or move.op != "mtspr":
+            continue
+        register = high.rD
+        if low.rD != register or low.rA != register or move.rD != register:
+            continue
+        value = ((high.imm << 16) + low.imm) & 0xFFFFFFFF
+        if (
+            branch.op == "bcctr"
+            and branch.LK
+            and move.imm == 9
+            and low.op == "addi"
+            and value in resume_sites
+        ):
+            ctr[address] = value
+        if (
+            branch.op == "bclr"
+            and not branch.LK
+            and move.imm == 8
+            and low.op == "lwz"
+            and value not in cave_code
+        ):
+            target = image.u32(value)
+            if target is not None and text_lo <= target < text_hi and target % 4 == 0:
+                lr[address] = target
+    return ctr, lr
 
 
 def apply_to_image(image, prepared):
@@ -230,16 +285,23 @@ def apply_to_image(image, prepared):
             image.reloc_at[write.address] = Reloc(
                 write.address, 10, imp.sym_index, 0, image.text.index
             )
-    original_hi = image.text_hi
-    cave_code = {
+    original_lo, original_hi = image.text_lo, image.text_hi
+    image.pack_code = {
         w.address + offset
         for w in prepared.writes
         if w.executable
         for offset in range(0, len(w.data), 4)
-        if w.address >= prepared.cave_base
     }
+    cave_code = {
+        a for a in image.pack_code if prepared.cave_base <= a < prepared.cave_end
+    }
+    image.text_lo = min(original_lo, prepared.cave_base) if cave_code else original_lo
     image.text_hi = max(original_hi, prepared.cave_end)
-    image.is_text = lambda a: image.text_lo <= a < original_hi or a in cave_code
+    image.is_text = lambda a: original_lo <= a < original_hi or a in cave_code
+    image.cave_code = cave_code
+    image.ctr_continuations, image.lr_redirects = continuation_targets(
+        image, prepared.writes, cave_code, original_lo, original_hi
+    )
     return overwritten
 
 
@@ -277,6 +339,7 @@ def emit_snapshot(prepared):
         f"p.rpx_sha256 = {cpp_string(prepared.sha256)};",
         f"p.fingerprint = {cpp_string(prepared.fingerprint)};",
         f"p.module_checksum = {prepared.checksum}u;",
+        f"p.external_timing = {str(prepared.external_timing).lower()};",
     ]
     for write in prepared.writes:
         data = ",".join(str(b) for b in write.data)

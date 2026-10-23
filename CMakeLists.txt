@@ -67,6 +67,7 @@ if(BOTW_BUILD_GAME)
     GUEST_SOURCES
     CONFIGURE_DEPENDS
     "${BOTW_GENERATED_DIR}/fn_*.cpp"
+    "${BOTW_GENERATED_DIR}/cave_*.cpp"
     "${BOTW_GENERATED_DIR}/big_*.cpp"
     "${BOTW_GENERATED_DIR}/huge_*.cpp"
     "${BOTW_GENERATED_DIR}/table.cpp"

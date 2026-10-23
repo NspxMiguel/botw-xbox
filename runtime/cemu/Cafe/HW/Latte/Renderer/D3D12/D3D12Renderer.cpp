@@ -8,6 +8,7 @@
 
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
+#include "D3D12PackHooks.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12FrameInterpolator.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Fsr.h"
@@ -1747,7 +1748,16 @@ void D3D12Renderer::texture_loadSlice(LatteTexture *hostTexture, sint32 width, s
 	if (!fmt.hasStencil)
 	{
 		const uint32 rowBytes = heightInBlocks ? compressedImageSize / heightInBlocks : 0;
-		copyPlane(0, (const uint8 *)pixelData, rowBytes);
+		if (tex->overwriteInfo.hasFormatOverwrite && tex->format == Latte::E_GX2SURFFMT::R10_G10_B10_A2_UNORM &&
+			tex->overwriteInfo.format == uint32(Latte::E_GX2SURFFMT::R16_G16_B16_A16_UNORM))
+		{
+			auto converted = d3d12_packs::expand_rgb10a2(pixelData, compressedImageSize / 4);
+			copyPlane(0, reinterpret_cast<const uint8 *>(converted.data()), rowBytes * 2);
+		}
+		else
+		{
+			copyPlane(0, (const uint8 *)pixelData, rowBytes);
+		}
 	}
 	else
 	{
