@@ -20,10 +20,21 @@ if(NOT _ffx_backend_hash STREQUAL
    "3bad3a805daead55b061f8594e7fb789991eb466852757cf508ec425fc7066aa")
   message(FATAL_ERROR "BOTW_FFX_SOURCE must point to the unmodified v1.1.4 SDK")
 endif()
+set(BOTW_FFX_SHADERS_DIR
+    ""
+    CACHE PATH
+          "Prebuilt FSR 3.1 permutation headers (an ffx-shaders directory from an earlier build); skips the host shader compiler")
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(_ffx_shaders "${CMAKE_BINARY_DIR}/ffx-shaders")
 set(_ffx_host_args)
-if(CMAKE_HOST_APPLE)
+if(BOTW_FFX_SHADERS_DIR)
+  # The headers are generated from MIT HLSL, so they can be reused on hosts without
+  # Windows or Wine.
+  if(NOT EXISTS "${BOTW_FFX_SHADERS_DIR}/compiled.stamp")
+    message(FATAL_ERROR "BOTW_FFX_SHADERS_DIR has no compiled.stamp")
+  endif()
+  set(_ffx_shaders "${BOTW_FFX_SHADERS_DIR}")
+elseif(CMAKE_HOST_APPLE)
   if(NOT EXISTS "${BOTW_FFX_WINE}"
      OR NOT EXISTS "${BOTW_FFX_BOTTLE_PATH}/ffx/cxbottle.conf")
     message(
@@ -38,6 +49,9 @@ file(
   GLOB_RECURSE _ffx_shader_inputs CONFIGURE_DEPENDS
   "${_ffx}/include/FidelityFX/gpu/*.h" "${_ffx}/include/FidelityFX/gpu/*.hlsl"
   "${_ffx}/src/backends/dx12/shaders/fsr3upscaler/*.hlsl")
+if(BOTW_FFX_SHADERS_DIR)
+  add_custom_target(botw_ffx_shaders)
+else()
 add_custom_command(
   OUTPUT "${_ffx_shaders}/compiled.stamp"
   COMMAND
@@ -49,6 +63,7 @@ add_custom_command(
   COMMENT "Compiling FidelityFX FSR 3.1 DXIL permutations on the build host"
   VERBATIM)
 add_custom_target(botw_ffx_shaders DEPENDS "${_ffx_shaders}/compiled.stamp")
+endif()
 
 # Generate the UWP compute-only backend without modifying the external checkout.
 # PIX is optional desktop instrumentation. Root-signature serialization already

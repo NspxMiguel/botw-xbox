@@ -29,7 +29,13 @@ DXC through the existing CrossOver installation, entirely at build time. This is
 a necessary departure from the assumed shipped-header route. No DLL extraction,
 third-party shader distribution, or runtime FSR shader compilation is involved.
 
-Create an isolated build-local bottle once (do not reuse a personal bottle):
+Hosts without Windows or CrossOver (a paid product) can skip the shader compiler:
+the generated permutation headers come from MIT HLSL, so an `ffx-shaders`
+directory from any earlier build (on Windows, or a Mac with CrossOver) can be
+reused with `-DBOTW_FFX_SHADERS_DIR=<dir>` (it must contain `compiled.stamp`).
+With that option set, neither `BOTW_FFX_WINE` nor a bottle is needed.
+
+Otherwise, create an isolated build-local bottle once (do not reuse a personal bottle):
 
 ```sh
 export CX_BOTTLE_PATH="$PWD/build/ffx-bottles"
