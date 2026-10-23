@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #if defined(BOTW_PLATFORM_UWP)
+#include <csignal>
 #include "../../host/window.h"
 #include "../../latte/latte.h"
 #include "../../log.h"
@@ -2992,6 +2993,33 @@ int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         LOG("FATAL exception 0x%08lx at exe+0x%llx (pc 0x%llx)", e->ExceptionRecord->ExceptionCode,
             (unsigned long long)(pc - exe), (unsigned long long)pc);
         return EXCEPTION_CONTINUE_SEARCH;
+    });
+    // abort() and std::terminate end the process without reaching the filter above; log them with
+    // the caller chain as exe offsets so console-only crashes can be symbolized.
+    static auto log_stack = [](char const *what) {
+        void *frames[24];
+        auto exe = reinterpret_cast<uintptr_t>(GetModuleHandleW(nullptr));
+        auto count = CaptureStackBackTrace(1, 24, frames, nullptr);
+        std::string chain;
+        for (USHORT i = 0; i < count; ++i) {
+            char item[24];
+            snprintf(item, sizeof item, " +0x%llx", (unsigned long long)(reinterpret_cast<uintptr_t>(frames[i]) - exe));
+            chain += item;
+        }
+        LOG("FATAL %s; stack (exe offsets):%s", what, chain.c_str());
+    };
+    signal(SIGABRT, [](int) { log_stack("abort()"); });
+    std::set_terminate([] {
+        std::string what = "std::terminate";
+        try {
+            if (auto current = std::current_exception())
+                std::rethrow_exception(current);
+        } catch (std::exception const &e) {
+            what += std::string(": ") + e.what();
+        } catch (...) {
+        }
+        log_stack(what.c_str());
+        std::_Exit(3);
     });
     LOG("BotW Xbox Recomp starting");
     CoreApplication::Run(make<App>());
