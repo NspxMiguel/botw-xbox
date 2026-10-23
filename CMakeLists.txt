@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.24)
 project(BotWRecomp LANGUAGES C CXX)
 
-set(BOTW_GENERATED_DIR "${CMAKE_SOURCE_DIR}/generated" CACHE PATH "Player-generated guest source directory")
+set(BOTW_GENERATED_DIR
+    "${CMAKE_SOURCE_DIR}/generated"
+    CACHE PATH "Player-generated guest source directory")
 
 option(BOTW_BUILD_GAME "Link player-generated guest code into the runtime" ON)
 if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
@@ -24,8 +26,9 @@ endif()
 if(MSVC)
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_DEPRECATE)
   if(BOTW_PLATFORM STREQUAL "uwp")
-    # MSVC 14.44 STL unconditionally imports getenv/system from the UCRT headers.
-    # This exposes CRT declarations only; WINAPI_FAMILY still restricts Windows APIs.
+    # MSVC 14.44 STL unconditionally imports getenv/system from the UCRT
+    # headers. This exposes CRT declarations only; WINAPI_FAMILY still restricts
+    # Windows APIs.
     add_compile_definitions(_CRT_USE_WINAPI_FAMILY_DESKTOP_APP)
   endif()
 endif()
@@ -79,7 +82,8 @@ if(BOTW_BUILD_GAME)
     )
   endif()
   add_library(guest OBJECT ${GUEST_SOURCES})
-  target_include_directories(guest PRIVATE runtime/include "${BOTW_GENERATED_DIR}")
+  target_include_directories(guest PRIVATE runtime/include
+                                           "${BOTW_GENERATED_DIR}")
   if(MSVC)
     target_compile_options(guest PRIVATE /O2 /w /fp:strict)
   else()
@@ -93,7 +97,8 @@ if(BOTW_BUILD_GAME)
   file(GLOB HUGE_SOURCES CONFIGURE_DEPENDS "${BOTW_GENERATED_DIR}/huge_*.cpp")
   if(NOT MSVC)
     set_source_files_properties(${BIG_SOURCES} PROPERTIES COMPILE_OPTIONS "-O1")
-    set_source_files_properties(${HUGE_SOURCES} PROPERTIES COMPILE_OPTIONS "-O0")
+    set_source_files_properties(${HUGE_SOURCES} PROPERTIES COMPILE_OPTIONS
+                                                           "-O0")
   endif()
 endif()
 
@@ -111,26 +116,43 @@ file(
   ${CMAKE_SOURCE_DIR}/runtime/cemu/imgui/*.mm
   ${CMAKE_SOURCE_DIR}/runtime/cemu_shims/*.cpp
   ${CMAKE_SOURCE_DIR}/runtime/cemu_shims/*.mm)
-list(FILTER CEMU_SOURCES EXCLUDE REGEX "LatteOverlay\\.cpp$|/dependencies/|SystemInfo(Win|Linux|BSD)\\.cpp$")
+list(FILTER CEMU_SOURCES EXCLUDE REGEX
+     "LatteOverlay\\.cpp$|/dependencies/|SystemInfo(Win|Linux|BSD)\\.cpp$")
 # BEGIN W2 renderer source selection. Platform/toolchain setup is owned by W4.
 if(NOT DEFINED BOTW_RENDERER)
-  set(BOTW_RENDERER metal CACHE STRING "GPU backend: metal or d3d12")
+  set(BOTW_RENDERER
+      metal
+      CACHE STRING "GPU backend: metal or d3d12")
 endif()
 set_property(CACHE BOTW_RENDERER PROPERTY STRINGS metal d3d12)
 if(BOTW_RENDERER STREQUAL "metal")
   list(FILTER CEMU_SOURCES EXCLUDE REGEX "/Renderer/D3D12/")
 elseif(BOTW_RENDERER STREQUAL "d3d12")
   if(NOT WIN32)
-    message(FATAL_ERROR "D3D12 requires a Windows/UWP toolchain; use the backend syntax-check script on macOS")
+    message(
+      FATAL_ERROR
+        "D3D12 requires a Windows/UWP toolchain; use the backend syntax-check script on macOS"
+    )
   endif()
-  list(FILTER CEMU_SOURCES EXCLUDE REGEX "/Renderer/Metal/|/Renderer/MetalView\\.mm$|/imgui/.*\\.mm$|/Common/unix/|SystemInfoMac\\.cpp$")
+  list(
+    FILTER
+    CEMU_SOURCES
+    EXCLUDE
+    REGEX
+    "/Renderer/Metal/|/Renderer/MetalView\\.mm$|/imgui/.*\\.mm$|/Common/unix/|SystemInfoMac\\.cpp$"
+  )
 else()
   message(FATAL_ERROR "Unknown BOTW_RENDERER: ${BOTW_RENDERER}")
 endif()
-# END W2 renderer source selection.
-# BEGIN W11 msvc
+# END W2 renderer source selection. BEGIN W11 msvc
 if(BOTW_PLATFORM MATCHES "^(uwp|win32)$")
-  list(FILTER CEMU_SOURCES EXCLUDE REGEX "\\.mm$|/cemu_shims/overlay_(menu|touch)\\.cpp$|SystemInfoUnix\\.cpp$|LatteDecompilerEmitMSL\\.cpp$")
+  list(
+    FILTER
+    CEMU_SOURCES
+    EXCLUDE
+    REGEX
+    "\\.mm$|/cemu_shims/overlay_(menu|touch)\\.cpp$|SystemInfoUnix\\.cpp$|LatteDecompilerEmitMSL\\.cpp$"
+  )
 else()
   list(FILTER CEMU_SOURCES EXCLUDE REGEX "/cemu_shims/windows/")
 endif()
@@ -168,39 +190,56 @@ if(BOTW_RENDERER STREQUAL "metal")
 endif()
 # BEGIN W2 renderer dependencies.
 if(BOTW_RENDERER STREQUAL "d3d12")
-  include(${CMAKE_SOURCE_DIR}/runtime/cemu/Cafe/HW/Latte/Renderer/D3D12/renderer.cmake)
+  include(
+    ${CMAKE_SOURCE_DIR}/runtime/cemu/Cafe/HW/Latte/Renderer/D3D12/renderer.cmake
+  )
 endif()
 # END W2 renderer dependencies.
 
 file(GLOB_RECURSE RUNTIME_SOURCES CONFIGURE_DEPENDS
-  ${CMAKE_SOURCE_DIR}/runtime/src/*.cpp
-  ${CMAKE_SOURCE_DIR}/runtime/src/*.mm)
-# BEGIN W8 mods
-# Keep the portable catalog explicit despite the runtime's recursive glob.
+     ${CMAKE_SOURCE_DIR}/runtime/src/*.cpp ${CMAKE_SOURCE_DIR}/runtime/src/*.mm)
+# BEGIN W8 mods Keep the portable catalog explicit despite the runtime's
+# recursive glob.
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/mods/")
-list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/mods/catalog.cpp
+list(
+  APPEND
+  RUNTIME_SOURCES
+  ${CMAKE_SOURCE_DIR}/runtime/src/mods/catalog.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/mods/json_min.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/mods/store.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/mods/archive_install.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/mods/gamebanana.cpp
   ${CMAKE_SOURCE_DIR}/runtime/src/mods/zip_install.cpp)
-# END W8 mods
-# ---- W1 platform sources (owned by W1) -------------------------------------------------------
-# Keep test mains and the other platform's implementation out of the application.
+# END W8 mods ---- W1 platform sources (owned by W1)
+# -------------------------------------------------------
+# Keep test mains and the other platform's implementation out of the
+# application.
 list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/platform/")
 list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/clock.cpp)
-if(WIN32 OR BOTW_PLATFORM STREQUAL "win32" OR BOTW_PLATFORM STREQUAL "uwp")
-  list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/win32/platform.cpp)
+if(WIN32
+   OR BOTW_PLATFORM STREQUAL "win32"
+   OR BOTW_PLATFORM STREQUAL "uwp")
+  list(APPEND RUNTIME_SOURCES
+       ${CMAKE_SOURCE_DIR}/runtime/src/platform/win32/platform.cpp)
 else()
-  list(APPEND RUNTIME_SOURCES ${CMAKE_SOURCE_DIR}/runtime/src/platform/apple/platform.cpp)
+  list(APPEND RUNTIME_SOURCES
+       ${CMAKE_SOURCE_DIR}/runtime/src/platform/apple/platform.cpp)
 endif()
-# ---- end W1 platform sources ---------------------------------------------------------------
+# ---- end W1 platform sources
+# ---------------------------------------------------------------
 # BEGIN W3 UWP host sources (W3-owned block)
 if(BOTW_PLATFORM STREQUAL "uwp")
-  list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/runtime/src/(main|settings)\\.cpp$|/audio/output\\.cpp$|/host/(window\\.mm|menu\\.cpp|touch\\.cpp)$")
+  list(
+    FILTER
+    RUNTIME_SOURCES
+    EXCLUDE
+    REGEX
+    "/runtime/src/(main|settings)\\.cpp$|/audio/output\\.cpp$|/host/(window\\.mm|menu\\.cpp|touch\\.cpp)$"
+  )
   list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/host/uwp/tests/")
 else()
-  # Do not let the recursive source glob pull Windows code or the test main into Apple builds.
+  # Do not let the recursive source glob pull Windows code or the test main into
+  # Apple builds.
   list(FILTER RUNTIME_SOURCES EXCLUDE REGEX "/host/uwp/")
 endif()
 # END W3 UWP host sources
@@ -211,7 +250,8 @@ add_executable(BotWRecomp ${RUNTIME_SOURCES} $<TARGET_OBJECTS:cemu_gpu>)
 target_include_directories(BotWRecomp PRIVATE runtime/include runtime/src)
 # BEGIN W11 msvc
 if(MSVC AND BOTW_PLATFORM MATCHES "^(uwp|win32)$")
-  # std::thread uses the executable's default stack reserve for guest call depth.
+  # std::thread uses the executable's default stack reserve for guest call
+  # depth.
   target_link_options(BotWRecomp PRIVATE /STACK:67108864)
 endif()
 # END W11 msvc
@@ -225,46 +265,63 @@ endif()
 if(BOTW_RENDERER STREQUAL "d3d12")
   target_link_libraries(BotWRecomp PRIVATE ${BOTW_D3D12_LIBRARIES})
 endif()
-# END W2 renderer link dependencies.
-# BEGIN W3 UWP host target configuration (W3-owned block)
+# END W2 renderer link dependencies. BEGIN W3 UWP host target configuration
+# (W3-owned block)
 if(BOTW_PLATFORM STREQUAL "uwp")
-  target_compile_definitions(BotWRecomp PRIVATE BOTW_PLATFORM_UWP=1 NOMINMAX WIN32_LEAN_AND_MEAN)
+  target_compile_definitions(BotWRecomp PRIVATE BOTW_PLATFORM_UWP=1 NOMINMAX
+                                                WIN32_LEAN_AND_MEAN)
   target_compile_definitions(cemu_gpu PRIVATE BOTW_PLATFORM_UWP=1)
   target_include_directories(BotWRecomp PRIVATE runtime/src/host/uwp/compat)
-  target_link_libraries(BotWRecomp PRIVATE windowsapp xaudio2 mfplat mfreadwrite mfuuid)
+  target_link_libraries(BotWRecomp PRIVATE windowsapp xaudio2 mfplat
+                                           mfreadwrite mfuuid)
   set(W3_UWP_PACKAGE ${CMAKE_SOURCE_DIR}/runtime/src/host/uwp)
   set(W3_UWP_ASSETS
-    ${W3_UWP_PACKAGE}/Assets/StoreLogo.png
-    ${W3_UWP_PACKAGE}/Assets/Square44x44Logo.png
-    ${W3_UWP_PACKAGE}/Assets/Square150x150Logo.png
-    ${W3_UWP_PACKAGE}/Assets/SplashScreen.png)
-  target_sources(BotWRecomp PRIVATE ${W3_UWP_PACKAGE}/Package.appxmanifest ${W3_UWP_ASSETS})
-  set_source_files_properties(${W3_UWP_ASSETS} PROPERTIES
-    VS_DEPLOYMENT_CONTENT TRUE VS_DEPLOYMENT_LOCATION "Assets")
+      ${W3_UWP_PACKAGE}/Assets/StoreLogo.png
+      ${W3_UWP_PACKAGE}/Assets/Square44x44Logo.png
+      ${W3_UWP_PACKAGE}/Assets/Square150x150Logo.png
+      ${W3_UWP_PACKAGE}/Assets/SplashScreen.png)
+  target_sources(BotWRecomp PRIVATE ${W3_UWP_PACKAGE}/Package.appxmanifest
+                                    ${W3_UWP_ASSETS})
+  set_source_files_properties(
+    ${W3_UWP_ASSETS} PROPERTIES VS_DEPLOYMENT_CONTENT TRUE
+                                VS_DEPLOYMENT_LOCATION "Assets")
   set(W12_DRIVE_SOUND ${W3_UWP_PACKAGE}/Assets/sfx/drive.wav)
   target_sources(BotWRecomp PRIVATE ${W12_DRIVE_SOUND})
-  set_source_files_properties(${W12_DRIVE_SOUND} PROPERTIES
-    VS_DEPLOYMENT_CONTENT TRUE VS_DEPLOYMENT_LOCATION "Assets/sfx")
-  set(W3_UWP_WALLPAPERS
-    ${W3_UWP_PACKAGE}/Assets/wallpapers/meadow.jpg
-    ${W3_UWP_PACKAGE}/Assets/wallpapers/shrine.jpg)
+  set_source_files_properties(
+    ${W12_DRIVE_SOUND} PROPERTIES VS_DEPLOYMENT_CONTENT TRUE
+                                  VS_DEPLOYMENT_LOCATION "Assets/sfx")
+  set(W3_UWP_WALLPAPERS ${W3_UWP_PACKAGE}/Assets/wallpapers/meadow.jpg
+                        ${W3_UWP_PACKAGE}/Assets/wallpapers/shrine.jpg)
   target_sources(BotWRecomp PRIVATE ${W3_UWP_WALLPAPERS})
-  set_source_files_properties(${W3_UWP_WALLPAPERS} PROPERTIES
-    VS_DEPLOYMENT_CONTENT TRUE VS_DEPLOYMENT_LOCATION "Assets/wallpapers")
+  set_source_files_properties(
+    ${W3_UWP_WALLPAPERS} PROPERTIES VS_DEPLOYMENT_CONTENT TRUE
+                                    VS_DEPLOYMENT_LOCATION "Assets/wallpapers")
   if(MSVC)
     target_compile_options(BotWRecomp PRIVATE /await:strict /permissive- /utf-8)
     target_link_options(BotWRecomp PRIVATE /SUBSYSTEM:WINDOWS /APPCONTAINER)
-    # DLLs NXbox does not import: load them on first use, so a console without one still starts and logs it.
-    target_link_options(BotWRecomp PRIVATE /DELAYLOAD:D3DCOMPILER_47.dll /DELAYLOAD:XAudio2_9.dll
-                        /DELAYLOAD:api-ms-win-gaming-deviceinformation-l1-1-0.dll
-                        /DELAYLOAD:api-ms-win-core-memory-l1-1-6.dll /DELAYLOAD:api-ms-win-core-psapi-l1-1-0.dll /DELAYLOAD:libcrypto-3-x64.dll)
-    # The Store lib folder (lib/x64/store) lacks delayimp.lib; MSVC keeps it in lib/x64.
-    # cl.exe lives in <MSVC>/bin/Hostx64/x64; VCToolsInstallDir is unset when the VS generator configures.
-    get_filename_component(BOTW_DELAYIMP "${CMAKE_CXX_COMPILER}/../../../../lib/x64/delayimp.lib" ABSOLUTE)
+    # DLLs NXbox does not import: load them on first use, so a console without
+    # one still starts and logs it.
+    target_link_options(
+      BotWRecomp
+      PRIVATE
+      /DELAYLOAD:D3DCOMPILER_47.dll
+      /DELAYLOAD:XAudio2_9.dll
+      /DELAYLOAD:api-ms-win-gaming-deviceinformation-l1-1-0.dll
+      /DELAYLOAD:api-ms-win-core-memory-l1-1-6.dll
+      /DELAYLOAD:api-ms-win-core-psapi-l1-1-0.dll
+      /DELAYLOAD:libcrypto-3-x64.dll)
+    # The Store lib folder (lib/x64/store) lacks delayimp.lib; MSVC keeps it in
+    # lib/x64. cl.exe lives in <MSVC>/bin/Hostx64/x64; VCToolsInstallDir is
+    # unset when the VS generator configures.
+    get_filename_component(
+      BOTW_DELAYIMP "${CMAKE_CXX_COMPILER}/../../../../lib/x64/delayimp.lib"
+      ABSOLUTE)
     if(EXISTS "${BOTW_DELAYIMP}")
       target_link_libraries(BotWRecomp PRIVATE "${BOTW_DELAYIMP}")
-    elseif(DEFINED ENV{VCToolsInstallDir} AND EXISTS "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
-      target_link_libraries(BotWRecomp PRIVATE "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
+    elseif(DEFINED ENV{VCToolsInstallDir}
+           AND EXISTS "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
+      target_link_libraries(
+        BotWRecomp PRIVATE "$ENV{VCToolsInstallDir}/lib/x64/delayimp.lib")
     else()
       target_link_libraries(BotWRecomp PRIVATE delayimp)
     endif()
@@ -280,7 +337,8 @@ endif()
 find_package(fmt REQUIRED)
 find_package(ZLIB REQUIRED)
 if(BOTW_PLATFORM STREQUAL "apple" AND NOT DEFINED OPENSSL_ROOT_DIR)
-  set(OPENSSL_ROOT_DIR /opt/homebrew/opt/openssl@3) # the shipped Mac build links OpenSSL 3
+  set(OPENSSL_ROOT_DIR /opt/homebrew/opt/openssl@3) # the shipped Mac build
+                                                    # links OpenSSL 3
 endif()
 find_package(OpenSSL REQUIRED)
 find_package(zstd REQUIRED CONFIG)
@@ -291,7 +349,8 @@ elseif(TARGET zstd::libzstd_static)
 else()
   set(BOTW_ZSTD_TARGET zstd::libzstd)
 endif()
-target_link_libraries(cemu_gpu PRIVATE fmt::fmt OpenSSL::Crypto ${BOTW_ZSTD_TARGET})
+target_link_libraries(cemu_gpu PRIVATE fmt::fmt OpenSSL::Crypto
+                                       ${BOTW_ZSTD_TARGET})
 # The upstream libarchive package excludes UWP. A separately validated sandbox
 # build can opt in; ordinary Xbox builds retain the transactional ZIP backend.
 option(BOTW_MOD_LIBARCHIVE "Enable packaged libarchive for 7z/RAR mods" OFF)
@@ -300,7 +359,8 @@ if(BOTW_MOD_LIBARCHIVE)
   target_compile_definitions(BotWRecomp PRIVATE BOTW_MOD_LIBARCHIVE=1)
   target_link_libraries(BotWRecomp PRIVATE LibArchive::LibArchive)
 endif()
-target_link_libraries(BotWRecomp PRIVATE ZLIB::ZLIB fmt::fmt OpenSSL::Crypto ${BOTW_ZSTD_TARGET})
+target_link_libraries(BotWRecomp PRIVATE ZLIB::ZLIB fmt::fmt OpenSSL::Crypto
+                                         ${BOTW_ZSTD_TARGET})
 if(BOTW_PLATFORM STREQUAL "apple")
   target_compile_options(
     BotWRecomp PRIVATE -mcpu=apple-m1 $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
@@ -344,12 +404,16 @@ if(BOTW_PLATFORM STREQUAL "uwp")
     FILES $<TARGET_RUNTIME_DLLS:BotWRecomp>
     DESTINATION .
     COMPONENT Runtime)
-  # zlib and OpenSSL come in as plain import libraries, so TARGET_RUNTIME_DLLS misses their DLLs.
+  # zlib and OpenSSL come in as plain import libraries, so TARGET_RUNTIME_DLLS
+  # misses their DLLs.
   foreach(dll z.dll libcrypto-3-x64.dll)
     string(MAKE_C_IDENTIFIER "BOTW_DLL_${dll}" var)
     find_file(${var} ${dll} PATH_SUFFIXES bin NO_CACHE)
     if(${var})
-      install(FILES ${${var}} DESTINATION . COMPONENT Runtime)
+      install(
+        FILES ${${var}}
+        DESTINATION .
+        COMPONENT Runtime)
     endif()
   endforeach()
 endif()
