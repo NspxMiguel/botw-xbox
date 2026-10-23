@@ -230,7 +230,7 @@ if(BOTW_PLATFORM STREQUAL "uwp")
   target_compile_definitions(BotWRecomp PRIVATE BOTW_PLATFORM_UWP=1 NOMINMAX WIN32_LEAN_AND_MEAN)
   target_compile_definitions(cemu_gpu PRIVATE BOTW_PLATFORM_UWP=1)
   target_include_directories(BotWRecomp PRIVATE runtime/src/host/uwp/compat)
-  target_link_libraries(BotWRecomp PRIVATE windowsapp xaudio2)
+  target_link_libraries(BotWRecomp PRIVATE windowsapp xaudio2 mfplat mfreadwrite mfuuid)
   set(W3_UWP_PACKAGE ${CMAKE_SOURCE_DIR}/runtime/src/host/uwp)
   set(W3_UWP_ASSETS
     ${W3_UWP_PACKAGE}/Assets/StoreLogo.png

@@ -6,6 +6,7 @@
 #include "drive_sound.h"
 #include "first_frame.h"
 #include "polish.h"
+#include "recording_audio.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -163,6 +164,7 @@ void push_tv(const int16_t *input, int frames, int channels) {
     std::lock_guard guard(lock);
     if (!source || paused || callback.failed)
         return;
+    const auto recording_time = uwp::recording_audio_time();
     // Bounded queue: drop excess samples rather than allocate or block the AX callback.
     for (int offset = 0; offset < frames;) {
         Slot *available = nullptr;
@@ -194,6 +196,7 @@ void push_tv(const int16_t *input, int frames, int channels) {
             available->busy.store(false, std::memory_order_release);
             return;
         }
+        uwp::record_audio(available->samples.data(), count, recording_time, offset);
         submitted += count;
         offset += count;
     }

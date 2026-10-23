@@ -430,7 +430,9 @@ void D3D12Renderer::WaitForSubmission(uint64 submissionId)
 	if (GetCompletedSubmissionId() >= submissionId)
 		return;
 	D3D12_ThrowIfFailed(m_fence->SetEventOnCompletion(submissionId, m_fenceEvent), "SetEventOnCompletion");
+	const auto start = std::chrono::steady_clock::now();
 	WaitForSingleObjectEx(m_fenceEvent, INFINITE, FALSE);
+	m_fenceWaitMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 	GetCompletedSubmissionId();
 }
 
@@ -1050,6 +1052,12 @@ void D3D12Renderer::UpdatePresentDiagnostics(D3D12SwapChain *swapChain, bool int
 	m_presentWindowStart = now;
 	const D3D12SwapChain::PresentStats stats = swapChain->TakePresentStats();
 	const double hz = swapChain->MeasureRefreshRate();
+	// Where a frame's time goes: blocked in Present is vsync/queue, fence waits are the GPU, the rest is the Latte thread.
+	if (++m_presentLogWindows % 5 == 0)
+		cemuLog_log(LogType::Force, "D3D12: {:.1f} presents/s, Present blocked {:.1f} ms/frame (max {:.1f}), GPU fence wait {:.1f} ms/frame",
+			stats.presents / seconds, stats.presents ? stats.blockedMs / stats.presents : 0.0, stats.maxBlockedMs,
+			stats.presents ? m_fenceWaitMs / stats.presents : 0.0);
+	m_fenceWaitMs = 0;
 	if (!interpolationWanted)
 	{
 		m_interpolationPaused = false;

@@ -430,6 +430,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	std::unique_ptr<D3D12FrameInterpolator> m_frameInterpolator; // created when frame interpolation is first used
 	// interpolation presents twice per game frame, which halves the game's speed on a display under 100 Hz: measured every
 	// 2 s from the main swap chain (UpdatePresentDiagnostics), interpolation is paused while the display is that slow
+	double m_fenceWaitMs = 0;
+	uint32 m_presentLogWindows = 0;
 	bool m_interpolationPaused = false;
 	// Xbox: vsynced presents run at 60 Hz while the HDMI mode is 120 Hz. Then both frames are presented without vsync and
 	// paced by Cemu, half a game frame apart (relies on VRR or tolerates tearing)

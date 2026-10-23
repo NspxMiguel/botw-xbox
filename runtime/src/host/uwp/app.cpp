@@ -2897,6 +2897,14 @@ void *core_window() { return host_window ? get_abi(host_window) : nullptr; }
 bool gamepad_screen_requested() { return drc; }
 bool presentation_allowed() { return visible; }
 void present_overlays(void *device, void *queue, void *chain) {
+    // Presents per second, next to the game's flip count ("frame N"): they can differ.
+    static uint64_t presents = 0;
+    static auto window = std::chrono::steady_clock::now();
+    if (++presents % 600 == 0) {
+        auto now = std::chrono::steady_clock::now();
+        LOG("present rate %.1f/s", 600 / std::chrono::duration<double>(now - window).count());
+        window = now;
+    }
     try {
         draw_debug_hud(device, queue, chain);
     } catch (...) {

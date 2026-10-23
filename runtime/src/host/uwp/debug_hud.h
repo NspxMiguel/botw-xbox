@@ -32,7 +32,7 @@ using Microsoft::WRL::ComPtr;
 using Clock = std::chrono::steady_clock;
 inline void check(HRESULT result) { winrt::check_hresult(result); }
 
-// Renderer-thread owned. No graphics resources are created on the UI or JPEG worker threads.
+// Renderer-thread owned. The UI and recording worker never use the overlay context directly.
 struct Graphics {
     ComPtr<IDXGISwapChain3> chain;
     DXGI_SWAP_CHAIN_DESC1 desc{};
@@ -129,7 +129,7 @@ inline std::atomic<uint64_t> debug_game_flips{0};
 struct DebugHud {
     bool enabled = false;
     std::wstring device, version;
-    uint64_t generation = 0, previous_flips = 0;
+    uint64_t generation = 0, previous_flips = 0, presents = 0;
     capture_detail::Clock::time_point fps_time{}, memory_time{};
     std::wstring fps = L"FPS 0 · frame 0.0 ms", memory;
     std::array<std::wstring, 5> line_text;
@@ -164,12 +164,16 @@ inline void draw_debug_hud(void *device, void *queue, void *chain) {
         h.fps_time = now;
     }
     bool changed = h.generation != graphics_generation;
+    ++h.presents;
     auto elapsed = std::chrono::duration<double>(now - h.fps_time).count();
     if (elapsed >= 1.) {
         auto flips = debug_game_flips.load(std::memory_order_relaxed);
-        auto count = flips - h.previous_flips;
+        // FPS is what reaches the screen (presents); the game's own flips can run ahead of it.
+        auto game = flips - h.previous_flips;
         wchar_t text[96];
-        swprintf_s(text, L"FPS %.0f · frame %.1f ms", count / elapsed, count ? elapsed * 1000 / count : 0.);
+        swprintf_s(text, L"FPS %.0f · frame %.1f ms · game %.0f/s", h.presents / elapsed,
+                   h.presents ? elapsed * 1000 / h.presents : 0., game / elapsed);
+        h.presents = 0;
         h.fps = text;
         h.previous_flips = flips;
         h.fps_time = now;
@@ -207,7 +211,8 @@ inline void draw_debug_hud(void *device, void *queue, void *chain) {
     g.canvas->BeginDraw();
     float scale = g.desc.Height / 1080.f;
     g.canvas->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
-    float x = g.desc.Width * .03f / scale, y = 32.4f;
+    // Top right: the game keeps hearts and stamina top left and the minimap bottom right.
+    float x = g.desc.Width * .97f / scale - h.width, y = 32.4f;
     g.brush->SetColor(D2D1::ColorF(0, 0, 0, .55f));
     g.canvas->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y, x + h.width, y + 172), 16, 16),
                                    g.brush.Get());
