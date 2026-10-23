@@ -298,7 +298,7 @@ void D3D12ImGuiRenderer::Render(ImDrawData *drawData, D3D12_CPU_DESCRIPTOR_HANDL
 				auto *tex = (Texture *)texId;
 				D3D12StageTableDesc table;
 				table.srv[srvReg] = tex ? tex->srv : D3D12_CPU_DESCRIPTOR_HANDLE{};
-				cmd->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), m_renderer->WriteStageTable(table));
+				cmd->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), m_renderer->WriteStageTable(table, D3D12Const::Stage::Pixel));
 				boundTexture = texId;
 			}
 			cmd->DrawIndexedInstanced(pcmd->ElemCount, 1, pcmd->IdxOffset + globalIdxOffset, (INT)(pcmd->VtxOffset + globalVtxOffset), 0);

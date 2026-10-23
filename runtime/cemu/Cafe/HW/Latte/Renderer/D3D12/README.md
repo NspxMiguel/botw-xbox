@@ -60,19 +60,33 @@ intrinsics (renamed), and push constant arrays with an 8 byte stride (internal s
 
 ### Binding model
 
-One root signature for everything (`D3D12Renderer::CreateRootSignature`):
+Shared graphics root signature (`D3D12Renderer::CreateRootSignature`):
 
 | Root param | Content |
 |---|---|
-| 0, 2, 4 | VS / PS / GS table: 17 CBVs (uniform var block + 16 uniform blocks), 18 SRVs, 1 UAV (transform feedback) |
+| 0, 2, 4 | VS / PS / GS table: b4..b16 (13 CBVs), 18 SRVs, 1 UAV (32 descriptors) |
 | 1, 3, 5 | VS / PS / GS sampler table (18 samplers) |
-| 6 | 16 root constants: vertex runtime data (base vertex, base instance for `gl_VertexIndex`/`gl_InstanceIndex`) |
-| 7 | 16 root constants: push constants for internal shaders |
+| 6..17 | Four root CBVs per stage: b0..b3 in the unchanged stage CBV space |
+| 18 | 16 root constants: vertex runtime data (base vertex, base instance for `gl_VertexIndex`/`gl_InstanceIndex`) |
+| 19 | 16 root constants: push constants for internal shaders |
 
-CBV/SRV/UAV tables are cached by their complete descriptor contents within the recording submission. The cache
-compares the full key after hashing, and invalidates on submission, ring wrap/reset or staging descriptor recycling.
-On a miss, one bulk copy fills the table; per-stage/register staging CBVs are recreated only when their address,
-size or submission changes. Immutable upload bytes are reused for equal uniform variable blocks in the same submission.
+The signature uses 62 DWORDs: 6 tables + 16 runtime + 16 push + 12 root CBVs * 2.
+Register ranking and shader bytecode remain unchanged. Unused root CBVs reference
+a permanent 64-KiB zero buffer; upload, guest-cache and scratch resources have
+64-KiB physical tails so a root CBV never crosses the backing resource boundary.
+Root addresses are compared per command list and invalidated on signature/heap rebinding.
+
+CBV/SRV/UAV tables compare complete stable descriptor contents (excluding root
+CBVs), first against the last table and then a fixed 512-entry open-addressed
+cache per layout, with at most 16 probes and no per-draw allocation. Hits are
+valid only within the recording submission and allocation lap: GPU generation
+changes on submission, ring wrap and empty-ring reset. Staging generation changes
+on descriptor free/recycle and explicit in-place SRV rewrites (FFX/FSR). Texture
+view/swizzle SRVs are immutable. On a miss, one bulk copy fills the table;
+per-stage/register staging CBVs are recreated only when their address or size
+changes. FFX/FSR retain the original 36-descriptor layout with their private root
+signatures. See [the root-CBV report](../../../../../../../docs/latte-rootcbv.md).
+Immutable upload bytes are reused for equal uniform variable blocks in the same submission.
 
 Sampler tables are deduplicated and cached (D3D12 caps shader-visible sampler heaps at 2048 entries). Unchanged
 per-stage sampler descriptions bypass the sampler lookup; heap reset advances an epoch and invalidates these hits.

@@ -216,6 +216,9 @@ D3D12_CPU_DESCRIPTOR_HANDLE LatteTextureViewD3D12::GetSRV(uint32 gpuSamplerSwizz
 
 D3D12_CPU_DESCRIPTOR_HANDLE LatteTextureViewD3D12::CreateSRV(uint32 gpuSamplerSwizzle)
 {
+	// Each swizzle owns a fresh immutable source handle, including slice-copy views.
+	// Destruction frees it through the staging heap, advancing its generation before
+	// reuse. No per-view write generation is needed by the stage-table cache.
 	// The SRV dimension has to match the sampler type in the shader. Cemu's GLSL emitter declares:
 	//   DIM_1D -> sampler1D, DIM_2D/DIM_2D_MSAA -> sampler2D, DIM_2D_ARRAY -> sampler2DArray,
 	//   DIM_CUBEMAP -> samplerCubeArray, DIM_3D -> sampler3D

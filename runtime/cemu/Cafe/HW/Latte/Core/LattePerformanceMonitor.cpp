@@ -159,7 +159,7 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				"draw-state {:.3f}, pipeline-bind {:.3f}, vertex-buffers {:.3f}, root-signature {:.3f}, render-state {:.3f}, draw-call {:.3f}; "
 				"top: {} {:.3f}, {} {:.3f}, {} {:.3f}; covered {:.1f}%, unaccounted {:.1f}% ({:.3f} ms/frame); "
 				"pipeline-miss/frame {:.2f}, texture-new/frame {:.2f}, texture-upload {:.0f} B/frame, buffer-upload {:.0f} B/frame; "
-				"descriptor-hit/frame {:.1f}, descriptor-fast/frame {:.1f}, descriptor-miss/frame {:.1f}; "
+				"descriptor-hit/frame {:.1f}, descriptor-fast/frame {:.1f}, descriptor-miss/frame {:.1f}; root-cbv-set/frame {:.1f}, root-cbv-skip/frame {:.1f}; "
 				"dynamic-state-hit/frame {:.1f}, dynamic-state-miss/frame {:.1f}; "
 				"transition-hit/frame {:.1f}, transition-miss/frame {:.1f}; index-hit/frame {:.1f}, index-miss/frame {:.1f}; fbo-hit/frame {:.1f}, fbo-miss/frame {:.1f}, pipeline-state-hit/frame {:.1f}; submit/frame {:.2f}, submit-empty/frame {:.2f}",
 				seconds, frames, perFrame(Counter::Draws), s_state.drawTotalNs * msPerNsPerFrame,
@@ -171,7 +171,7 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				names[order[2]], s_state.timeNs[order[2]] * msPerNsPerFrame,
 				covered * 100.0, (1.0 - covered) * 100.0, (1.0 - covered) * seconds * 1000.0 / frames,
 				perFrame(Counter::PipelineMisses), perFrame(Counter::TextureMisses), perFrame(Counter::TextureBytes), perFrame(Counter::BufferBytes),
-				perFrame(Counter::DescriptorHits), perFrame(Counter::DescriptorFastHits), perFrame(Counter::DescriptorMisses),
+				perFrame(Counter::DescriptorHits), perFrame(Counter::DescriptorFastHits), perFrame(Counter::DescriptorMisses), perFrame(Counter::RootCBVSets), perFrame(Counter::RootCBVSkips),
 				perFrame(Counter::DynamicStateHits), perFrame(Counter::DynamicStateMisses),
 				perFrame(Counter::TransitionHits), perFrame(Counter::TransitionMisses), perFrame(Counter::IndexHits), perFrame(Counter::IndexMisses),
 				perFrame(Counter::FramebufferHits), perFrame(Counter::FramebufferMisses), perFrame(Counter::PipelineStateHits), perFrame(Counter::Submissions), perFrame(Counter::EmptySubmissions));

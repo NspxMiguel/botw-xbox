@@ -346,32 +346,59 @@ void D3D12Renderer::draw_buildSamplerDesc(LatteDecompilerShader *shader, uint32 
 
 /* --- descriptor tables --- */
 
+void D3D12Renderer::BindStageRootCBVs(const D3D12StageTableDesc &bindings, D3D12Const::Stage stage)
+{
+	for (uint32 i = 0; i < D3D12Const::RootCBVCount(stage); ++i)
+	{
+		// Always replace unused registers with a permanent 64-KiB zero buffer. Keeping
+		// an old upload address could expose retired memory when the next shader changes.
+		const auto address = bindings.cbvAddress[i] ? bindings.cbvAddress[i] : m_zeroConstantBuffer->GetGPUVirtualAddress();
+		cemu_assert_debug(address % D3D12Const::kCBVAlignment == 0);
+		auto &current = m_state.currentRootCBVs[(uint32)stage][i];
+		if (current == address)
+			LatteProfiler::Add(LatteProfiler::Counter::RootCBVSkips);
+		else
+		{
+			m_cmdList->SetGraphicsRootConstantBufferView(D3D12Const::RootParamStageRootCBV(stage, i), address);
+			current = address;
+			LatteProfiler::Add(LatteProfiler::Counter::RootCBVSets);
+		}
+	}
+}
+
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTableDesc &tableDesc, D3D12Const::Stage stage)
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
 	using namespace D3D12Const;
+	const auto key = tableDesc.TableKey(stage);
 	auto &last = m_lastViewTable[(uint32)stage];
+	auto &cache = m_viewTableCache[(uint32)stage];
 	const auto generation = m_gpuViewHeap->GetGeneration();
 	const auto sourceGeneration = m_stagingViewHeap->GetGeneration();
-	if (const auto *table = last.Find(tableDesc, generation, sourceGeneration))
+	if (const auto *table = last.Find(key, generation, sourceGeneration))
 	{
 		LatteProfiler::Add(LatteProfiler::Counter::DescriptorHits);
 		LatteProfiler::Add(LatteProfiler::Counter::DescriptorFastHits);
 		return *table;
 	}
-	// Most non-adjacent tables differ in their transient uniform CBV.
-	// Go straight to the linear ring: no expanded key, hash or secondary lookup.
+	if (const auto *table = cache.Find(key, generation, sourceGeneration))
+	{
+		LatteProfiler::Add(LatteProfiler::Counter::DescriptorHits);
+		last.Store(key, *table, generation, sourceGeneration);
+		return *table;
+	}
 	LatteProfiler::Add(LatteProfiler::Counter::DescriptorMisses);
 
-	auto table = m_gpuViewHeap->AllocateTable(kStageTableSize);
+	const UINT tableSize = StageTableSize(stage);
+	auto table = m_gpuViewHeap->AllocateTable(tableSize);
 	// Copy stable CBVs, SRVs and null slots in one call; only changed CBVs need to be created.
 	D3D12_CPU_DESCRIPTOR_HANDLE sources[kStageTableSize];
-	for (uint32 i = 0; i < kMaxCBVsPerStage; ++i)
+	for (uint32 i = RootCBVCount(stage); i < kMaxCBVsPerStage; ++i)
 	{
 		auto &cbv = m_cbvCache[(uint32)stage][i];
 		if (!tableDesc.cbvAddress[i])
 		{
-			sources[kStageTableOffsetCBV + i] = m_nullCBV;
+			sources[kStageTableOffsetCBV + i - RootCBVCount(stage)] = m_nullCBV;
 			continue;
 		}
 		if (!cbv.descriptor.ptr)
@@ -382,12 +409,12 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 			cbv.address = tableDesc.cbvAddress[i];
 			cbv.size = tableDesc.cbvSize[i];
 		}
-		sources[kStageTableOffsetCBV + i] = cbv.descriptor;
+		sources[kStageTableOffsetCBV + i - RootCBVCount(stage)] = cbv.descriptor;
 	}
 	for (uint32 i = 0; i < kMaxSRVsPerStage; ++i)
-		sources[kStageTableOffsetSRV + i] = tableDesc.srv[i].ptr ? tableDesc.srv[i] : m_nullSRV2D;
+		sources[StageTableOffsetSRV(stage) + i] = tableDesc.srv[i].ptr ? tableDesc.srv[i] : m_nullSRV2D;
 	auto &uav = m_stageUAVCache[(uint32)stage];
-	sources[kStageTableOffsetUAV] = m_nullUAV;
+	sources[StageTableOffsetUAV(stage)] = m_nullUAV;
 	if (tableDesc.uavResource)
 	{
 		if (!uav.descriptor.ptr)
@@ -403,11 +430,14 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 			uav.resource = tableDesc.uavResource;
 			uav.size = tableDesc.uavSize;
 		}
-		sources[kStageTableOffsetUAV] = uav.descriptor;
+		sources[StageTableOffsetUAV(stage)] = uav.descriptor;
 	}
-	const UINT tableSize = kStageTableSize;
-	m_device->CopyDescriptors(1, &table.cpu, &tableSize, kStageTableSize, sources, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-	last.Store(tableDesc, table.gpu, m_gpuViewHeap->GetGeneration(), m_stagingViewHeap->GetGeneration());
+	m_device->CopyDescriptors(1, &table.cpu, &tableSize, tableSize, sources, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+	// AllocateTable can advance the ring generation: store only the post-allocation epoch.
+	const auto newGeneration = m_gpuViewHeap->GetGeneration();
+	const auto newSourceGeneration = m_stagingViewHeap->GetGeneration();
+	last.Store(key, table.gpu, newGeneration, newSourceGeneration);
+	cache.Store(key, table.gpu, newGeneration, newSourceGeneration);
 	return table.gpu;
 }
 
@@ -794,6 +824,7 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 		for (uint32 i = 0; i < stageBindingCount; i++)
 		{
 			const PreparedStageBindings &b = stageBindings[i];
+			BindStageRootCBVs(b.tableDesc, b.stage);
 			const auto table = WriteStageTable(b.tableDesc, b.stage);
 			auto &currentView = m_state.currentViewTables[(uint32)b.stage];
 			auto &currentSampler = m_state.currentSamplerTables[(uint32)b.stage];

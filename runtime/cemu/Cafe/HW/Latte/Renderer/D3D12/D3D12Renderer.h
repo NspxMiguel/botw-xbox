@@ -297,6 +297,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	// May submit the command list and reset the shader-visible sampler heap if it is full. All command list state is
 	// lost when that happens, so call this before recording any state that the following draw depends on.
 	D3D12_GPU_DESCRIPTOR_HANDLE GetSamplerTable(const D3D12_SAMPLER_DESC *samplers, uint32 count);
+	void BindStageRootCBVs(const D3D12StageTableDesc &bindings, D3D12Const::Stage stage);
 	void WriteCBV(D3D12_CPU_DESCRIPTOR_HANDLE dst, D3D12_GPU_VIRTUAL_ADDRESS address, uint32 size);
 	void InvalidateDrawState(); // forces all cached command list state to be re-applied
 
@@ -417,6 +418,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	std::unique_ptr<D3D12SamplerCache> m_samplerCache;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullRTV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullCBV{};
+	ComPtr<ID3D12Resource> m_zeroConstantBuffer;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullUAV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullSRV1D{}, m_nullSRV2D{}, m_nullSRV2DArray{}, m_nullSRVCubeArray{}, m_nullSRV3D{};
 
@@ -508,6 +510,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		float currentBlendFactor[4]{-1, -1, -1, -1};
 		uint32 currentStencilRef = 0xFFFFFFFF;
 		D3D12_GPU_DESCRIPTOR_HANDLE currentViewTables[3]{};
+		D3D12_GPU_VIRTUAL_ADDRESS currentRootCBVs[3][D3D12Const::kRootCBVsPerStage]{};
 		D3D12_GPU_DESCRIPTOR_HANDLE currentSamplerTables[3]{};
 		uint32 currentRuntimeData[D3D12Const::kRuntimeDataDwords]{};
 		bool runtimeDataValid = false;
@@ -531,6 +534,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	};
 	UniformCacheEntry m_uniformCache[3];
 	LatteDrawCache::ExactCache<D3D12StageTableDesc, D3D12_GPU_DESCRIPTOR_HANDLE> m_lastViewTable[4];
+	D3D12StageTableCache<> m_viewTableCache[4];
 	struct CBVCacheEntry
 	{
 		D3D12_CPU_DESCRIPTOR_HANDLE descriptor{};

@@ -20,6 +20,12 @@ class D3D12StagingDescriptorHeap
 
 	D3D12_CPU_DESCRIPTOR_HANDLE Allocate();
 	void Free(D3D12_CPU_DESCRIPTOR_HANDLE handle);
+	// Call before rewriting an existing SRV source used by cached GPU tables.
+	// This retires cache lookup results, not GPU copies, which remain immutable.
+	void NotifyDescriptorWrite()
+	{
+		m_generation.fetch_add(1, std::memory_order_relaxed);
+	}
 
 	D3D12_DESCRIPTOR_HEAP_TYPE GetType() const
 	{

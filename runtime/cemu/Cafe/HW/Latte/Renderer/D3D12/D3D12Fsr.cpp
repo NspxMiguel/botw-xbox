@@ -159,6 +159,7 @@ void D3D12Fsr::ResizeTargets(uint32 iw, uint32 ih, uint32 ow, uint32 oh)
 																			  IID_PPV_ARGS(&texture)),
 								"FSR texture");
 			renderer.GetDevice()->CreateRenderTargetView(texture.Get(), nullptr, rtv);
+			renderer.GetStagingViewHeap().NotifyDescriptorWrite();
 			renderer.GetDevice()->CreateShaderResourceView(texture.Get(), nullptr, srv);
 		};
 		create(iw, ih, input, inputRTV, inputSRV);

@@ -43,6 +43,8 @@ enum class Counter : size_t
 	DescriptorHits,
 	DescriptorFastHits,
 	DescriptorMisses,
+	RootCBVSets,
+	RootCBVSkips,
 	DynamicStateHits,
 	DynamicStateMisses,
 	TransitionHits,

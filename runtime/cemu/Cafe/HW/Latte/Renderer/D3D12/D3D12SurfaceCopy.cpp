@@ -175,7 +175,8 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	}
 	if (sint32 reg = remap.GetSRV(0); reg >= 0)
 		table.srv[reg] = view->GetSRVRGBA();
-	m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), WriteStageTable(table));
+	BindStageRootCBVs(table, D3D12Const::Stage::Pixel);
+	m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), WriteStageTable(table, D3D12Const::Stage::Pixel));
 	m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageSamplers(D3D12Const::Stage::Pixel), samplerTable);
 	uint32 runtimeData[D3D12Const::kRuntimeDataDwords]{};
 	m_cmdList->SetGraphicsRoot32BitConstants(D3D12Const::kRootParamRuntimeData, D3D12Const::kRuntimeDataDwords, runtimeData, 0);
@@ -293,7 +294,8 @@ void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *so
 	D3D12StageTableDesc table;
 	if (sint32 reg = remap.GetSRV(0); reg >= 0)
 		table.srv[reg] = srv;
-	m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), WriteStageTable(table));
+	BindStageRootCBVs(table, D3D12Const::Stage::Pixel);
+	m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), WriteStageTable(table, D3D12Const::Stage::Pixel));
 	m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageSamplers(D3D12Const::Stage::Pixel), samplerTable);
 	uint32 runtimeData[D3D12Const::kRuntimeDataDwords]{};
 	m_cmdList->SetGraphicsRoot32BitConstants(D3D12Const::kRootParamRuntimeData, D3D12Const::kRuntimeDataDwords, runtimeData, 0);

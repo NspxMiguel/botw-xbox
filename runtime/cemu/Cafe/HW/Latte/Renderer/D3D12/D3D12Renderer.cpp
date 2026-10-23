@@ -350,6 +350,16 @@ void D3D12Renderer::CreateNullDescriptors()
 	rtvDesc.ViewDimension = D3D12_RTV_DIMENSION_TEXTURE2D;
 	m_device->CreateRenderTargetView(nullptr, &rtvDesc, m_nullRTV);
 
+	// Root descriptors cannot use the descriptor-heap null CBV. Keep a real zero
+	// resource alive for the renderer lifetime, large enough for any legal cbuffer.
+	D3D12_HEAP_PROPERTIES zeroHeap = D3D12_HeapProps(D3D12_HEAP_TYPE_UPLOAD);
+	D3D12_RESOURCE_DESC zeroDesc = D3D12_BufferDesc(D3D12Const::kMaxConstantBufferBytes);
+	D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&zeroHeap, D3D12_HEAP_FLAG_NONE, &zeroDesc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&m_zeroConstantBuffer)), "CreateCommittedResource (zero constants)");
+	void *zeroData = nullptr;
+	D3D12_RANGE noRead{0, 0};
+	D3D12_ThrowIfFailed(m_zeroConstantBuffer->Map(0, &noRead, &zeroData), "Map (zero constants)");
+	memset(zeroData, 0, D3D12Const::kMaxConstantBufferBytes);
+	m_zeroConstantBuffer->Unmap(0, nullptr);
 	m_nullCBV = m_stagingViewHeap->Allocate();
 	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
 	cbvDesc.BufferLocation = 0;
@@ -547,8 +557,12 @@ void D3D12Renderer::BindRootSignatureAndHeaps()
 		table = {};
 	for (auto &table : m_state.currentSamplerTables)
 		table = {};
+	memset(m_state.currentRootCBVs, 0, sizeof(m_state.currentRootCBVs));
 	m_state.runtimeDataValid = false;
 	m_state.rootSignatureBound = true;
+	const D3D12StageTableDesc emptyBindings{};
+	for (uint32 s = 0; s < (uint32)D3D12Const::Stage::Count; ++s)
+		BindStageRootCBVs(emptyBindings, (D3D12Const::Stage)s);
 }
 
 void D3D12Renderer::InvalidateDrawState()
@@ -1984,7 +1998,7 @@ void D3D12Renderer::texture_copyImageSubData(LatteTexture *src, sint32 srcMip, s
 			ReleaseResourceDeferred(std::move(m_bufferCacheScratch));
 			m_bufferCacheScratchSize = AlignUp<uint32>(bufferSize, 1024 * 1024);
 			D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-			D3D12_RESOURCE_DESC bd = D3D12_BufferDesc(m_bufferCacheScratchSize);
+			D3D12_RESOURCE_DESC bd = D3D12_BufferDesc((uint64)m_bufferCacheScratchSize + D3D12Const::kMaxConstantBufferBytes);
 			D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&m_bufferCacheScratch)), "CreateCommittedResource (scratch)");
 			m_bufferCacheScratchState = D3D12_RESOURCE_STATE_COMMON;
 		}
@@ -2041,10 +2055,13 @@ void D3D12Renderer::bufferCache_init(const sint32 bufferSize)
 		uav.resource = nullptr;
 	for (auto &table : m_lastViewTable)
 		table.Clear();
+	for (auto &cache : m_viewTableCache)
+		cache.Clear();
+	memset(m_state.currentRootCBVs, 0, sizeof(m_state.currentRootCBVs));
 
 	m_bufferCacheSize = (uint32)bufferSize;
 	D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-	D3D12_RESOURCE_DESC desc = D3D12_BufferDesc((uint64)bufferSize);
+	D3D12_RESOURCE_DESC desc = D3D12_BufferDesc((uint64)bufferSize + D3D12Const::kMaxConstantBufferBytes);
 	D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&m_bufferCache)), "CreateCommittedResource (buffer cache)");
 	D3D12_SetDebugName(m_bufferCache.Get(), "BufferCache");
 	m_bufferCacheState = D3D12_RESOURCE_STATE_COMMON;
@@ -2077,7 +2094,7 @@ void D3D12Renderer::bufferCache_copy(uint32 srcOffset, uint32 dstOffset, uint32 
 		ReleaseResourceDeferred(std::move(m_bufferCacheScratch));
 		m_bufferCacheScratchSize = AlignUp<uint32>(size, 1024 * 1024);
 		D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-		D3D12_RESOURCE_DESC bd = D3D12_BufferDesc(m_bufferCacheScratchSize);
+		D3D12_RESOURCE_DESC bd = D3D12_BufferDesc((uint64)m_bufferCacheScratchSize + D3D12Const::kMaxConstantBufferBytes);
 		D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&m_bufferCacheScratch)), "CreateCommittedResource (scratch)");
 		m_bufferCacheScratchState = D3D12_RESOURCE_STATE_COMMON;
 	}
@@ -2136,6 +2153,8 @@ void D3D12Renderer::buffer_bindUniformBuffer(LatteConst::ShaderType shaderType, 
 
 D3D12_GPU_VIRTUAL_ADDRESS D3D12Renderer::GetAlignedUniformBufferAddress(uint32 cacheOffset, uint32 size)
 {
+	// Backing resources include a 64-KiB tail beyond the logical cache/scratch
+	// capacity, so even a root cbuffer at the final aligned offset stays in-resource.
 	// CBVs must start at 256 byte boundaries. GX2 requires the same alignment for uniform blocks and the buffer cache
 	// preserves it, so this is the common case
 	if ((cacheOffset % D3D12Const::kCBVAlignment) == 0 && (uint64)cacheOffset + AlignUp<uint32>(size, D3D12Const::kCBVAlignment) <= m_bufferCacheSize)
@@ -2148,7 +2167,7 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12Renderer::GetAlignedUniformBufferAddress(uint32 c
 		ReleaseResourceDeferred(std::move(m_bufferCacheScratch));
 		m_bufferCacheScratchSize = std::max<uint32>(AlignUp<uint32>(alignedSize * 2, 1024 * 1024), 4 * 1024 * 1024);
 		D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
-		D3D12_RESOURCE_DESC bd = D3D12_BufferDesc(m_bufferCacheScratchSize);
+		D3D12_RESOURCE_DESC bd = D3D12_BufferDesc((uint64)m_bufferCacheScratchSize + D3D12Const::kMaxConstantBufferBytes);
 		D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&m_bufferCacheScratch)), "CreateCommittedResource (scratch)");
 		m_bufferCacheScratchState = D3D12_RESOURCE_STATE_COMMON;
 		m_bufferCacheScratchOffset = 0;
