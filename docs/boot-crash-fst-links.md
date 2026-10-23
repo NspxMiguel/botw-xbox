@@ -1,8 +1,8 @@
 # Boot crash after AXInit: inherited update files
 
 The USA v208 executable can have the correct SHA-256 while the merged content is
-corrupt. The old FST readers in `tools/wud_extract.py` (also used by
-`tools/nus_extract.py`) and the Xbox setup reader treated inherited update files
+corrupt. The old FST readers in `tools/wud_extract.py` and
+the Xbox setup reader treated inherited update files
 as ordinary files. They copied unrelated patch-cluster bytes over base files.
 Cluster hash checks can still pass: the bytes are intact, but belong to a
 different file.
