@@ -89,6 +89,55 @@ static void RingTests()
 	assert(ring.Empty());
 }
 
+struct RecordingProbe
+{
+	std::atomic<bool> &entered, &released;
+	void Record(const uint32_t &, const Arena &)
+	{
+		entered.store(true, std::memory_order_release);
+		while (!released.load(std::memory_order_acquire))
+			std::this_thread::yield();
+	}
+};
+
+static void OwnershipTests()
+{
+	Context context;
+	std::atomic<bool> entered{false}, checked{false};
+	std::thread back([&] {
+		context.BindBackThread();
+		context.EnterRecording();
+		entered.store(true, std::memory_order_release);
+		while (!checked.load(std::memory_order_acquire))
+			std::this_thread::yield();
+		context.LeaveRecording();
+	});
+	while (!entered.load(std::memory_order_acquire))
+		std::this_thread::yield();
+	// A busy back actor must not make the real front look like a recursive
+	// callback or cause native wrappers to bypass their operation stream.
+	context.CheckFront();
+	checked.store(true, std::memory_order_release);
+	back.join();
+	context.BindBackThread();
+	entered.store(false);
+	checked.store(false);
+	std::atomic<Stream *> activeStream{nullptr};
+	std::thread isolatedConsumer([&] {
+		Context local;
+		Stream stream(1, 64);
+		RecordingProbe probe{entered, checked};
+		activeStream.store(&stream, std::memory_order_release);
+		stream.Execute<uint32_t, &RecordingProbe::Record>(local, Opcode::Control, 42, probe);
+		stream.Stop(local, probe);
+	});
+	while (!entered.load(std::memory_order_acquire))
+		std::this_thread::yield();
+	assert(!activeStream.load(std::memory_order_acquire)->Recording());
+	checked.store(true, std::memory_order_release);
+	isolatedConsumer.join();
+}
+
 static void RegistryPublicationTest()
 {
 	Registry registry(64);
@@ -386,6 +435,7 @@ static std::vector<uint64_t> DrawRoundTrip(bool queued, size_t capacity)
 
 int main()
 {
+	OwnershipTests();
 	RingTests();
 	RegistryPublicationTest();
 	ArenaPublicationTest();

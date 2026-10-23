@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -32,7 +33,7 @@ class Context
 		if (!m_checks)
 			return;
 #endif
-		if (m_backActive)
+		if (m_backActive.load(std::memory_order_acquire) && m_back == std::this_thread::get_id())
 		{
 			std::fputs("Latte pipeline: front access from recorder\n", stderr);
 			std::abort();
@@ -42,14 +43,24 @@ class Context
 	{
 		Check(m_back, "back");
 	}
+	// Ownership handoff is only legal at a drained lifecycle boundary. Phase 3
+	// leaves both owners on the command thread; no worker is started here.
+	void BindBackThread()
+	{
+		if (m_backActive.load(std::memory_order_acquire))
+			std::abort();
+		m_back = std::this_thread::get_id();
+	}
 	void EnterRecording()
 	{
 		CheckBack();
-		m_backActive = true;
+		if (ChecksEnabled())
+			m_backActive.store(true, std::memory_order_release);
 	}
 	void LeaveRecording()
 	{
-		m_backActive = false;
+		if (ChecksEnabled())
+			m_backActive.store(false, std::memory_order_release);
 	}
 	uint64_t BeginOperation()
 	{
@@ -71,6 +82,14 @@ class Context
 	}
 
   private:
+	bool ChecksEnabled() const
+	{
+#if defined(NDEBUG) && !defined(_DEBUG)
+		return m_checks;
+#else
+		return true;
+#endif
+	}
 	void Check(std::thread::id owner, const char *role) const
 	{
 #if defined(NDEBUG) && !defined(_DEBUG)
@@ -79,15 +98,15 @@ class Context
 #endif
 		if (owner != std::this_thread::get_id())
 		{
-			std::fprintf(stderr, "Latte pipeline: %s ownership violation at operation %llu, frame %llu\n", role,
-						 static_cast<unsigned long long>(m_sequence), static_cast<unsigned long long>(m_frame));
+			std::fprintf(stderr, "Latte pipeline: %s ownership violation\n", role);
 			std::abort();
 		}
 	}
-	const std::thread::id m_front, m_back;
+	const std::thread::id m_front;
+	std::thread::id m_back;
 	const bool m_checks = EnvironmentFlag("CEMU_LATTE_PIPELINE_CHECKS");
 	const bool m_queued = EnvironmentFlag("CEMU_LATTE_PIPELINE");
-	bool m_backActive = false;
+	std::atomic<bool> m_backActive{false};
 	uint64_t m_sequence = 0;
 	uint64_t m_frame = 1;
 };
@@ -541,7 +560,13 @@ class Stream
 	}
 	bool Recording() const
 	{
-		return m_consuming;
+		return m_consuming.load(std::memory_order_acquire) && m_consumerOwner == std::this_thread::get_id();
+	}
+	void BindConsumerThread()
+	{
+		if (m_consuming.load(std::memory_order_acquire))
+			std::abort();
+		m_consumerOwner = std::this_thread::get_id();
 	}
 	const Header &ActiveHeader() const
 	{
@@ -629,9 +654,9 @@ class Stream
 		context.CheckBack();
 		// Reentrant guest callbacks must not publish while an immutable packet is
 		// being recorded. Completion application belongs on front after recording.
-		if (m_consuming)
+		if (m_consuming.load(std::memory_order_relaxed))
 			throw std::logic_error("Reentrant Latte recorder");
-		m_consuming = true;
+		m_consuming.store(true, std::memory_order_release);
 		m_activeHeader = packet.header;
 		context.EnterRecording();
 		try
@@ -641,11 +666,11 @@ class Stream
 		catch (...)
 		{
 			context.LeaveRecording();
-			m_consuming = false;
+			m_consuming.store(false, std::memory_order_release);
 			throw;
 		}
 		context.LeaveRecording();
-		m_consuming = false;
+		m_consuming.store(false, std::memory_order_release);
 		m_tickets.Record(packet.header.sequence);
 		m_arena.Retire(packet.arenaEnd);
 	}
@@ -653,6 +678,8 @@ class Stream
 	Arena m_arena;
 	Tickets m_tickets;
 	Header m_activeHeader{};
-	bool m_consuming = false, m_stopped = false;
+	std::thread::id m_consumerOwner = std::this_thread::get_id();
+	std::atomic<bool> m_consuming{false};
+	bool m_stopped = false;
 };
 } // namespace LattePipeline
