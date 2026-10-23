@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 import { resolve, basename } from "node:path";
 import { pathToFileURL } from "node:url";
+import { repackAndSign } from "./appx";
 
 const portuguese = Intl.DateTimeFormat()
   .resolvedOptions()
@@ -9,16 +10,20 @@ const portuguese = Intl.DateTimeFormat()
 const t = (pt: string, en: string) => (portuguese ? pt : en);
 const usage = t(
   `BotW Helper — © 2026 NSPX
-Uso: bun cli.ts <push-config|push-cover|launch> [arquivo ou pasta] --host <IP[:porta]> [--user <usuário>]
+Uso: bun cli.ts <push-config|push-cover|repack-cover|launch> [arquivo ou pasta] [--host <IP[:porta]>] [--user <usuário>]
   push-config helper.json  Envia as preferências para LocalState.
   push-cover <pasta>      Envia cover.png e cover-wide.png.
+  repack-cover <in.appx> <pasta> --out <out.appx> [--pfx <arquivo>]
+                          Recria e assina o pacote com a capa.
   launch                  Abre o aplicativo instalado.
 Senha: variável XBDEV_PASS. Endereço/usuário: XBDEV_HOST / XBDEV_USER.
 BOTW_PORTAL_CLIENT pode apontar para xboxdev/src/portal.ts.`,
   `BotW Helper — © 2026 NSPX
-Usage: bun cli.ts <push-config|push-cover|launch> [file or directory] --host <IP[:port]> [--user <user>]
+Usage: bun cli.ts <push-config|push-cover|repack-cover|launch> [file or directory] [--host <IP[:port]>] [--user <user>]
   push-config helper.json  Upload preferences to LocalState.
   push-cover <directory>   Upload cover.png and cover-wide.png.
+  repack-cover <in.appx> <directory> --out <out.appx> [--pfx <file>]
+                          Rebuild and sign the package with cover artwork.
   launch                   Launch the installed application.
 Password: XBDEV_PASS environment variable. Address/user: XBDEV_HOST / XBDEV_USER.
 BOTW_PORTAL_CLIENT can point to xboxdev/src/portal.ts.`,
@@ -81,6 +86,39 @@ async function main() {
     return;
   }
   const command = args.shift()!;
+  if (command === "repack-cover") {
+    const input = args.shift(),
+      directory = args.shift();
+    let output = "",
+      pfx = resolve(import.meta.dir, "../../../pkg/test.pfx");
+    while (args.length) {
+      const option = args.shift(),
+        value = args.shift();
+      if (!value || value.startsWith("--"))
+        throw new Error(`Missing ${option}`);
+      if (option === "--out") output = value;
+      else if (option === "--pfx") pfx = resolve(value);
+      else throw new Error(`Unexpected argument: ${option}`);
+    }
+    if (
+      !input ||
+      !directory ||
+      input.startsWith("-") ||
+      directory.startsWith("-") ||
+      !output
+    )
+      throw new Error(
+        "Expected repack-cover <in.appx> <cover directory> --out <out.appx> [--pfx <file>]",
+      );
+    await repackAndSign(
+      resolve(input),
+      resolve(directory),
+      resolve(output),
+      pfx,
+    );
+    console.log(resolve(output));
+    return;
+  }
   if (!["push-config", "push-cover", "launch"].includes(command))
     throw new Error("Unknown command");
   let host = process.env.XBDEV_HOST ?? "";
@@ -181,8 +219,8 @@ if (import.meta.main) {
   main().catch((error) => {
     console.error(
       t(
-        "Não foi possível concluir. Confira o endereço e as credenciais do Portal.",
-        "Could not complete. Check the Portal address and credentials.",
+        "Não foi possível concluir. Confira os arquivos e, para operações no Xbox, as credenciais do Portal.",
+        "Could not complete. Check the files and, for Xbox operations, the Portal credentials.",
       ),
     );
     console.error(error instanceof Error ? error.message : String(error));

@@ -107,15 +107,19 @@ impl Cover {
     }
 }
 
+fn cli_path() -> PathBuf {
+    std::env::var_os("BOTW_HELPER_CLI")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("cli.ts"))
+}
+
 fn run_cli(
     command: &str,
     input: Option<&Path>,
     connection: &Connection,
     password: &str,
 ) -> Result<(), String> {
-    let cli = std::env::var_os("BOTW_HELPER_CLI")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("cli.ts"));
+    let cli = cli_path();
     let mut process = Command::new("bun");
     process.arg(cli).arg(command);
     if let Some(path) = input {
@@ -128,6 +132,10 @@ fn run_cli(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    run_process(process, 60)
+}
+
+fn run_process(mut process: Command, timeout: u64) -> Result<(), String> {
     let mut child = process.spawn().map_err(|error| error.to_string())?;
     let start = std::time::Instant::now();
     loop {
@@ -138,10 +146,10 @@ fn run_cli(
         {
             break;
         }
-        if start.elapsed() > std::time::Duration::from_secs(60) {
+        if start.elapsed() > std::time::Duration::from_secs(timeout) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("Portal operation timed out after 60 seconds".into());
+            return Err(format!("Operation timed out after {timeout} seconds"));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -161,7 +169,7 @@ struct App {
     remember: bool,
     preferences: Preferences,
     cover: Option<Cover>,
-    pending: Option<Receiver<Result<&'static str, String>>>,
+    pending: Option<Receiver<Result<String, String>>>,
     status: String,
 }
 impl Default for App {
@@ -218,7 +226,7 @@ impl App {
             let result = (|| {
                 if launch {
                     run_cli("launch", None, &connection, &password)?;
-                    return Ok("launched");
+                    return Ok(t("launched").to_owned());
                 }
                 // Upload artwork first so a cover failure does not consume a new config.
                 if send_cover {
@@ -230,7 +238,88 @@ impl App {
                     &connection,
                     &password,
                 )?;
-                Ok("sent")
+                Ok(t("sent").to_owned())
+            })();
+            let _ = tx.send(result);
+        });
+    }
+
+    fn repack_cover(&mut self) {
+        let Some(cover) = &self.cover else { return };
+        let Some(input) = rfd::FileDialog::new()
+            .add_filter("Appx", &["appx"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(output) = rfd::FileDialog::new()
+            .add_filter("Appx", &["appx"])
+            .set_file_name("BotW-cover.appx")
+            .save_file()
+        else {
+            return;
+        };
+        let staged = (|| -> std::io::Result<_> {
+            let directory = tempfile::tempdir()?;
+            for name in [
+                "StoreLogo",
+                "Square150x150Logo",
+                "Square44x44Logo",
+                "SplashScreen",
+            ] {
+                let name = format!("{name}.png");
+                std::fs::copy(
+                    cover.directory.path().join(&name),
+                    directory.path().join(&name),
+                )?;
+            }
+            Ok(directory)
+        })();
+        let directory = match staged {
+            Ok(directory) => directory,
+            Err(error) => {
+                self.status = format!("{}\n{error}", t("repack_failed"));
+                return;
+            }
+        };
+        let (tx, rx) = channel();
+        self.pending = Some(rx);
+        self.status.clear();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let cli = cli_path();
+                let mut process = Command::new("bun");
+                process
+                    .arg(&cli)
+                    .arg("repack-cover")
+                    .arg(&input)
+                    .arg(directory.path())
+                    .arg("--out")
+                    .arg(&output)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::piped());
+                run_process(process, 600)
+                    .map_err(|error| format!("{}\n{error}", t("repack_failed")))?;
+                let installer = cli
+                    .parent()
+                    .unwrap()
+                    .join("../../../../tools/install-appx.ts");
+                if installer.is_file() {
+                    let mut process = Command::new("bun");
+                    process
+                        .arg(installer)
+                        .arg(&output)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::piped());
+                    run_process(process, 600).map_err(|error| {
+                        format!("{}\n{}\n{error}", t("install_failed"), output.display())
+                    })?;
+                    Ok(format!("{}\n{}", t("repacked_installed"), output.display()))
+                } else {
+                    Ok(format!("{}\n{}", t("repacked"), output.display()))
+                }
             })();
             let _ = tx.send(result);
         });
@@ -359,6 +448,12 @@ impl App {
                 self.cover = None;
             }
         });
+        ui.add_enabled_ui(self.cover.is_some() && self.pending.is_none(), |ui| {
+            if ui.button(t("repack_cover")).clicked() {
+                self.repack_cover();
+            }
+        });
+        ui.small(t("repack_hint"));
         if self.cover.is_none() {
             ui.small(t("default_hint"));
         }
@@ -399,7 +494,7 @@ impl eframe::App for App {
             match receiver.try_recv() {
                 Ok(result) => {
                     self.status = match result {
-                        Ok(key) => t(key).into(),
+                        Ok(message) => message,
                         Err(error) => format!("{}\n{error}", t("failed")),
                     };
                     self.pending = None;

@@ -37,6 +37,18 @@ O endereço e o usuário são salvos em `BotWHelper/connection.json` na pasta de
 
 A capa quadrada é um recorte central de 300×300; a larga, de 620×300. Para o jogo próprio, são lidos `meta/iconTex.tga` e `meta/bootTvTex.tga`, incluindo TGA raw/RLE de 24/32 bits. As imagens geradas ficam em uma pasta temporária que é removida ao encerrar a seleção ou o aplicativo.
 
+### Capa no painel Xbox
+
+O painel Xbox usa os logos do pacote, por isso enviar `cover.png` para LocalState não muda a capa no dashboard. Escolha uma imagem ou seu jogo e use **Aplicar capa no painel Xbox…**. Selecione o `.appx` original e o destino do novo pacote. A GUI assina o pacote e chama o instalador `../../../../tools/install-appx.ts`, quando disponível; ele usa o endereço e as credenciais salvos do nxbox, independentemente dos campos de conexão da GUI. Sem esse instalador, a GUI mostra o caminho para instalar manualmente pelo Device Portal. Em caso de falha na instalação, o pacote assinado continua no destino escolhido. Reempacotamento e instalação têm limite de dez minutos cada.
+
+```sh
+bun tools/botw-helper/cli.ts repack-cover /path/to/input.appx /path/to/covers --out /path/to/cover.appx
+# Certificado opcional, sempre com senha vazia:
+bun tools/botw-helper/cli.ts repack-cover /path/to/input.appx /path/to/covers --out /path/to/cover.appx --pfx /path/to/test.pfx
+```
+
+A CLI apenas gera e assina; não instala. Instale `osslsigncode` no PATH, ou `signtool` no Windows. O certificado padrão é `../../../pkg/test.pfx` relativo a `cli.ts`, fora deste worktree. O diretório de capas precisa conter `StoreLogo.png` (50×50), `Square150x150Logo.png` (150×150), `Square44x44Logo.png` (44×44) e `SplashScreen.png` (620×300). A seleção de capa da GUI gera todos eles da mesma imagem decodificada: logos quadrados com recorte central, splash com proporção preservada e barras pretas. O manifesto, a identidade e o publisher permanecem intactos para que a reinstalação como atualização preserve LocalState e os saves. Entradas ZIP armazenadas ou deflacionadas são lidas em fluxo; o mapa de blocos e a assinatura antigos são substituídos. Use caminhos diferentes para entrada e saída.
+
 ### CLI
 
 ```sh
@@ -92,6 +104,14 @@ The CLI commands and JSON example above also apply in English. Use `XBDEV_PASS` 
 
 The console imports known settings before reading launcher preferences, preserves setup completion, and renames a successful import to `helper.applied.json`. Invalid JSON or incorrect value types are rejected as `helper.rejected.json` without applying values. Cover modification dates prevent repeated tile updates. Import and tile errors are logged without stopping startup.
 
+### Xbox dashboard cover
+
+The Xbox dashboard reads package logos. Uploading LocalState covers does not change dashboard artwork. After choosing artwork, click **Apply cover to Xbox dashboard…**, select the original `.appx`, then choose an output path. The GUI rebuilds and signs the package and runs `../../../../tools/install-appx.ts` when available. That existing installer uses the saved nxbox address and credentials independently of the GUI connection fields. Without the installer, the GUI shows the package path for manual Device Portal installation. A failed installation leaves the signed package available at the chosen path. Repacking and installation each have a ten-minute timeout.
+
+Use `repack-cover <in.appx> <cover directory> --out <out.appx> [--pfx <file>]` as in the example above. The CLI only writes and signs the package. Put `osslsigncode` on PATH, or use Windows `signtool`. The default certificate is `../../../pkg/test.pfx` relative to `cli.ts`, outside this worktree; its password must be empty.
+
+The cover directory must contain `StoreLogo.png` (50×50), `Square150x150Logo.png` (150×150), `Square44x44Logo.png` (44×44), and `SplashScreen.png` (620×300). The GUI generates these alongside its existing covers from the same decoded images. Square logos use center crops; the splash preserves aspect ratio on black. Repacking streams stored or deflated ZIP entries and replaces the old block map and signature. The manifest, identity, and publisher remain unchanged so installing as an update preserves LocalState and saves. Input and output paths must differ.
+
 ### Validation / Validação
 
 ```sh
@@ -99,8 +119,8 @@ cd tools/botw-helper
 cargo fmt --check
 cargo build --release
 cargo test --release
-bun test cli.test.ts
+bun test
 bun cli.ts --help
 ```
 
-Rust tests decode synthetic raw/RLE 24/32-bit TGA images, assert RGBA pixels and PNG dimensions, verify the exact JSON schema and omission of unremembered passwords. CLI tests use a fake Portal to verify package selection, upload paths and launch without contacting an Xbox. UWP must be built separately from the main checkout; this worktree does not build or deploy the console package.
+Rust tests decode synthetic raw/RLE 24/32-bit TGA images, assert RGBA pixels and PNG dimensions, verify the exact JSON schema and omission of unremembered passwords. CLI tests use a fake Portal to verify package selection, upload paths and launch without contacting an Xbox. Appx tests build synthetic packages with `pack_appx.py`, exercise stored ZIP64 and deflated input, compare output byte-for-byte with the Python reference, and independently verify asset bytes, every block hash, ZIP CRCs, and content types. UWP code must be built separately; repacking only updates artwork in an existing package.

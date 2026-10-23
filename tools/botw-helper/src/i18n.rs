@@ -42,6 +42,30 @@ pub fn text(key: &str) -> &'static str {
             "Escolha uma imagem ou a pasta do seu próprio jogo Wii U para criar a capa.",
             "Choose an image or your own Wii U game folder to create the cover.",
         ),
+        "repack_cover" => (
+            "Aplicar capa no painel Xbox…",
+            "Apply cover to Xbox dashboard…",
+        ),
+        "repack_hint" => (
+            "Escolha a capa e o pacote .appx. O novo pacote será assinado e instalado pela conexão salva do nxbox, se o instalador estiver disponível. Os saves são preservados.",
+            "Choose artwork and an .appx package. The new package is signed and installed using the saved nxbox connection when its installer is available. Saves are preserved.",
+        ),
+        "repacked" => (
+            "Pacote pronto. Instale pelo Device Portal:",
+            "Package ready. Install through Device Portal:",
+        ),
+        "repacked_installed" => (
+            "Capa instalada no painel Xbox. Pacote salvo em:",
+            "Xbox dashboard cover installed. Package saved at:",
+        ),
+        "repack_failed" => (
+            "Confira o pacote, os logos e o certificado de assinatura e tente novamente.",
+            "Check the package, logos and signing certificate, then try again.",
+        ),
+        "install_failed" => (
+            "O pacote está pronto, mas a instalação falhou. Confira a conexão salva do nxbox ou instale pelo Portal:",
+            "The package is ready, but installation failed. Check the saved nxbox connection or install through Portal:",
+        ),
         "choose_image" => ("Escolher PNG ou JPG", "Choose PNG or JPG"),
         "own_game" => ("Do meu próprio jogo", "From my own game"),
         "keep_default" => ("Manter padrão", "Keep default"),
