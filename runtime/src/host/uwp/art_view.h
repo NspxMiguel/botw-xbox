@@ -469,8 +469,24 @@ class ArtView {
                     return;
                 }
             }
-            brush->SetColor(muted);
-            write(label(Text::store_no_image), x + 20, y + h / 2 - 12, w - 40, 30);
+            // No image (graphic packs, local files): a tinted tile with the title's first letter instead of
+            // a "Preview unavailable" label on every card.
+            std::wstring title(c.title.begin(), c.title.end());
+            wchar_t letter = L'?';
+            for (wchar_t ch : title)
+                if (ch < 128 && iswalnum(ch)) {
+                    letter = towupper(ch);
+                    break;
+                }
+            uint32_t hash = 2166136261u;
+            for (wchar_t ch : title)
+                hash = (hash ^ uint32_t(ch)) * 16777619u;
+            static constexpr D2D1_COLOR_F tints[] = {{.86f, .91f, .97f, 1}, {.89f, .95f, .89f, 1}, {.97f, .92f, .86f, 1},
+                                                     {.93f, .89f, .97f, 1}, {.97f, .89f, .91f, 1}, {.88f, .95f, .95f, 1}};
+            brush->SetColor(tints[hash % std::size(tints)]);
+            target->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y, x + w, y + h), 16, 16), brush.Get());
+            brush->SetColor(black(.55f));
+            write(std::wstring(1, letter), x + 22, y + h / 2 - 26, 60, 56, true);
         };
         brush->SetColor(ink);
         write(label(Text::mods), 47, 26, 215, 64, true);
