@@ -2778,8 +2778,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 if (reading.LeftThumbstickX > .5)
                     buttons |= uwp::right;
             }
+            // Remote and keyboard-mapped input arrives as virtual buttons; let it drive the menu too.
+            const uint32_t virtual_held = virtual_buttons | virtual_taps.exchange(0);
+            buttons |= virtual_held & ~virtual_axes;
+            if (virtual_held & virtual_ls_up)
+                buttons |= uwp::up;
+            if (virtual_held & virtual_ls_down)
+                buttons |= uwp::down;
+            if (virtual_held & virtual_ls_left)
+                buttons |= uwp::left;
+            if (virtual_held & virtual_ls_right)
+                buttons |= uwp::right;
             bool keyboard = winrt::Windows::Devices::Input::KeyboardCapabilities().KeyboardPresent() != 0;
-            if (!pads.Size() && !keyboard) {
+            if (!pads.Size() && !keyboard && !virtual_held) {
                 uwp::quick_menu.requested = false;
                 return;
             }
