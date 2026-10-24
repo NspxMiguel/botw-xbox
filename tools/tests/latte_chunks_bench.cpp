@@ -49,14 +49,20 @@ int main() {
     for (unsigned order = 0; order < 4; ++order) {
       const auto k = window % 2 ? 4 - order : order + 1;
       const auto start = std::chrono::steady_clock::now();
+      const size_t batchLimit = LattePipeline::ChunkWorkers::DrawsPerChunk * k;
       for (unsigned frame = 0; frame < 20; ++frame)
-        workers.Run(
-            draws, k,
-            [&](unsigned, LattePipeline::ChunkRange range) {
-              for (size_t i = range.begin; i < range.end; ++i)
-                Record(inputs[i], outputs[i]);
-            },
-            false);
+        for (size_t first = 0; first < draws; first += batchLimit)
+          workers.Run(
+              std::min(batchLimit, draws - first), k,
+              [&](unsigned, LattePipeline::ChunkRange range) {
+                if (range.end - range.begin >
+                    LattePipeline::ChunkWorkers::DrawsPerChunk)
+                  throw std::logic_error(
+                      "Benchmark exceeded native chunk bound");
+                for (size_t i = range.begin; i < range.end; ++i)
+                  Record(inputs[first + i], outputs[first + i]);
+              },
+              false);
       const auto ms = std::chrono::duration<double, std::milli>(
                           std::chrono::steady_clock::now() - start)
                           .count() /
