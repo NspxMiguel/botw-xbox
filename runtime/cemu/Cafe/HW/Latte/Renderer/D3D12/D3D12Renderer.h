@@ -16,6 +16,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12TextureStage.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12DrawPacket.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12ParallelRecorder.h"
 #include "util/math/vector2.h"
 
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
@@ -210,11 +211,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void ReleaseView(LattePipeline::ResourceId id);
 	void ReleaseFramebuffer(LattePipeline::ResourceId id);
 	void RetireResource(LattePipeline::ResourceId id);
-	void WaitForRecording()
-	{
-		if (!m_operations.Recording())
-			m_operations.Finish();
-	}
+	void WaitForRecording();
 	uint64 GenUniqueId()
 	{
 		return ++m_uniqueIdCounter;
@@ -365,6 +362,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	struct IndexResource
 	{
 		D3D12UploadHeapAllocator::Allocation *native = nullptr;
+		std::shared_ptr<LattePipeline::DeferredIndex> deferred;
 		uint32 size = 0;
 		LattePipeline::ResourceId id;
 	};
@@ -388,10 +386,22 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		LattePipeline::UniformRange uniforms[3][LATTE_NUM_MAX_UNIFORM_BUFFERS]{};
 	} m_frontBindings;
 	std::vector<uint8> m_indexDecodeScratch;
+	std::vector<std::byte> m_indexCaptureScratch;
+	bool indexData_captureIndexMemory(const void *data, uint32 size, uint32 width, bool bigEndian, IndexAllocation &allocation, uint32 &maximum) override;
 	LattePipeline::Span StageBytes(const void *data, size_t size);
 	void draw_executeDirect(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext &drawcallContext);
 	void draw_prepareStage(LatteDecompilerShader *shader, LattePipeline::StageBlock &out);
 	void draw_record(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena);
+	bool draw_captureParallel(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena);
+	void draw_drainParallel();
+	void draw_planRenderTargets(CachedFBOD3D12 *fbo);
+	bool HasActiveOcclusionQuery() const;
+	std::unique_ptr<D3D12ParallelRecorder> m_parallelRecorder;
+	std::vector<D3D12ResolvedDraw> m_parallelDraws;
+	bool m_parallelReady = false;
+	size_t m_parallelBytes = 0;
+	LatteProfiler::Clock::time_point m_parallelBatchStart{};
+	const unsigned m_requestedChunks = static_cast<unsigned>(LattePipeline::CapacityFromEnvironment("CEMU_LATTE_CHUNKS", 0, 1, 4));
 	void draw_recordUniformBytes(D3D12Const::Stage stage, std::span<const std::byte> bytes, D3D12_GPU_VIRTUAL_ADDRESS &addressOut, uint32 &sizeOut);
 	std::span<const std::byte> draw_buildUniformVars(LatteDecompilerShader *shader);
 	LattePipeline::Span draw_snapshotUniformVars(LatteDecompilerShader *shader);
@@ -443,12 +453,15 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 			UIUpload,
 			UIRelease,
 			UIRender,
+			UIRenderOwned,
+			NativeReleaseOwned,
 			UIAcquire,
 			Screenshot,
 			EndSequence,
 			ServicePresent,
 			BeginFrame,
 			ShutdownDrain,
+			RecordingDrain,
 			QueryHeap,
 			BindVertices,
 			BindUniform,
@@ -463,6 +476,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 			SurfaceCopy,
 			BufferUpload,
 			IndexCreate,
+			IndexDeferredCreate,
 			IndexUpload,
 			IndexRelease,
 			TexturePlane,

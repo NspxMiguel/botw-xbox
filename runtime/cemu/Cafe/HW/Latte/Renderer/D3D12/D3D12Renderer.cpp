@@ -141,6 +141,7 @@ D3D12Renderer::~D3D12Renderer()
 	m_operations.Exclusive(m_pipeline, [&] {
 		if (m_device)
 			WaitForIdle();
+		m_parallelRecorder.reset();
 		m_simSeriesS.reset();
 		if (m_ffx)
 			m_ffx->Reset();
@@ -470,6 +471,20 @@ void D3D12Renderer::WaitForSubmission(uint64 submissionId)
 	GetCompletedSubmissionId();
 }
 
+void D3D12Renderer::WaitForRecording()
+{
+	if (m_operations.Recording())
+		return;
+	if (m_pipeline.Parallel() && m_operations.Running())
+	{
+		BackendPacket packet{};
+		packet.kind = BackendPacket::Kind::RecordingDrain;
+		ExecuteBackend(LattePipeline::Opcode::Control, packet);
+	}
+	else
+		m_operations.Finish();
+}
+
 void D3D12Renderer::WaitForIdle()
 {
 	if (m_operations.Running() && !m_operations.Recording())
@@ -480,6 +495,7 @@ void D3D12Renderer::WaitForIdle()
 		return;
 	}
 	m_pipeline.CheckBack();
+	draw_drainParallel();
 	if (m_hasRecordedWork)
 		SubmitCommandList(false);
 	WaitForSubmission(m_lastSubmittedFenceValue);
@@ -522,6 +538,13 @@ void D3D12Renderer::ResetCommandList()
 void D3D12Renderer::SubmitCommandList_record(bool waitIdle)
 {
 	m_pipeline.CheckBack();
+	if (!m_parallelReady && !m_parallelDraws.empty())
+	{
+		draw_drainParallel();
+		if (waitIdle)
+			WaitForSubmission(m_lastSubmittedFenceValue);
+		return;
+	}
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Submit);
 	occlusionQuery_notifyEndCommandList();
 	LatteProfiler::Add(LatteProfiler::Counter::Submissions);
@@ -533,13 +556,27 @@ void D3D12Renderer::SubmitCommandList_record(bool waitIdle)
 	HRESULT hr = m_cmdList->Close();
 	if (FAILED(hr))
 		HandleDeviceError(hr, "ID3D12GraphicsCommandList::Close");
-	ID3D12CommandList *lists[] = {m_cmdList.Get()};
 	D3D12_Checkpoint(m_device.Get(), "command list closed");
-	m_queue->ExecuteCommandLists(1, lists);
+	if (m_parallelReady)
+	{
+		std::vector<ID3D12CommandList *> lists{m_cmdList.Get()};
+		m_parallelRecorder->AppendLists(lists);
+		m_queue->ExecuteCommandLists(static_cast<UINT>(lists.size()), lists.data());
+	}
+	else
+	{
+		ID3D12CommandList *lists[] = {m_cmdList.Get()};
+		m_queue->ExecuteCommandLists(1, lists);
+	}
 	const uint64 submissionId = m_lastSubmittedFenceValue + 1;
 	hr = m_queue->Signal(m_fence.Get(), submissionId);
 	if (FAILED(hr))
 		HandleDeviceError(hr, "ID3D12CommandQueue::Signal");
+	if (m_parallelReady)
+	{
+		m_parallelRecorder->Submitted(submissionId);
+		m_parallelReady = false;
+	}
 	m_uploadRing->OnSubmit(submissionId);
 	m_gpuViewHeap->OnSubmit(submissionId);
 	m_inFlightAllocators.push_back({std::move(m_currentAllocator), submissionId});
@@ -768,6 +805,16 @@ void D3D12Renderer::ReleaseObjectDeferred(ComPtr<IUnknown> object)
 	if (m_operations.Running() && !m_operations.Recording())
 	{
 		BackendPacket packet{};
+		if (m_pipeline.Parallel())
+		{
+			packet.kind = BackendPacket::Kind::NativeReleaseOwned;
+			auto owned = std::make_unique<ComPtr<IUnknown>>(std::move(object));
+			packet.resources[0] = RegisterResource(owned.get());
+			// Publication transfers the adapter as well as the COM reference.
+			owned.release();
+			ExecuteBackend(LattePipeline::Opcode::Release, packet);
+			return;
+		}
 		packet.kind = BackendPacket::Kind::NativeRelease;
 		packet.resources[0] = RegisterResource(std::addressof(object));
 		ExecuteBackend(LattePipeline::Opcode::Release, packet);
@@ -1648,6 +1695,26 @@ void D3D12Renderer::ImguiEnd()
 {
 	m_pipeline.CheckFront();
 	ImGui::Render();
+	if (m_pipeline.Parallel())
+	{
+		const auto *data = ImGui::GetDrawData();
+		bool callback = false;
+		for (int i = 0; i < data->CmdListsCount; ++i)
+			for (const auto &command : data->CmdLists[i]->CmdBuffer)
+				callback |= command.UserCallback && command.UserCallback != ImDrawCallback_ResetRenderState;
+		if (!callback)
+		{
+			auto snapshot = std::make_unique<UISnapshot>(*data);
+			BackendPacket packet{};
+			packet.kind = BackendPacket::Kind::UIRenderOwned;
+			packet.resources[0] = RegisterResource(snapshot.get());
+			packet.words[0] = m_imguiMainWindow;
+			snapshot.release();
+			ExecuteBackend(LattePipeline::Opcode::Control, packet);
+			m_imguiActive = false;
+			return;
+		}
+	}
 	UISnapshot snapshot(*ImGui::GetDrawData());
 	BackendPacket packet{};
 	packet.kind = BackendPacket::Kind::UIRender;
@@ -2416,6 +2483,33 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12Renderer::GetAlignedUniformBufferAddress(uint32 c
 
 /* --- index data --- */
 
+bool D3D12Renderer::indexData_captureIndexMemory(const void *data, uint32 size, uint32 width, bool bigEndian, IndexAllocation &allocation, uint32 &maximum)
+{
+	if (!m_pipeline.Parallel() || size > 64 * 1024)
+		return false;
+	m_pipeline.CheckFront();
+	const auto source = std::span{static_cast<const std::byte *>(data), size};
+	// Snapshot first; both the immediate vertex bound and delayed conversion
+	// describe these same bytes rather than a later guest-memory read.
+	m_indexCaptureScratch.assign(source.begin(), source.end());
+	const auto &snapshot = m_indexCaptureScratch;
+	maximum = LattePipeline::DeferredIndex::Maximum(snapshot, width, bigEndian);
+	auto resource = std::make_unique<IndexResource>();
+	resource->size = size;
+	resource->id = RegisterResource(resource.get());
+	BackendPacket packet{};
+	packet.kind = BackendPacket::Kind::IndexDeferredCreate;
+	packet.resources[0] = resource->id;
+	packet.words[0] = width;
+	packet.words[1] = size;
+	packet.words[2] = bigEndian;
+	packet.bytes = StageBytes(snapshot.data(), snapshot.size());
+	allocation = {m_indexCaptureScratch.data(), resource.release()};
+	ExecuteBackend(LattePipeline::Opcode::Create, packet);
+	LatteProfiler::Add(LatteProfiler::Counter::DeferredIndexBytes, size);
+	return true;
+}
+
 Renderer::IndexAllocation D3D12Renderer::indexData_reserveIndexMemory(uint32 size)
 {
 	if (!m_pipeline.Queued())
@@ -2810,13 +2904,13 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 	using Kind = BackendPacket::Kind;
 	// Nonblocking submit/flush packets carry no CPU result. Queue order preserves
 	// their fence and resource dependencies; only waitIdle asks the front to join.
-	const bool needsReply = (opcode == LattePipeline::Opcode::Create && packet.kind != Kind::IndexCreate) ||
-							(opcode == LattePipeline::Opcode::Release && packet.kind != Kind::IndexRelease) ||
+	const bool needsReply = (opcode == LattePipeline::Opcode::Create && packet.kind != Kind::IndexCreate && packet.kind != Kind::IndexDeferredCreate) ||
+							(opcode == LattePipeline::Opcode::Release && packet.kind != Kind::IndexRelease && packet.kind != Kind::NativeReleaseOwned) ||
 							opcode == LattePipeline::Opcode::Present || opcode == LattePipeline::Opcode::Shutdown ||
 							opcode == LattePipeline::Opcode::Readback ||
 							(opcode == LattePipeline::Opcode::Submit && packet.words[0]) ||
 							packet.kind == Kind::UIAcquire || packet.kind == Kind::UIRender || packet.kind == Kind::BeginFrame ||
-							packet.kind == Kind::DebugSnapshot || packet.kind == Kind::SurfaceCopy || packet.kind == Kind::occlusionQuery_flush;
+							packet.kind == Kind::RecordingDrain || packet.kind == Kind::DebugSnapshot || packet.kind == Kind::SurfaceCopy || packet.kind == Kind::occlusionQuery_flush;
 	const auto sequence = m_operations.Execute<BackendPacket, &D3D12Renderer::RecordBackend>(m_pipeline, opcode, packet, *this, needsReply);
 	LattePipeline::Completion reply;
 	if (needsReply)
@@ -2848,6 +2942,8 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 	}
 	if (!needsReply && opcode == LattePipeline::Opcode::Submit)
 		LatteProfiler::Add(LatteProfiler::Counter::AsyncSubmissions);
+	if (packet.kind == Kind::UIRenderOwned || packet.kind == Kind::NativeReleaseOwned)
+		LatteProfiler::Add(LatteProfiler::Counter::AsyncControls);
 	// Logical destructors publish Release while their front cache entry can
 	// still be on an outer readback/query traversal. Defer cache callbacks
 	// until that traversal has removed the adapter; transport polling is safe.
@@ -2875,11 +2971,13 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		case Kind::FramebufferRelease:
 		case Kind::IndexRelease:
 		case Kind::NativeRelease:
+		case Kind::NativeReleaseOwned:
 		case Kind::RegistryRetire:
 		case Kind::UIRelease:
 			return Slot::BackendRelease;
 		case Kind::BufferUpload:
 		case Kind::IndexCreate:
+		case Kind::IndexDeferredCreate:
 		case Kind::IndexUpload:
 		case Kind::TexturePlane:
 		case Kind::UIUpload:
@@ -2894,6 +2992,7 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		case Kind::ServicePresent:
 		case Kind::UIAcquire:
 		case Kind::UIRender:
+		case Kind::UIRenderOwned:
 		case Kind::BeginFrame:
 			return Slot::BackendPresent;
 		case Kind::occlusionQuery_flush:
@@ -2905,6 +3004,30 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 	}();
 	LatteProfiler::Scope recordScope(category);
 	m_pipeline.CheckBack();
+	switch (packet.kind)
+	{
+	case Kind::BindVertices:
+	case Kind::BindUniform:
+	case Kind::BindFramebuffer:
+	case Kind::Viewport:
+	case Kind::Scissor:
+		break;
+	case Kind::ServicePresent:
+		if (m_pendingPresentSwapChain)
+			draw_drainParallel();
+		break;
+	case Kind::IndexCreate:
+	case Kind::IndexDeferredCreate:
+		// Fresh native storage cannot be referenced by earlier captured draws.
+		break;
+	case Kind::EndSequence:
+		if (packet.words[0])
+			draw_drainParallel();
+		break;
+	default:
+		draw_drainParallel();
+		break;
+	}
 	UpdatePipelineProfile();
 	switch (packet.kind)
 	{
@@ -2970,6 +3093,13 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 	case BackendPacket::Kind::UIRender:
 		ui_record(packet);
 		break;
+	case BackendPacket::Kind::UIRenderOwned: {
+		std::unique_ptr<UISnapshot> snapshot(m_resources.Get<UISnapshot>(packet.resources[0]));
+		ui_record(packet);
+		m_resources.Use(packet.resources[0], m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
+		m_resources.Release(packet.resources[0]);
+		break;
+	}
 	case BackendPacket::Kind::UIAcquire:
 		m_operations.Result().words[0] = AcquireBackbuffer(packet.words[0] != 0);
 		break;
@@ -2986,6 +3116,8 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 	case BackendPacket::Kind::BeginFrame:
 		m_operations.Result().words[0] = BeginFrame_record(packet.words[0] != 0);
 		break;
+	case BackendPacket::Kind::RecordingDrain:
+		break;
 	case BackendPacket::Kind::ShutdownDrain:
 		WaitForIdle();
 		break;
@@ -2994,10 +3126,14 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		break;
 	case BackendPacket::Kind::BindVertices: {
 		const auto bytes = arena.Read(packet.bytes);
+		if (m_pipeline.Parallel())
+			draw_drainParallel();
 		buffer_bindVertexBuffers_record({reinterpret_cast<const BindBufferParam *>(bytes.data()), bytes.size() / sizeof(BindBufferParam)});
 		break;
 	}
 	case BackendPacket::Kind::BindUniform:
+		if (m_pipeline.Parallel())
+			draw_drainParallel();
 		buffer_bindUniformBuffer_record(packet.words[0], packet.words[1], packet.words[2], packet.words[3]);
 		break;
 	case BackendPacket::Kind::BindFramebuffer: {
@@ -3044,6 +3180,16 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		bufferCache_upload_record(bytes.data(), static_cast<uint32>(bytes.size()), packet.words[0]);
 		break;
 	}
+	case BackendPacket::Kind::IndexDeferredCreate: {
+		auto *index = m_resources.Get<IndexResource>(packet.resources[0]);
+		index->native = m_indexAllocator->Allocate(packet.words[1], 4);
+		if (!index->native)
+			throw std::runtime_error("Latte deferred index allocation failed");
+		index->deferred = std::make_shared<LattePipeline::DeferredIndex>(arena.Read(packet.bytes), packet.words[0], packet.words[2] != 0, index->native->cpuPtr);
+		LatteProfiler::Add(LatteProfiler::Counter::UploadBytes, packet.words[1]);
+		LatteProfiler::Add(LatteProfiler::Counter::IndexUploadBytes, packet.words[1]);
+		break;
+	}
 	case BackendPacket::Kind::IndexCreate:
 	case BackendPacket::Kind::IndexUpload: {
 		auto *index = m_resources.Get<IndexResource>(packet.resources[0]);
@@ -3069,6 +3215,14 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 	case BackendPacket::Kind::BufferInit:
 		bufferCache_init_record(packet.words[0], packet.words[1]);
 		break;
+	case BackendPacket::Kind::NativeReleaseOwned: {
+		std::unique_ptr<ComPtr<IUnknown>> object(m_resources.Get<ComPtr<IUnknown>>(packet.resources[0]));
+		ReleaseObjectDeferred(std::move(*object));
+		m_resources.Use(packet.resources[0], m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
+		m_resources.Release(packet.resources[0]);
+		InvalidateDrawState();
+		break;
+	}
 	case BackendPacket::Kind::NativeRelease:
 		ReleaseObjectDeferred(std::move(*m_resources.Get<ComPtr<IUnknown>>(packet.resources[0])));
 		InvalidateDrawState();
@@ -3095,7 +3249,7 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		LatteProfiler::Reset(LatteProfiler::Clock::now());
 		m_reportFrames = 0;
 	}
-	if (packet.kind != BackendPacket::Kind::UIRelease && packet.kind != BackendPacket::Kind::RegistryRetire && packet.kind != BackendPacket::Kind::IndexRelease)
+	if (packet.kind != BackendPacket::Kind::UIRelease && packet.kind != BackendPacket::Kind::RegistryRetire && packet.kind != BackendPacket::Kind::IndexRelease && packet.kind != BackendPacket::Kind::UIRenderOwned && packet.kind != BackendPacket::Kind::NativeReleaseOwned)
 		for (auto id : packet.resources)
 			m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
 }
@@ -3130,6 +3284,15 @@ void D3D12Renderer::WorkerIdle()
 {
 	LatteProfiler::Scope idleScope(LatteProfiler::Slot::BackendMaintenance);
 	m_pipeline.CheckBack();
+	if (!m_parallelDraws.empty() && !m_pendingPresentSwapChain && !m_padShutdownRequested.load() &&
+		LatteProfiler::Clock::now() - m_parallelBatchStart < std::chrono::milliseconds(8))
+	{
+		// Queue gaps between PM4 draws are not frame/dependency boundaries.
+		// Keep capturing until an explicit operation, bound, or front drain.
+		ProcessFinishedSubmissions();
+		return;
+	}
+	draw_drainParallel();
 	ServicePendingPresent(false);
 	ProcessPadSwapChainShutdown();
 	NotifyLatteCommandProcessorIdle_record();
@@ -3343,6 +3506,7 @@ void *D3D12Renderer::CreateUITexture(const uint8 *rgba, sint32 width, sint32 hei
 }
 void D3D12Renderer::ui_record(const BackendPacket &packet)
 {
+	draw_drainParallel();
 	auto *snapshot = m_resources.Get<UISnapshot>(packet.resources[0]);
 	auto *swapChain = GetSwapChainObj(packet.words[0] != 0);
 	if (!swapChain || !swapChain->IsValid())

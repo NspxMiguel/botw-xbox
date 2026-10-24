@@ -143,6 +143,7 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipeline::Arena &)
 {
 	m_pipeline.CheckBack();
+	draw_drainParallel();
 	const bool padView = packet.padView, clearBackground = packet.clearBackground, useLinearTexFilter = packet.linear;
 	const auto imageX = packet.imageX, imageY = packet.imageY, imageWidth = packet.imageWidth, imageHeight = packet.imageHeight;
 	const auto inputWidth = packet.inputWidth, inputHeight = packet.inputHeight;

@@ -159,6 +159,7 @@ void D3D12Renderer::readback_record(const ReadbackPacket &packet, const LattePip
 {
 	LatteProfiler::Scope recordScope(LatteProfiler::Slot::BackendReadback);
 	m_pipeline.CheckBack();
+	draw_drainParallel();
 	auto *readback = m_resources.Get<LatteTextureReadbackInfoD3D12>(packet.readback);
 	switch (packet.action)
 	{

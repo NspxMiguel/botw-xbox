@@ -49,12 +49,22 @@ class LatteTextureViewD3D12 : public LatteTextureView
 	}
 
 	// staging (non shader-visible) SRV for the given GPU7 sampler swizzle (SQ_TEX_RESOURCE_WORD4)
+	bool RequiresSliceCopy() const { return m_usesSliceCopy; }
 	void RefreshForSampling()
 	{
 		if (m_usesSliceCopy)
 			UpdateSliceCopy();
 	}
 	D3D12_CPU_DESCRIPTOR_HANDLE GetSRV(uint32 gpuSamplerSwizzle);
+	// Coordinator pins the view and native definition and excludes slice-copy
+	// views. Only this mutex-protected native descriptor cache is shared.
+	D3D12_CPU_DESCRIPTOR_HANDLE GetRecordingSRV(uint32 swizzle)
+	{
+		if (m_usesSliceCopy)
+			throw std::logic_error("Slice-copy SRV cannot resolve on a chunk worker");
+		std::lock_guard lock(m_srvMutex);
+		return GetSRV(swizzle);
+	}
 	D3D12_CPU_DESCRIPTOR_HANDLE GetSRVRGBA()
 	{
 		return GetSRV(kRGBASwizzle);
@@ -110,6 +120,7 @@ class LatteTextureViewD3D12 : public LatteTextureView
 		uint32 swizzle = 0xFFFFFFFF;
 		D3D12_CPU_DESCRIPTOR_HANDLE handle{};
 	};
+	std::mutex m_srvMutex;
 	SRVCacheEntry m_srvCache[2];
 	std::unordered_map<uint32, D3D12_CPU_DESCRIPTOR_HANDLE> m_srvFallbackCache;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_rtv{};

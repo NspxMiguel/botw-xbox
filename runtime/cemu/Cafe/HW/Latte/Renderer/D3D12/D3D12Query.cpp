@@ -241,6 +241,12 @@ void D3D12Renderer::occlusionQuery_updateState_record()
 	ProcessFinishedSubmissions();
 }
 
+bool D3D12Renderer::HasActiveOcclusionQuery() const
+{
+	return std::any_of(m_occlusionQueries.active.begin(), m_occlusionQueries.active.end(),
+		[](const auto *query) { return query->m_hasActiveQuery; });
+}
+
 void D3D12Renderer::occlusionQuery_notifyEndCommandList()
 {
 	for (auto *q : m_occlusionQueries.active)
@@ -279,6 +285,7 @@ void D3D12Renderer::query_record(const QueryPacket &packet, const LattePipeline:
 {
 	LatteProfiler::Scope recordScope(LatteProfiler::Slot::BackendQuery);
 	m_pipeline.CheckBack();
+	draw_drainParallel();
 	auto *query = m_resources.Get<LatteQueryObjectD3D12>(packet.query);
 	switch (packet.action)
 	{

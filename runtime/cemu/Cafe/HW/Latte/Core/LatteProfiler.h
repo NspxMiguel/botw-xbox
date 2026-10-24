@@ -113,6 +113,15 @@ enum class Counter : size_t
 	IndexRelocatedComparedBytes,
 	IndexSampleRejects,
 	AsyncSubmissions,
+	ParallelDraws,
+	SerialDraws,
+	AsyncControls,
+	DeferredIndexBytes,
+	ChunkFallbackStreamout,
+	ChunkFallbackQuery,
+	ChunkFallbackAlignment,
+	ChunkFallbackSlice,
+	ChunkFallbackSimulation,
 	Count,
 };
 
@@ -156,6 +165,8 @@ struct State
 	uint64_t operationSequence = 0, sourceFrame = 0, recordedSequence = 0, submittedSequence = 0, completedSequence = 0;
 	uint64_t frontBusyNs = 0, backBusyNs = 0, backRecordWallNs = 0, frontStallNs = 0, frontReplyNs = 0, backIdleNs = 0, ringHighWater = 0;
 	uint64_t frontCpuNs = 0, backCpuNs = 0;
+	std::array<uint64_t, 4> chunkBusyNs{};
+	uint64_t chunkCriticalPathNs = 0, chunkCount = 0, chunkBatches = 0;
 	bool threaded = false;
 	bool enabled = false;
 	bool detailEnabled = false;
@@ -324,6 +335,10 @@ inline void CheckpointDetails(Clock::time_point now)
 inline void AcceptBackProfile(const State &back)
 {
 	s_state.backTimeNs = back.timeNs;
+	s_state.chunkBusyNs = back.chunkBusyNs;
+	s_state.chunkCriticalPathNs = back.chunkCriticalPathNs;
+	s_state.chunkCount = back.chunkCount;
+	s_state.chunkBatches = back.chunkBatches;
 	for (size_t i = 0; i < s_state.counters.size(); ++i)
 		s_state.counters[i] += back.counters[i];
 }
@@ -338,6 +353,8 @@ inline void Reset(Clock::time_point now)
 	s_state.detailNs.fill(0);
 	s_state.detailStart.fill(now);
 	s_state.counters.fill(0);
+	s_state.chunkBusyNs.fill(0);
+	s_state.chunkCriticalPathNs = s_state.chunkCount = s_state.chunkBatches = 0;
 	s_state.drawTotalNs = 0;
 	s_state.last = now;
 }

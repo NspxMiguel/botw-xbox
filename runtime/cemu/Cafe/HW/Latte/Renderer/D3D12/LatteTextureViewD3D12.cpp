@@ -241,7 +241,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE LatteTextureViewD3D12::CreateSRV(uint32 gpuSamplerSw
 		desc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		desc.Texture2D.MostDetailedMip = 0;
 		desc.Texture2D.MipLevels = (UINT)std::max(1, m_definition.numMip);
-		D3D12_CPU_DESCRIPTOR_HANDLE h = m_renderer->GetStagingViewHeap().Allocate();
+		D3D12_CPU_DESCRIPTOR_HANDLE h = m_renderer->m_stagingViewHeap->Allocate();
 		m_renderer->GetDevice()->CreateShaderResourceView(m_sliceCopy.Get(), &desc, h);
 		return h;
 	}
@@ -329,7 +329,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE LatteTextureViewD3D12::CreateSRV(uint32 gpuSamplerSw
 			break;
 		}
 	}
-	D3D12_CPU_DESCRIPTOR_HANDLE h = m_renderer->GetStagingViewHeap().Allocate();
+	D3D12_CPU_DESCRIPTOR_HANDLE h = m_renderer->m_stagingViewHeap->Allocate();
 	m_renderer->GetDevice()->CreateShaderResourceView(m_baseTexture->GetResource(), &desc, h);
 	D3D12_Checkpoint(m_renderer->GetDevice(), "texture SRV created");
 	return h;

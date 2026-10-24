@@ -769,13 +769,23 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	else
 		cemu_assert_debug(false);
 
-	// query index buffer from renderer
-	indexAllocation = g_renderer->indexData_reserveIndexMemory(indexOutputSize);
+	const bool unexpanded = indexType != LatteIndexType::AUTO && primitiveMode != LattePrimitiveMode::QUADS &&
+		primitiveMode != LattePrimitiveMode::QUAD_STRIP && primitiveMode != LattePrimitiveMode::LINE_LOOP && primitiveMode != LattePrimitiveMode::TRIANGLE_FAN;
+	const bool deferred = unexpanded && inputSize <= 64 * 1024 && g_renderer->indexData_captureIndexMemory(indexData, static_cast<uint32>(inputSize),
+		(indexType == LatteIndexType::U16_BE || indexType == LatteIndexType::U16_LE) ? 2u : 4u,
+		indexType == LatteIndexType::U16_BE || indexType == LatteIndexType::U32_BE, indexAllocation, indexMax);
+	if (!deferred)
+	{
+		indexAllocation = g_renderer->indexData_reserveIndexMemory(indexOutputSize);
+		indexMax = std::numeric_limits<uint32>::min();
+	}
 	void* indexOutputPtr = indexAllocation.mem;
 
-	// decode indices
-	indexMax = std::numeric_limits<uint32>::min();
-	if (primitiveMode == LattePrimitiveMode::QUADS)
+	// The capture already calculated the range; its immutable conversion runs
+	// on the first chunk worker using the cached native allocation.
+	if (deferred)
+		outputCount = count;
+	else if (primitiveMode == LattePrimitiveMode::QUADS)
 	{
 		// unpack quads into triangles
 		if (indexType == LatteIndexType::AUTO)
@@ -921,9 +931,10 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	if (primitiveRestartIndex == indexMax && indexType != LatteIndexType::AUTO)
 	{
 		// recalculate index range but filter out primitive restart index
-		LatteIndices_alternativeCalculateIndexMax(indexData, indexType, count, indexMax);
+		LatteIndices_alternativeCalculateIndexMax(deferred ? indexAllocation.mem : indexData, indexType, count, indexMax);
 	}
-	g_renderer->indexData_uploadIndexMemory(indexAllocation);
+	if (!deferred)
+		g_renderer->indexData_uploadIndexMemory(indexAllocation);
 	performanceMonitor.cycle[performanceMonitor.cycleIndex].indexDataUploaded += indexOutputSize;
 	// Content mutations replace their own key rather than consuming another way.
 	auto lruEntry = std::find_if(begin, end, [&](const auto &entry) { return entry.lastPtr && entry.key == key; });
@@ -938,7 +949,9 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		g_renderer->indexData_releaseIndexMemory(lruEntry->indexAllocation);
 	// update cache
 	if (validateContent)
-		lruEntry->content.Assign(indexData, inputSize);
+		lruEntry->content.Assign(deferred ? indexAllocation.mem : indexData, inputSize);
+	if (deferred)
+		indexAllocation.mem = nullptr; // the capture scratch is front-owned, never a cached output address
 	lruEntry->contentHash = contentHash;
 	if (persistent && inputSize)
 		LatteIndexCache.contentIndex.Store(contentHash, size_t(lruEntry - LatteIndexCache.entry.begin()));
