@@ -44,7 +44,8 @@ int main()
 		const auto uploads = g_renderer->uploads;
 		const auto relocatedNs = NanosecondsPerCall([&] {
 			Decode(relocated[next++ % relocated.size()].data(), count);
-		}, 100000);
+		},
+													100000);
 		std::cout << "Host relocated " << count * 2 << "-byte indices: " << relocatedNs << " ns/call; uploads " << g_renderer->uploads - uploads << "/100000 calls\n";
 		assert(g_renderer->uploads == uploads + 1);
 		LatteIndices_invalidateAll(g_renderer.get());
