@@ -10,6 +10,7 @@
 #include "../../packs/host_install.h"
 #include "../../settings.h"
 #include "../../sim_series_s.h"
+#include "console_policy.h"
 #include "first_frame.h"
 #include "output_policy.h"
 #include "latte_pipeline_config.h"
@@ -18,6 +19,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Display.Core.h>
 #include <winrt/Windows.Graphics.Display.h>
+#include <winrt/Windows.System.Profile.h>
 #include <winrt/Windows.UI.Core.h>
 #if __has_include(<gamingdeviceinformation.h>)
 #include <combaseapi.h> // STDAPI, used by gamingdeviceinformation.h
@@ -88,22 +90,44 @@ void output_pixels([[maybe_unused]] int &width, [[maybe_unused]] int &height) {
 #endif
 }
 // Pass the real console profile to both scaling and renderer policy selection.
-fsr3::Console console_profile() {
-    if (sim_series_s::settings().enabled)
-        return fsr3::Console::SeriesS;
-#if defined(BOTW_HAS_GAMING_DEVICE_INFO)
-    GAMING_DEVICE_MODEL_INFORMATION info{};
-    if (SUCCEEDED(GetGamingDeviceModelInformation(&info)) &&
-        info.vendorId == GAMING_DEVICE_VENDOR_ID_MICROSOFT) {
-        if (info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_S)
-            return fsr3::Console::SeriesS;
-        if (info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_X)
-            return fsr3::Console::SeriesX;
+ConsoleModel detect_console_model() {
+    ConsoleModel model = ConsoleModel::Desktop;
+#if defined(_WIN32)
+    try {
+        const auto family = winrt::Windows::System::Profile::AnalyticsInfo::VersionInfo().DeviceFamily();
+        if (family == L"Windows.Xbox")
+            model = ConsoleModel::UnknownXbox;
+        LOG("Device family=%s", winrt::to_string(family).c_str());
+        const auto form = winrt::Windows::System::Profile::AnalyticsInfo::DeviceForm();
+        LOG("Device form=%s", winrt::to_string(form).c_str());
+    } catch (const winrt::hresult_error &e) {
+        LOG("Device analytics unavailable (0x%08x)", unsigned(e.code().value));
+        // The package also runs on Windows; an API failure alone is not model evidence.
     }
 #endif
-    return fsr3::Console::Desktop;
+#if defined(BOTW_HAS_GAMING_DEVICE_INFO)
+    GAMING_DEVICE_MODEL_INFORMATION info{};
+    const auto result = GetGamingDeviceModelInformation(&info);
+    LOG("Gaming device query=0x%08x vendor=0x%08x device=0x%08x", unsigned(result), unsigned(info.vendorId),
+        unsigned(info.deviceId));
+    if (SUCCEEDED(result) && info.vendorId == GAMING_DEVICE_VENDOR_ID_MICROSOFT) {
+        model = ConsoleModel::UnknownXbox;
+        if (info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_S)
+            model = ConsoleModel::SeriesS;
+        if (info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_X ||
+            info.deviceId == GAMING_DEVICE_DEVICE_ID_XBOX_SERIES_X_DEVKIT)
+            model = ConsoleModel::SeriesX;
+    }
+#endif
+    LOG("Console model: %s; Series S simulation=%s", console_model_name(model),
+        sim_series_s::settings().enabled ? "on" : "off");
+    return model;
 }
-// Series S holds 60 fps at 1080p internal; the swap chain stays at the output size.
+fsr3::Console console_profile() {
+    static const auto model = detect_console_model();
+    return select_console_profile(model, sim_series_s::settings().enabled);
+}
+// Manual scaling can reach 1080p on Series S; automatic native scaling starts at 900p.
 float hardware_max_render_scale() { return console_profile() == fsr3::Console::SeriesS ? 1.5f : 3.f; }
 } // namespace
 namespace {
@@ -113,7 +137,8 @@ bool take_output_mode_change() { return mode_changed.exchange(false); }
 #if defined(_WIN32)
 winrt::Windows::Foundation::IAsyncAction configure_output_mode() {
     using namespace winrt::Windows::Graphics::Display::Core;
-    if (console_profile() != fsr3::Console::SeriesX)
+    const auto console = console_profile();
+    if (console == fsr3::Console::Desktop)
         co_return;
     try {
         const auto hdmi = HdmiDisplayInformation::GetForCurrentView();
@@ -132,7 +157,7 @@ winrt::Windows::Foundation::IAsyncAction configure_output_mode() {
         };
         auto selected = current;
         for (const auto &mode : hdmi.GetSupportedDisplayModes())
-            if (better_game_mode(describe(mode), describe(selected)))
+            if (better_game_mode(describe(mode), describe(selected), console))
                 selected = mode;
         LOG("HDMI current %ux%u %.2f Hz; selected %ux%u %.2f Hz", current.ResolutionWidthInRawPixels(),
             current.ResolutionHeightInRawPixels(), current.RefreshRate(),
@@ -152,12 +177,8 @@ void refresh_output_mode(int &width, int &height) {
     fsr3::display_hz.store(0);
     output_pixels(width, height);
     fsr3::console.store(console_profile());
-    const auto policy =
-        fsr3::select(fsr3::console.load(), sim_series_s::settings().enabled, "", true, true, height);
-    if (height > policy.output_height) {
-        width = std::max(1, width * policy.output_height / height);
-        height = policy.output_height;
-    }
+    // Also cap buffers when HDMI selection is unavailable or rejected.
+    cap_output_extent(width, height, fsr3::console.load());
 }
 float runtime_max_render_scale() { return hardware_max_render_scale(); }
 float runtime_render_scale() { return g_render_scale; }
@@ -167,6 +188,7 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
     g_game_root = game;
     g_user_root = user;
     LOG("prepare_runtime: game=%s user=%s", game.c_str(), user.c_str());
+    fsr3::console.store(console_profile()); // Log identity even if memory admission rejects startup.
     // LocalState/latte-profile.txt turns the Latte profiler on (it reads its switch from the environment).
     if (std::filesystem::exists(std::filesystem::path(user) / "latte-profile.txt")) {
 #if defined(_WIN32)

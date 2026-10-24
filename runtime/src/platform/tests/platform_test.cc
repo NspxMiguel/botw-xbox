@@ -1,4 +1,5 @@
 #include "../logic.h"
+#include "../memory_policy.h"
 #include "../platform.h"
 #include <atomic>
 #include <cassert>
@@ -44,6 +45,27 @@ void test_commit_policy() {
          base + (1ull << 32));
   assert(!guest_commit_page(base, base + platform::kGuestSize, 0));
   assert(!guest_commit_page(base, base + 0x10000, 8));
+}
+void test_uwp_memory_policy() {
+  using namespace platform;
+  constexpr uint64_t mib = 1ull << 20;
+  assert(guest_initial_commit_bytes(true) == 2816 * mib);
+  assert(guest_initial_commit_bytes(false) == 4096 * mib);
+  assert(uwp_memory_limit(10ull << 30) == 5120 * mib);
+  assert(uwp_memory_limit(1ull << 30) == 1024 * mib);
+  assert(uwp_memory_admits_guest(5120 * mib, 256 * mib, true));
+  assert(uwp_memory_admits_guest(5120 * mib, 256 * mib, false));
+  assert(!uwp_memory_admits_guest(1024 * mib, 0, true)); // App classification.
+  assert(!uwp_memory_admits_guest(1024 * mib, 0, false));
+  assert(!uwp_memory_admits_guest(0, 0, true));
+  for (bool lazy : {false, true}) {
+    const auto remaining =
+        5120 * mib - guest_initial_commit_bytes(lazy) - kUwpStartupReserve;
+    assert(uwp_memory_admits_guest(5120 * mib, remaining, lazy));
+    assert(!uwp_memory_admits_guest(5120 * mib, remaining + 1, lazy));
+    assert(!uwp_memory_admits_guest(10ull << 30, remaining + 1, lazy));
+    assert(!uwp_memory_admits_guest(5120 * mib, UINT64_MAX, lazy));
+  }
 }
 void test_clock() {
   using namespace platform;
@@ -100,6 +122,7 @@ int main() {
   test_paths();
   test_clock();
   test_commit_policy();
+  test_uwp_memory_policy();
   test_mapping();
   std::atomic<bool> finished{false};
   assert(platform::launch_detached(

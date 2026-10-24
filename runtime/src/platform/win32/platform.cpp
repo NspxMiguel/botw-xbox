@@ -8,13 +8,18 @@
 #include "../platform.h"
 #include "../../log.h"
 #include "../logic.h"
+#include "../memory_policy.h"
 #include <atomic>
 #include <cstdlib>
 #include <memory>
 #include <string>
 #include <windows.h> // must precede the *api.h headers: it defines the target architecture
+
 #include <memoryapi.h>
 #include <processthreadsapi.h>
+#if defined(BOTW_PLATFORM_UWP)
+#include <winrt/Windows.System.h>
+#endif
 #if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
 #define BOTW_HAS_VEH 1
 #else
@@ -127,6 +132,30 @@ void *reserve_guest() {
   static_assert(sizeof(void *) == 8, "Guest mapping requires a 64-bit host");
   if (guest_base.load() || !ensure_exceptions())
     return nullptr;
+#if defined(BOTW_PLATFORM_UWP)
+  try {
+    using winrt::Windows::System::MemoryManager;
+    const auto limit = MemoryManager::AppMemoryUsageLimit();
+    const auto usage = MemoryManager::AppMemoryUsage();
+    LOG("UWP memory admission: usage=%llu MiB reported=%llu MiB budget=%llu "
+        "MiB guest=%llu MiB reserve=%llu MiB",
+        (unsigned long long)(usage >> 20), (unsigned long long)(limit >> 20),
+        (unsigned long long)(uwp_memory_limit(limit) >> 20),
+        (unsigned long long)(guest_initial_commit_bytes(lazy_commit.load()) >>
+                             20),
+        (unsigned long long)(kUwpStartupReserve >> 20));
+    if (!uwp_memory_admits_guest(limit, usage, lazy_commit.load())) {
+      LOG("UWP memory admission failed: insufficient process budget for guest "
+          "and startup reserve; verify Game classification");
+      return nullptr;
+    }
+  } catch (const winrt::hresult_error &e) {
+    LOG("UWP memory admission unavailable (0x%08x); refusing unchecked guest "
+        "commit",
+        unsigned(e.code().value));
+    return nullptr;
+  }
+#endif
   void *p = VirtualAlloc2FromApp(GetCurrentProcess(), nullptr, kGuestSize,
                                  MEM_RESERVE, PAGE_NOACCESS, nullptr, 0);
   if (p && !lazy_commit.load() && !VirtualAllocFromApp(static_cast<char *>(p) + kNullGuard,
@@ -141,10 +170,11 @@ void *reserve_guest() {
   // in committed memory. The unused 1.25 GiB between stays reserved.
   if (p && lazy_commit.load()) {
     auto base = static_cast<char *>(p);
-    if (!VirtualAllocFromApp(base + kNullGuard, 0x50000000 - kNullGuard,
+    if (!VirtualAllocFromApp(base + kNullGuard, kGuestLowCommitEnd - kNullGuard,
                              MEM_COMMIT, PAGE_READWRITE) ||
-        !VirtualAllocFromApp(base + 0xA0000000ull, kGuestSize - 0xA0000000ull,
-                             MEM_COMMIT, PAGE_READWRITE)) {
+        !VirtualAllocFromApp(base + kGuestHighCommitStart,
+                             kGuestSize - kGuestHighCommitStart, MEM_COMMIT,
+                             PAGE_READWRITE)) {
       VirtualFree(p, 0, MEM_RELEASE);
       return nullptr;
     }
