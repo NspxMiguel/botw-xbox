@@ -90,6 +90,11 @@ verified with osslsigncode. Intermediates were removed afterwards. The sections
 below record the earlier checks, including the first attempt that stopped at the
 disk-space guard. Installing that package on an Xbox is still to be verified.
 
+On 2026-10-24 the game-free CI smoke (.github/workflows/builder-smoke.yml, run 40077174981)
+passed on ubuntu-latest and windows-latest: `doctor`, a fresh pinned `setup` (xwin CRT/SDK,
+vcpkg bundle, FidelityFX, graphic packs) and the builder test suite. A full game build on
+Windows or Linux still needs a player's dump and has not been run.
+
 ## Files
 
 - `tools/builder/botw_builder.py`: Python 3.11+ stdlib entry point for doctor, setup,
