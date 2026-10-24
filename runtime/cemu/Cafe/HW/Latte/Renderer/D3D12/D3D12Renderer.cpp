@@ -833,10 +833,10 @@ void D3D12Renderer::UAVBarrier(ID3D12Resource *resource)
 
 void D3D12Renderer::FlushBarriers()
 {
-	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Barriers);
 	m_pipeline.CheckBack();
 	if (m_pendingBarriers.empty())
 		return;
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Barriers);
 	m_cmdList->ResourceBarrier((UINT)m_pendingBarriers.size(), m_pendingBarriers.data());
 	m_statBarriersPerFrame += (uint32)m_pendingBarriers.size();
 	m_pendingBarriers.clear();
