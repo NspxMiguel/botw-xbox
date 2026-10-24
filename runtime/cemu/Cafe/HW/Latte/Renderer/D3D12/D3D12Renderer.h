@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "Cafe/HW/Latte/Renderer/D3D12/LatteBatchPolicy.h"
+
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12StageTable.h"
@@ -13,6 +15,10 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Format.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureD3D12.h"
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12TextureStage.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12DrawPacket.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12ParallelRecorder.h"
 #include "util/math/vector2.h"
 
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
@@ -40,7 +46,6 @@ namespace WindowSystem
 {
 struct WindowHandleInfo;
 }
-
 
 class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 {
@@ -173,6 +178,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	// --- D3D12SubmissionTracker ---
 	uint64 GetRecordingSubmissionId() const override
 	{
+		m_pipeline.CheckBack();
 		return m_lastSubmittedFenceValue + 1;
 	}
 	uint64 GetCompletedSubmissionId() override;
@@ -185,6 +191,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	}
 	ID3D12GraphicsCommandList *GetCommandList() const
 	{
+		m_pipeline.CheckBack();
 		return m_cmdList.Get();
 	}
 	const D3D12FormatSupport &GetFormatSupport() const
@@ -195,6 +202,18 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	{
 		return m_debugMode;
 	}
+	LattePipeline::ResourceId RegisterResource(void *object)
+	{
+		m_pipeline.CheckFront();
+		return m_resources.Insert(object);
+	}
+	void InitializeTexture(LattePipeline::ResourceId id);
+	void InitializeFramebuffer(LattePipeline::ResourceId id);
+	void ReleaseTexture(LattePipeline::ResourceId id);
+	void ReleaseView(LattePipeline::ResourceId id);
+	void ReleaseFramebuffer(LattePipeline::ResourceId id);
+	void RetireResource(LattePipeline::ResourceId id);
+	void WaitForRecording();
 	uint64 GenUniqueId()
 	{
 		return ++m_uniqueIdCounter;
@@ -202,14 +221,17 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 
 	D3D12StagingDescriptorHeap &GetStagingViewHeap()
 	{
+		m_pipeline.CheckBack();
 		return *m_stagingViewHeap;
 	}
 	D3D12StagingDescriptorHeap &GetStagingRTVHeap()
 	{
+		m_pipeline.CheckBack();
 		return *m_stagingRTVHeap;
 	}
 	D3D12StagingDescriptorHeap &GetStagingDSVHeap()
 	{
+		m_pipeline.CheckBack();
 		return *m_stagingDSVHeap;
 	}
 	D3D12_CPU_DESCRIPTOR_HANDLE GetNullRTV() const
@@ -235,6 +257,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 
 	D3D12UploadAllocation AllocateUpload(uint64 size, uint64 alignment)
 	{
+		m_pipeline.CheckBack();
+		LatteProfiler::Add(LatteProfiler::Counter::UploadBytes, size);
 		return m_uploadRing->Allocate(size, alignment);
 	}
 	void ReleaseResourceDeferred(ComPtr<ID3D12Resource> resource);
@@ -248,6 +272,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	// state tracking. Barriers are batched and flushed before the next command that needs them
 	void TransitionTexture(LatteTextureD3D12 *texture, uint32 firstMip, uint32 mipCount, uint32 firstSlice, uint32 sliceCount, D3D12_RESOURCE_STATES newState)
 	{
+		m_pipeline.CheckBack();
 		if (!texture->GetResource())
 			return;
 		constexpr auto writeStates = D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_DEPTH_WRITE | D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_RESOLVE_DEST;
@@ -271,6 +296,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void TransitionTextureAll(LatteTextureD3D12 *texture, D3D12_RESOURCE_STATES newState);
 	void TransitionResource(ID3D12Resource *resource, D3D12_RESOURCE_STATES &trackedState, D3D12_RESOURCE_STATES newState)
 	{
+		m_pipeline.CheckBack();
 		if (trackedState == newState)
 			return;
 		m_pendingBarriers.push_back(D3D12_TransitionBarrier(resource, trackedState, newState));
@@ -283,6 +309,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void WaitForIdle();
 	void RequestSubmitSoon()
 	{
+		m_pipeline.CheckBack();
 		m_submitSoon = true;
 	}
 
@@ -319,6 +346,167 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	}
 
   private:
+	LattePipeline::Context m_pipeline;
+	LattePipeline::Stream m_operations{
+		LattePipeline::CapacityFromEnvironment("CEMU_LATTE_PIPELINE_CAPACITY", 1024, 1, 65536),
+		LattePipeline::CapacityFromEnvironment("CEMU_LATTE_PIPELINE_ARENA", 16 * 1024 * 1024, 1024 * 1024, 64 * 1024 * 1024)};
+	LattePipeline::Registry m_resources;
+	LattePipeline::ResourceId m_recordingFBO;
+	LattePipeline::BlockId m_pinnedDrawBlock;
+	LattePipeline::ResourceId m_pinnedFramebuffer;
+	uint64 m_pinnedDrawFence = 0;
+	LattePipeline::StateBlocks<LattePipeline::DrawBlock, 1024, LattePipeline::DrawBlockEqual, LattePipeline::DrawBlockCopy> m_drawBlocks;
+	LattePipeline::SequenceStageLayouts m_frontStageLayouts;
+	LattePipeline::DrawBlock m_frontDrawBlock{};
+	LattePipeline::BlockId m_frontDrawBlockId;
+	bool m_frontDrawBlockReusable = false;
+	std::array<LatteDecompilerShader *, 3> m_frontDrawShaders{};
+	struct IndexResource
+	{
+		D3D12UploadHeapAllocator::Allocation *native = nullptr;
+		std::shared_ptr<LattePipeline::DeferredIndex> deferred;
+		uint32 size = 0;
+		LattePipeline::ResourceId id;
+	};
+	struct FrontState
+	{
+		bool skipDrawSequence = false, streamoutEnabled = false;
+		uint32 verticesPerInstance = 0;
+		struct
+		{
+			bool enabled = false;
+			uint32 ringBufferOffset = 0;
+		} streamoutBuffer[LATTE_NUM_STREAMOUT_BUFFER];
+		LatteTextureViewD3D12 *boundTexture[LATTE_CEMU_GS_TEX_UNIT_BASE + LATTE_NUM_MAX_TEX_UNITS]{};
+		CachedFBOD3D12 *activeFBO = nullptr;
+		D3D12_VIEWPORT viewport{0, 0, 1, 1, 0, 1};
+		D3D12_RECT scissor{0, 0, 1, 1};
+	} m_frontState;
+	struct FrontBindings
+	{
+		LattePipeline::VertexRange vertices[LATTE_MAX_VERTEX_BUFFERS]{};
+		LattePipeline::UniformRange uniforms[3][LATTE_NUM_MAX_UNIFORM_BUFFERS]{};
+	} m_frontBindings;
+	std::vector<uint8> m_indexDecodeScratch;
+	std::vector<std::byte> m_indexCaptureScratch;
+	bool indexData_captureIndexMemory(const void *data, uint32 size, uint32 width, bool bigEndian, IndexAllocation &allocation, uint32 &maximum) override;
+	LattePipeline::Span StageBytes(const void *data, size_t size);
+	void draw_executeDirect(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext &drawcallContext);
+	void draw_prepareStage(LatteDecompilerShader *shader, LattePipeline::StageBlock &out);
+	void draw_record(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena);
+	bool draw_captureParallel(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena);
+	void draw_drainParallel();
+	void draw_planRenderTargets(CachedFBOD3D12 *fbo);
+	bool HasActiveOcclusionQuery() const;
+	std::unique_ptr<D3D12ParallelRecorder> m_parallelRecorder;
+	std::vector<D3D12ResolvedDraw> m_parallelDraws;
+	bool m_parallelReady = false;
+	size_t m_parallelBytes = 0;
+	LatteProfiler::Clock::time_point m_parallelBatchStart{};
+	const unsigned m_requestedChunks = static_cast<unsigned>(LattePipeline::CapacityFromEnvironment("CEMU_LATTE_CHUNKS", 0, 1, 4));
+	void draw_recordUniformBytes(D3D12Const::Stage stage, std::span<const std::byte> bytes, D3D12_GPU_VIRTUAL_ADDRESS &addressOut, uint32 &sizeOut);
+	std::span<const std::byte> draw_buildUniformVars(LatteDecompilerShader *shader);
+	LattePipeline::Span draw_snapshotUniformVars(LatteDecompilerShader *shader);
+
+	struct ReadbackPacket
+	{
+		LattePipeline::ResourceId readback, texture;
+		uint32 action = 0, mip = 0, slice = 0, rowPitch = 0, imageSize = 0, width = 0, height = 0;
+	};
+	void readback_record(const ReadbackPacket &packet, const LattePipeline::Arena &arena);
+	struct QueryPacket
+	{
+		LattePipeline::ResourceId query;
+		uint32 action = 0;
+		uint64 epoch = 0;
+	};
+	void query_record(const QueryPacket &packet, const LattePipeline::Arena &arena);
+	void occlusionQuery_createHeap_record();
+	struct OutputPacket
+	{
+		LattePipeline::ResourceId view, vertexShader, pixelShader;
+		RendererOutputShader::OutputUniformVariables uniforms[2];
+		sint32 imageX, imageY, imageWidth, imageHeight, inputWidth, inputHeight;
+		uint32 upscaler;
+		bool linear, padView, clearBackground, nativeAA;
+	};
+	static_assert(sizeof(OutputPacket) <= 208);
+	void output_record(const OutputPacket &packet, const LattePipeline::Arena &arena);
+	struct BackendPacket
+	{
+		using Kind = LattePipeline::BackendKind;
+		Kind kind{};
+		LattePipeline::ResourceId resources[2]{};
+		uint32 words[24]{};
+		LattePipeline::Span bytes;
+	};
+	static_assert(sizeof(BackendPacket) <= 208);
+	void buffer_bindVertexBuffers_record(std::span<const BindBufferParam> bindings);
+	void buffer_bindUniformBuffer_record(uint32 stage, uint32 bufferIndex, uint32 offset, uint32 size);
+	void renderTarget_setViewport_record(D3D12_VIEWPORT viewport);
+	void renderTarget_setScissor_record(D3D12_RECT scissor);
+	void bufferCache_upload_record(const void *buffer, uint32 size, uint32 bufferOffset);
+	void bufferCache_init_record(uint32 bufferSize, uint32 streamoutSize);
+
+	void surfaceCopy_record(const BackendPacket &packet);
+	void texture_recordPlane(const BackendPacket &packet, const LattePipeline::Arena &arena);
+	void texture_preparePlane(LatteTextureD3D12 *texture, uint32 mip, uint32 slice, uint32 plane, const uint8 *data, uint32 rowBytes, uint32 rows, uint32 width, uint32 blockDim, bool first);
+	void ApplyFrontCompletions();
+	void UpdatePipelineProfile();
+	enum CompletionKind : uint32
+	{
+		QueryResult = 1,
+		ReadbackResult,
+		ProfileResult,
+		QueryBatchResult
+	};
+	void AcceptCompletion(const LattePipeline::Completion &completion);
+	void WorkerIdle();
+	std::unordered_map<uint64, LatteQueryObjectD3D12 *> m_frontQueries;
+	std::vector<LatteQueryObjectD3D12 *> m_cachedQueries;
+	bool m_frontQueryHeapReady = false;
+	std::unordered_map<uint64, LatteTextureReadbackInfoD3D12 *> m_frontReadbacks;
+	static uint64 ResourceKey(LattePipeline::ResourceId id)
+	{
+		return (uint64(id.generation) << 32) | id.slot;
+	}
+	void AcceptQueryBatch(const LattePipeline::Completion &completion);
+	void AcceptQueryResult(const LattePipeline::Completion &completion);
+	void AcceptReadbackResult(const LattePipeline::Completion &completion);
+	bool m_applyingCompletions = false, m_frontReadbacksReady = false;
+	uint64 m_frontCompleted = 0;
+	LattePipeline::PipelineTiming m_profilePipelineTiming;
+	uint64 m_frontCpuStart = 0, m_backIdleObserved = 0;
+	double m_reportSeconds = 0;
+	uint64 m_reportFrames = 0;
+	std::vector<uint8> m_screenshotBytes;
+	struct UISnapshot;
+
+	void *CreateUITexture(const uint8 *rgba, sint32 width, sint32 height);
+	void ui_record(const BackendPacket &packet);
+
+	void capture_record(const BackendPacket &packet);
+	bool BeginFrame_record(bool mainWindow);
+	std::deque<std::pair<uint64, uint64>> m_submissionSequences;
+	int m_presentVsync = 1;
+	bool m_presentInterpolation = false;
+	void RecordBackend(const BackendPacket &packet, const LattePipeline::Arena &arena);
+	LattePipeline::Completion ExecuteBackend(LattePipeline::Opcode opcode, const BackendPacket &packet);
+	void texture_clearColorSlice_record(LatteTexture *hostTexture, sint32 sliceIndex, sint32 mipIndex, float r, float g, float b, float a);
+	void texture_clearDepthSlice_record(LatteTexture *hostTexture, uint32 sliceIndex, sint32 mipIndex, bool clearDepth, bool clearStencil, float depthValue, uint32 stencilValue);
+	void texture_copyImageSubData_record(LatteTexture *src, sint32 srcMip, sint32 effectiveSrcX, sint32 effectiveSrcY, sint32 srcSlice, LatteTexture *dst, sint32 dstMip, sint32 effectiveDstX, sint32 effectiveDstY, sint32 dstSlice, sint32 effectiveCopyWidth, sint32 effectiveCopyHeight, sint32 srcDepth);
+	void bufferCache_copy_record(uint32 srcOffset, uint32 dstOffset, uint32 size);
+	void bufferCache_copyStreamoutToMainBuffer_record(uint32 srcOffset, uint32 dstOffset, uint32 size);
+	void streamout_rendererFinishDrawcall_record();
+	void SubmitCommandList_record(bool waitIdle);
+	void Flush_record(bool waitIdle);
+	void NotifyLatteCommandProcessorIdle_record();
+	void SwapBuffers_record(bool swapTV, bool swapDRC);
+	void ClearColorbuffer_record(bool padView);
+	void DrawEmptyFrame_record(bool mainWindow);
+	void occlusionQuery_flush_record();
+	void occlusionQuery_updateState_record();
+
 	struct DrawState;
 	struct StageBindings;
 
@@ -348,6 +536,12 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		D3D12_SAMPLER_DESC samplers[D3D12Const::kMaxSamplersPerStage];
 		uint32 samplerCount;
 		D3D12_GPU_DESCRIPTOR_HANDLE samplerTable;
+		const D3D12_SAMPLER_DESC *samplerSource = nullptr;
+		uint64 samplerIdentity = 0;
+		const D3D12_SAMPLER_DESC *SamplerData() const
+		{
+			return samplerSource ? samplerSource : samplers;
+		}
 	};
 	void draw_buildStageBindings(LatteDecompilerShader *shader, RendererShaderD3D12 *hostShader, PreparedStageBindings &out);
 	void draw_acquireSamplerTables(PreparedStageBindings *stages, uint32 count);
@@ -384,6 +578,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	bool m_pipelineBlobsSupported = false;
 	void TryEnableImplicitShaderCache();
 	bool m_implicitCacheTesting = false;
+	fs::path m_implicitCacheMarker;
 	uint32 m_implicitCacheTestFrames = 0;
 	uint64 m_uniqueIdCounter = 0;
 	D3D12FormatSupport m_formatSupport;
@@ -419,6 +614,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullRTV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullCBV{};
 	ComPtr<ID3D12Resource> m_zeroConstantBuffer;
+	D3D12_GPU_VIRTUAL_ADDRESS m_zeroConstantBufferAddress = 0;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullUAV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullSRV1D{}, m_nullSRV2D{}, m_nullSRV2DArray{}, m_nullSRVCubeArray{}, m_nullSRV3D{};
 
@@ -429,6 +625,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	D3D12DeferredReleaser m_deferredReleaser;
 
 	ComPtr<ID3D12Resource> m_bufferCache;
+	D3D12_GPU_VIRTUAL_ADDRESS m_bufferCacheAddress = 0;
 	D3D12_RESOURCE_STATES m_bufferCacheState = D3D12_RESOURCE_STATE_COMMON;
 	uint32 m_bufferCacheSize = 0;
 	ComPtr<ID3D12Resource> m_bufferCacheScratch; // used for overlapping copies and unaligned uniform buffers
@@ -480,6 +677,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	// the pad window is closed from the UI thread while the render thread may still be using its swap chain
 	std::atomic<bool> m_padShutdownRequested{false};
 	std::mutex m_padSwapChainMutex;
+	std::atomic<uint64> m_surfaceResize[2]{};
+	std::atomic<bool> m_padActive{false};
 
 	// pipelines
 	std::unique_ptr<D3D12PipelineCache> m_pipelineCache;
@@ -492,11 +691,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	};
 	struct DrawState
 	{
-		bool skipDrawSequence = false;
-		bool streamoutEnabled = false;
 		CachedFBOD3D12 *activeFBO = nullptr;
 		bool renderTargetsDirty = true;
-		LatteTextureViewD3D12 *boundTexture[LATTE_CEMU_GS_TEX_UNIT_BASE + LATTE_NUM_MAX_TEX_UNITS]{};
 		D3D12_VERTEX_BUFFER_VIEW vertexBuffers[LATTE_MAX_VERTEX_BUFFERS]{};
 		uint32 vertexBufferDirtyMask = 0xFFFF;
 		StageBindings stage[3];
@@ -515,13 +711,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		uint32 currentRuntimeData[D3D12Const::kRuntimeDataDwords]{};
 		bool runtimeDataValid = false;
 		bool rootSignatureBound = false;
-		// streamout
-		struct
-		{
-			bool enabled;
-			uint32 ringBufferOffset;
-		} streamoutBuffer[LATTE_NUM_STREAMOUT_BUFFER]{};
-		uint32 verticesPerInstance = 0;
+
 	} m_state;
 
 	// Upload addresses and view tables never escape the submission that owns their ring allocations.
@@ -550,14 +740,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		uint32 size = 0;
 	};
 	UAVCacheEntry m_stageUAVCache[(uint32)D3D12Const::Stage::Count + 1];
-	struct SamplerTableCacheEntry
-	{
-		D3D12_SAMPLER_DESC samplers[D3D12Const::kMaxSamplersPerStage]{};
-		uint32 count = 0;
-		uint64 generation = 0;
-		D3D12_GPU_DESCRIPTOR_HANDLE table{};
-	};
-	SamplerTableCacheEntry m_stageSamplerCache[3];
+	D3D12SamplerTableMemo m_stageSamplerCache[3];
 	struct SamplerDescCacheEntry
 	{
 		std::array<uint32, 13> key{};
@@ -566,6 +749,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	};
 	SamplerDescCacheEntry m_samplerDescCache[3][LATTE_NUM_MAX_TEX_UNITS];
 
+	PreparedStageBindings m_preparedStages[3];
+	D3D12TextureStageCache m_textureStageCache[3];
 	std::vector<uint8> m_uniformScratch; // CPU side staging for uniform var blocks
 
 	// imgui
@@ -581,7 +766,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		uint64 *results = nullptr;
 		std::vector<uint32> freeIndices;
 		std::vector<LatteQueryObjectD3D12 *> active;
-		std::vector<LatteQueryObjectD3D12 *> cached;
+
 		uint64 lastSubmission = 0;
 	} m_occlusionQueries;
 

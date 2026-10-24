@@ -1,6 +1,7 @@
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Core/LatteIndices.h"
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
+#include "Cafe/HW/Latte/Core/LatteContentIndex.h"
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
 
 #include <array>
@@ -125,6 +126,14 @@ int main()
 	std::vector<uint16> large(40000, _swapEndianU16(3));
 	Decode(large.data(), large.size());
 	assert(g_renderer->live == 1);
+	// Fill all eight transient slots with previous values of one guest address.
+	// Every candidate can reject on the next mutation without overflowing the
+	// per-lookup duplicate-rejection list.
+	for (uint16 value = 4; value < 20; ++value)
+	{
+		large[100] = _swapEndianU16(value);
+		Decode(large.data(), large.size());
+	}
 	LatteIndices_invalidateOnWait();
 	assert(g_renderer->live == 0);
 	// Large generated outputs are transient too, despite having no input bytes.
@@ -142,14 +151,14 @@ int main()
 	LatteIndices_invalidateAll(g_renderer.get());
 
 	// Four colliding keys coexist; the fifth evicts the least recently used.
-	std::vector<std::array<uint16, 4>> candidates(4096);
+	std::vector<std::array<uint16, 4>> candidates(16384);
 	const LatteDrawCache::IndexKey key{reinterpret_cast<uintptr_t>(indices.data()), 4, uint32(LatteIndexType::U16_BE), uint32(LattePrimitiveMode::TRIANGLES), UINT32_MAX};
 	std::vector<const void *> colliding;
 	for (auto &candidate : candidates)
 	{
 		auto other = key;
 		other.address = reinterpret_cast<uintptr_t>(candidate.data());
-		if (other.Slot(64) == key.Slot(64))
+		if (other.Slot(LatteDrawCache::kSmallIndexEntries / LatteDrawCache::kIndexCacheWays) == key.Slot(LatteDrawCache::kSmallIndexEntries / LatteDrawCache::kIndexCacheWays))
 		{
 			candidate.fill(_swapEndianU16(uint16(7 + colliding.size())));
 			colliding.push_back(candidate.data());

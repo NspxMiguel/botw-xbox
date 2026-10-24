@@ -107,7 +107,7 @@ ID3D12PipelineState *D3D12ImGuiRenderer::GetPipeline(DXGI_FORMAT rtvFormat)
 	return m_pipeline.Get();
 }
 
-void *D3D12ImGuiRenderer::CreateTexture(const uint8 *rgba, sint32 width, sint32 height)
+void *D3D12ImGuiRenderer::CreateTexture(const uint8 *, sint32 width, sint32 height)
 {
 	auto *tex = new Texture();
 	ID3D12Device *device = m_renderer->GetDevice();
@@ -129,28 +129,6 @@ void *D3D12ImGuiRenderer::CreateTexture(const uint8 *rgba, sint32 width, sint32 
 	D3D12_SetDebugName(tex->resource.Get(), "ImGuiTexture");
 	D3D12_Checkpoint(device, "ImGui texture: resource created");
 
-	const uint32 rowBytes = (uint32)width * 4;
-	const uint32 rowPitch = AlignUp<uint32>(rowBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
-	D3D12UploadAllocation upload = m_renderer->AllocateUpload((uint64)rowPitch * height, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
-	for (sint32 y = 0; y < height; y++)
-		memcpy(upload.cpuPtr + (size_t)y * rowPitch, rgba + (size_t)y * rowBytes, rowBytes);
-	D3D12_TEXTURE_COPY_LOCATION dst{};
-	dst.pResource = tex->resource.Get();
-	dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-	dst.SubresourceIndex = 0;
-	D3D12_TEXTURE_COPY_LOCATION src{};
-	src.pResource = upload.resource;
-	src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-	src.PlacedFootprint.Offset = upload.offset;
-	src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, (UINT)width, (UINT)height, 1, rowPitch};
-	auto *cmdList = m_renderer->GetCommandList();
-	m_renderer->FlushBarriers();
-	cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
-	D3D12_RESOURCE_BARRIER barrier = D3D12_TransitionBarrier(tex->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-	cmdList->ResourceBarrier(1, &barrier);
-	m_renderer->m_hasRecordedWork = true;
-	D3D12_Checkpoint(device, "ImGui texture: upload recorded");
-
 	tex->srv = m_renderer->GetStagingViewHeap().Allocate();
 	D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc{};
 	srvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -159,14 +137,16 @@ void *D3D12ImGuiRenderer::CreateTexture(const uint8 *rgba, sint32 width, sint32 
 	srvDesc.Texture2D.MipLevels = 1;
 	device->CreateShaderResourceView(tex->resource.Get(), &srvDesc, tex->srv);
 	D3D12_Checkpoint(device, "ImGui texture: SRV created");
-	return tex;
+	return LattePipeline::OpaqueId(m_renderer->m_resources.Insert(tex));
 }
 
 void D3D12ImGuiRenderer::DestroyTexture(void *texture)
 {
-	auto *tex = (Texture *)texture;
-	if (!tex)
+	if (!texture)
 		return;
+	const auto id = LattePipeline::FromOpaqueId(texture);
+	auto *tex = m_renderer->m_resources.Get<Texture>(id);
+	m_renderer->m_resources.Release(id);
 	m_renderer->ReleaseResourceDeferred(std::move(tex->resource));
 	m_renderer->GetStagingViewHeap().Free(tex->srv);
 	delete tex;
@@ -180,7 +160,7 @@ void D3D12ImGuiRenderer::EnsureFontTexture()
 	unsigned char *pixels;
 	int width, height;
 	io.Fonts->GetTexDataAsRGBA32(&pixels, &width, &height);
-	m_fontTexture = (Texture *)CreateTexture(pixels, width, height);
+	m_fontTexture = m_renderer->CreateUITexture(pixels, width, height);
 	io.Fonts->TexID = (ImTextureID)m_fontTexture;
 }
 
@@ -194,7 +174,7 @@ void D3D12ImGuiRenderer::DestroyFontTexture()
 		if (io.Fonts && io.Fonts->TexID == (ImTextureID)m_fontTexture)
 			io.Fonts->TexID = nullptr;
 	}
-	DestroyTexture(m_fontTexture);
+	m_renderer->DeleteTexture(m_fontTexture);
 	m_fontTexture = nullptr;
 }
 
@@ -209,6 +189,15 @@ void D3D12ImGuiRenderer::Render(ImDrawData *drawData, D3D12_CPU_DESCRIPTOR_HANDL
 	ID3D12PipelineState *pso = GetPipeline(rtvFormat);
 	if (!pso)
 		return;
+
+	// acquire the sampler table before recording any state (see D3D12Renderer::GetSamplerTable)
+	D3D12_SAMPLER_DESC sampler{};
+	sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+	sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
+	sampler.MaxAnisotropy = 1;
+	sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+	sampler.MaxLOD = D3D12_FLOAT32_MAX;
+	const D3D12_GPU_DESCRIPTOR_HANDLE samplerTable = m_renderer->GetSamplerTable(&sampler, std::max<uint32>(m_ps->GetBindingRemap().srvCount, 1));
 
 	// geometry
 	const size_t vtxBytes = (size_t)drawData->TotalVtxCount * sizeof(ImDrawVert);
@@ -228,14 +217,6 @@ void D3D12ImGuiRenderer::Render(ImDrawData *drawData, D3D12_CPU_DESCRIPTOR_HANDL
 		}
 	}
 
-	// acquire the sampler table before recording any state (see D3D12Renderer::GetSamplerTable)
-	D3D12_SAMPLER_DESC sampler{};
-	sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-	sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-	sampler.MaxAnisotropy = 1;
-	sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-	sampler.MaxLOD = D3D12_FLOAT32_MAX;
-	const D3D12_GPU_DESCRIPTOR_HANDLE samplerTable = m_renderer->GetSamplerTable(&sampler, std::max<uint32>(m_ps->GetBindingRemap().srvCount, 1));
 
 	m_renderer->FlushBarriers();
 	auto *cmd = m_renderer->GetCommandList();
@@ -295,7 +276,9 @@ void D3D12ImGuiRenderer::Render(ImDrawData *drawData, D3D12_CPU_DESCRIPTOR_HANDL
 			void *texId = (void *)pcmd->TextureId;
 			if (texId != boundTexture && srvReg >= 0)
 			{
-				auto *tex = (Texture *)texId;
+				auto *tex = texId ? m_renderer->m_resources.Get<Texture>(LattePipeline::FromOpaqueId(texId)) : nullptr;
+				if (tex)
+					m_renderer->m_resources.Use(LattePipeline::FromOpaqueId(texId), m_renderer->m_operations.ActiveHeader().sequence, m_renderer->GetRecordingSubmissionId());
 				D3D12StageTableDesc table;
 				table.srv[srvReg] = tex ? tex->srv : D3D12_CPU_DESCRIPTOR_HANDLE{};
 				cmd->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), m_renderer->WriteStageTable(table, D3D12Const::Stage::Pixel));
@@ -308,6 +291,35 @@ void D3D12ImGuiRenderer::Render(ImDrawData *drawData, D3D12_CPU_DESCRIPTOR_HANDL
 	}
 	// the game's draw state has to be re-applied
 	m_renderer->InvalidateDrawState();
+	m_renderer->m_hasRecordedWork = true;
+}
+
+void D3D12ImGuiRenderer::UploadTexture(void *texture, const uint8 *rgba, uint32 width, uint32 firstRow, uint32 rows, bool last)
+{
+	const auto id = LattePipeline::FromOpaqueId(texture);
+	auto *tex = m_renderer->m_resources.Get<Texture>(id);
+	m_renderer->m_resources.Use(id, m_renderer->m_operations.ActiveHeader().sequence, m_renderer->GetRecordingSubmissionId());
+	const uint32 rowBytes = width * 4;
+	const uint32 rowPitch = AlignUp<uint32>(rowBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+	auto upload = m_renderer->AllocateUpload(static_cast<uint64>(rowPitch) * rows, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT);
+	for (uint32 row = 0; row < rows; ++row)
+		memcpy(upload.cpuPtr + static_cast<size_t>(row) * rowPitch, rgba + static_cast<size_t>(row) * rowBytes, rowBytes);
+	D3D12_TEXTURE_COPY_LOCATION dst{};
+	dst.pResource = tex->resource.Get();
+	dst.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+	D3D12_TEXTURE_COPY_LOCATION src{};
+	src.pResource = upload.resource;
+	src.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+	src.PlacedFootprint.Offset = upload.offset;
+	src.PlacedFootprint.Footprint = {DXGI_FORMAT_R8G8B8A8_UNORM, width, rows, 1, rowPitch};
+	m_renderer->FlushBarriers();
+	auto *commands = m_renderer->GetCommandList();
+	commands->CopyTextureRegion(&dst, 0, firstRow, 0, &src, nullptr);
+	if (last)
+	{
+		auto barrier = D3D12_TransitionBarrier(tex->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+		commands->ResourceBarrier(1, &barrier);
+	}
 	m_renderer->m_hasRecordedWork = true;
 }
 

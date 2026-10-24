@@ -6,6 +6,9 @@
 #include <condition_variable>
 #include <deque>
 
+#include "../LatteWordBatch.h"
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
+
 #include "../../src/latte/latte.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
 #include "Cafe/HW/Latte/Core/LattePM4.h"
@@ -24,6 +27,7 @@ uint32_t sys_alloc(uint32_t size, uint32_t align);
 namespace {
 std::mutex g_rb_lock;
 std::deque<uint32> g_rb;
+LatteWordBatch<> g_rb_batch;	 // only the command thread accesses the copied batch
 std::condition_variable g_rb_cv; // the idle GPU thread waits here (TCLGPUWaitForWork)
 bool g_rb_waiting = false;       // under g_rb_lock
 std::atomic<uint64> g_last_submitted{0}, g_retired{0};
@@ -44,7 +48,9 @@ void on_frame(uint64_t frame);
 void log_write(const char *fmt, ...);
 
 void TCL::TCLGPUWaitForWork(int max_us) {
-    std::unique_lock<std::mutex> l(g_rb_lock);
+	if (g_rb_batch.HasBufferedWords())
+		return;
+	std::unique_lock<std::mutex> l(g_rb_lock);
     if (!g_rb.empty())
         return;
     g_rb_waiting = true;
@@ -52,12 +58,13 @@ void TCL::TCLGPUWaitForWork(int max_us) {
     g_rb_waiting = false;
 }
 bool TCL::TCLGPUReadRBWord(uint32 &w) {
-    std::lock_guard<std::mutex> l(g_rb_lock);
-    if (g_rb.empty())
-        return false;
-    w = g_rb.front();
-    g_rb.pop_front();
-    return true;
+	const auto result = g_rb_batch.Read(g_rb, g_rb_lock, w);
+	if (result == LatteWordBatch<>::Result::Empty)
+		return false;
+	LatteProfiler::Add(LatteProfiler::Counter::RingWords);
+	if (result == LatteWordBatch<>::Result::Refilled)
+		LatteProfiler::Add(LatteProfiler::Counter::RingRefills);
+	return true;
 }
 void TCL::TCLGPUNotifyNewRetirementTimestamp() {
     uint64 ts = memory_readU64(g_retire_slot);

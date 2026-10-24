@@ -20,7 +20,41 @@ class LatteQueryObjectD3D12 final : public LatteQueryObject
 	{
 	}
 
+	LattePipeline::ResourceId recordingId;
 	bool getResult(uint64 &numSamplesPassed) override
+	{
+		m_renderer->m_operations.Poll();
+		if (!m_pollPending && !m_resultReady)
+		{
+			m_pollPending = true;
+			Dispatch(0);
+		}
+		if (m_resultReady)
+			numSamplesPassed = m_result;
+		return m_resultReady;
+	}
+	void begin() override
+	{
+		++m_epoch;
+		m_resultReady = false;
+		m_result = 0;
+		m_pollPending = false;
+		Dispatch(1);
+	}
+	void end() override
+	{
+		Dispatch(2);
+	}
+	void Dispatch(uint32 action)
+	{
+		m_renderer->m_pipeline.CheckFront();
+		D3D12Renderer::QueryPacket packet{recordingId, action, m_epoch};
+		m_renderer->m_operations.Execute<D3D12Renderer::QueryPacket, &D3D12Renderer::query_record>(m_renderer->m_pipeline, LattePipeline::Opcode::Query, packet, *m_renderer);
+		// Detach/reset stay ordered. RetireResource acknowledges the entire
+		// prefix before the logical adapter can return to the front cache.
+		m_renderer->ApplyFrontCompletions();
+	}
+	bool RecordResult(uint64 &numSamplesPassed)
 	{
 		if (!m_ended)
 			return false;
@@ -32,14 +66,14 @@ class LatteQueryObjectD3D12 final : public LatteQueryObject
 		return true;
 	}
 
-	void begin() override
+	void RecordBegin()
 	{
 		m_ended = false;
 		m_hasActiveQuery = true;
 		BeginFragment();
 	}
 
-	void end() override
+	void RecordEnd()
 	{
 		if (m_hasActiveFragment)
 			EndFragment();
@@ -102,13 +136,21 @@ class LatteQueryObjectD3D12 final : public LatteQueryObject
 
 	void Reset()
 	{
+		++m_epoch;
+		m_resultReady = false;
+		m_pollPending = false;
+		m_result = 0;
+		queryEnded = false;
+		queryEventStart = 0;
+		queryEventEnd = 0;
+		Dispatch(3);
+	}
+	void RecordReset()
+	{
 		auto &oq = m_renderer->m_occlusionQueries;
 		for (auto &f : m_fragments)
 			oq.freeIndices.push_back(f.queryIndex);
 		m_fragments.clear();
-		queryEnded = false;
-		queryEventStart = 0;
-		queryEventEnd = 0;
 		m_ended = false;
 		m_hasActiveQuery = false;
 		m_hasActiveFragment = false;
@@ -130,63 +172,79 @@ class LatteQueryObjectD3D12 final : public LatteQueryObject
 	bool m_hasActiveFragment = false;
 	uint64 m_finishSubmission = 0;
 	uint64 m_accumulatedSum = 0;
+	uint64 m_result = 0;
+	bool m_resultReady = false;
+	bool m_pollPending = false;
+	uint64 m_epoch = 0, m_recordEpoch = 0;
 };
 
 LatteQueryObject *D3D12Renderer::occlusionQuery_create()
 {
-	auto &oq = m_occlusionQueries;
-	if (!oq.heap)
+	auto &cached = m_cachedQueries;
+	if (!m_frontQueryHeapReady)
 	{
-		D3D12_QUERY_HEAP_DESC desc{};
-		desc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
-		desc.Count = kOcclusionQueryCount;
-		D3D12_ThrowIfFailed(m_device->CreateQueryHeap(&desc, IID_PPV_ARGS(&oq.heap)), "CreateQueryHeap");
-		D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_READBACK);
-		D3D12_RESOURCE_DESC bufferDesc = D3D12_BufferDesc((uint64)kOcclusionQueryCount * sizeof(uint64));
-		D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&oq.resultBuffer)), "CreateCommittedResource (query results)");
-		void *mapped = nullptr;
-		D3D12_ThrowIfFailed(oq.resultBuffer->Map(0, nullptr, &mapped), "Map (query results)");
-		oq.results = (uint64 *)mapped;
-		oq.freeIndices.reserve(kOcclusionQueryCount);
-		for (uint32 i = kOcclusionQueryCount; i > 0; i--)
-			oq.freeIndices.push_back(i - 1);
+		BackendPacket packet{};
+		packet.kind = BackendPacket::Kind::QueryHeap;
+		ExecuteBackend(LattePipeline::Opcode::Create, packet);
+		m_frontQueryHeapReady = true;
 	}
 	LatteQueryObjectD3D12 *query;
-	if (oq.cached.empty())
+	if (cached.empty())
 		query = new LatteQueryObjectD3D12(this);
 	else
 	{
-		query = oq.cached.back();
-		oq.cached.pop_back();
+		query = cached.back();
+		cached.pop_back();
 	}
+	query->recordingId = RegisterResource(query);
+	m_frontQueries[ResourceKey(query->recordingId)] = query;
 	query->Reset();
-	oq.active.push_back(query);
+	query->Dispatch(5);
 	return query;
 }
 
 void D3D12Renderer::occlusionQuery_destroy(LatteQueryObject *queryObj)
 {
 	auto *query = static_cast<LatteQueryObjectD3D12 *>(queryObj);
-	auto &oq = m_occlusionQueries;
-	oq.active.erase(std::remove(oq.active.begin(), oq.active.end(), query), oq.active.end());
-	if (query->m_hasActiveFragment)
-		query->EndFragment();
+	query->Dispatch(4);
 	query->Reset();
-	oq.cached.push_back(query);
+	query->Dispatch(6);
+	RetireResource(query->recordingId);
+	m_frontQueries.erase(ResourceKey(query->recordingId));
+	m_cachedQueries.push_back(query);
 }
 
-void D3D12Renderer::occlusionQuery_flush()
+void D3D12Renderer::occlusionQuery_flush_record()
 {
+	LatteProfiler::Add(LatteProfiler::Counter::QueryWaits);
 	auto &oq = m_occlusionQueries;
 	if (oq.lastSubmission > m_lastSubmittedFenceValue)
 		SubmitCommandList(false);
 	if (oq.lastSubmission)
 		WaitForSubmission(oq.lastSubmission);
+	auto &reply = m_operations.Result();
+	reply.kind = QueryBatchResult;
+	for (auto *query : oq.active)
+	{
+		uint64 result;
+		if (!query->RecordResult(result))
+			continue;
+		const std::array<uint64, 3> item{ResourceKey(query->recordingId), result, query->m_recordEpoch};
+		const auto offset = reply.bytes.size();
+		reply.bytes.resize(offset + sizeof(item));
+		memcpy(reply.bytes.data() + offset, item.data(), sizeof(item));
+	}
 }
 
-void D3D12Renderer::occlusionQuery_updateState()
+void D3D12Renderer::occlusionQuery_updateState_record()
 {
 	ProcessFinishedSubmissions();
+}
+
+bool D3D12Renderer::HasActiveOcclusionQuery() const
+{
+	return std::any_of(m_occlusionQueries.active.begin(), m_occlusionQueries.active.end(),
+					   [](const auto *query) { return query->m_hasActiveQuery; });
 }
 
 void D3D12Renderer::occlusionQuery_notifyEndCommandList()
@@ -206,15 +264,113 @@ void D3D12Renderer::occlusionQuery_notifyBeginCommandList()
 void D3D12Renderer::occlusionQuery_destroyAll()
 {
 	auto &oq = m_occlusionQueries;
-	for (auto *q : oq.active)
+	auto active = std::move(oq.active);
+	oq.active.clear();
+	for (auto *q : active)
+	{
+		RetireResource(q->recordingId);
 		delete q;
-	for (auto *q : oq.cached)
+	}
+	for (auto *q : m_cachedQueries)
 		delete q;
 	oq.active.clear();
-	oq.cached.clear();
+	m_cachedQueries.clear();
+	m_frontQueries.clear();
 	if (oq.resultBuffer && oq.results)
 		oq.resultBuffer->Unmap(0, nullptr);
 	oq.results = nullptr;
+}
+
+void D3D12Renderer::query_record(const QueryPacket &packet, const LattePipeline::Arena &)
+{
+	LatteProfiler::Scope recordScope(LatteProfiler::Slot::BackendQuery);
+	m_pipeline.CheckBack();
+	if (packet.action != 0)
+		draw_drainParallel();
+	auto *query = m_resources.Get<LatteQueryObjectD3D12>(packet.query);
+	switch (packet.action)
+	{
+	case 0:
+		m_operations.Result().kind = QueryResult;
+		m_operations.Result().resource = packet.query;
+		m_operations.Result().words[2] = packet.epoch;
+		m_operations.Result().words[0] = query->RecordResult(m_operations.Result().words[1]);
+		break;
+	case 1:
+		query->m_recordEpoch = packet.epoch;
+		query->RecordBegin();
+		break;
+	case 2:
+		query->RecordEnd();
+		break;
+	case 3:
+		query->RecordReset();
+		break;
+	case 4:
+		if (query->m_hasActiveFragment)
+			query->EndFragment();
+		break;
+	case 5:
+		m_occlusionQueries.active.push_back(query);
+		break;
+	case 6:
+		m_occlusionQueries.active.erase(std::remove(m_occlusionQueries.active.begin(), m_occlusionQueries.active.end(), query), m_occlusionQueries.active.end());
+		break;
+	default:
+		throw std::logic_error("Invalid Latte query operation");
+	}
+	m_resources.Use(packet.query, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
+}
+void D3D12Renderer::AcceptQueryBatch(const LattePipeline::Completion &completion)
+{
+	constexpr size_t itemSize = sizeof(uint64) * 3;
+	if (completion.bytes.size() % itemSize)
+		throw std::logic_error("Invalid Latte query batch reply");
+	for (size_t offset = 0; offset < completion.bytes.size(); offset += itemSize)
+	{
+		std::array<uint64, 3> item;
+		memcpy(item.data(), completion.bytes.data() + offset, itemSize);
+		LattePipeline::Completion result;
+		result.resource = {uint32(item[0]), uint32(item[0] >> 32)};
+		result.words[0] = true;
+		result.words[1] = item[1];
+		result.words[2] = item[2];
+		AcceptQueryResult(result);
+	}
+}
+
+void D3D12Renderer::AcceptQueryResult(const LattePipeline::Completion &completion)
+{
+	const auto it = m_frontQueries.find(ResourceKey(completion.resource));
+	if (it == m_frontQueries.end())
+		return;
+	auto *query = it->second;
+	if (query->m_epoch != completion.words[2])
+		return;
+	query->m_pollPending = false;
+	query->m_resultReady = completion.words[0] != 0;
+	query->m_result = completion.words[1];
+}
+
+void D3D12Renderer::occlusionQuery_createHeap_record()
+{
+	auto &oq = m_occlusionQueries;
+	if (!oq.heap)
+	{
+		D3D12_QUERY_HEAP_DESC desc{};
+		desc.Type = D3D12_QUERY_HEAP_TYPE_OCCLUSION;
+		desc.Count = kOcclusionQueryCount;
+		D3D12_ThrowIfFailed(m_device->CreateQueryHeap(&desc, IID_PPV_ARGS(&oq.heap)), "CreateQueryHeap");
+		D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_READBACK);
+		D3D12_RESOURCE_DESC bufferDesc = D3D12_BufferDesc((uint64)kOcclusionQueryCount * sizeof(uint64));
+		D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &bufferDesc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&oq.resultBuffer)), "CreateCommittedResource (query results)");
+		void *mapped = nullptr;
+		D3D12_ThrowIfFailed(oq.resultBuffer->Map(0, nullptr, &mapped), "Map (query results)");
+		oq.results = (uint64 *)mapped;
+		oq.freeIndices.reserve(kOcclusionQueryCount);
+		for (uint32 i = kOcclusionQueryCount; i > 0; i--)
+			oq.freeIndices.push_back(i - 1);
+	}
 }
 
 #endif // ENABLE_D3D12

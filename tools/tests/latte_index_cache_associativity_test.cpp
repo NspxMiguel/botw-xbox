@@ -1,4 +1,5 @@
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
+#include "Cafe/HW/Latte/Core/LatteContentIndex.h"
 #include "Cafe/HW/Latte/Core/LatteIndices.h"
 #include "Cafe/HW/Latte/Core/LatteProfiler.h"
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
@@ -23,7 +24,7 @@ int main()
 {
 	g_renderer = std::make_unique<Renderer>();
 	// Five complete keys in one set distinguish four-way LRU from a direct map.
-	std::vector<std::array<uint16, 4>> candidates(4096);
+	std::vector<std::array<uint16, 4>> candidates(16384);
 	std::array<uint16 *, 5> collision{};
 	size_t found = 0;
 	size_t bucket = 0;
@@ -33,9 +34,9 @@ int main()
 			reinterpret_cast<uintptr_t>(candidate.data()), 4,
 			uint32(LatteIndexType::U16_BE), uint32(LattePrimitiveMode::TRIANGLES),
 			UINT32_MAX};
-		if (found && key.Slot(64) != bucket)
+		if (found && key.Slot(LatteDrawCache::kSmallIndexEntries / LatteDrawCache::kIndexCacheWays) != bucket)
 			continue;
-		bucket = key.Slot(64);
+		bucket = key.Slot(LatteDrawCache::kSmallIndexEntries / LatteDrawCache::kIndexCacheWays);
 		candidate.fill(_swapEndianU16(uint16(found + 1)));
 		collision[found++] = candidate.data();
 		if (found == collision.size())

@@ -47,3 +47,6 @@ builder-work-*/
 *.cer
 .pytest_cache/
 .ruff_cache/
+# Local signed test packages and CMake runtime staging.
+/pkg/
+/stage-game/

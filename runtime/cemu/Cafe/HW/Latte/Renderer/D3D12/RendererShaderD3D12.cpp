@@ -7,6 +7,7 @@
 #ifdef ENABLE_D3D12
 
 #include "Cafe/HW/Latte/Renderer/D3D12/RendererShaderD3D12.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "config/ActiveSettings.h"
 #include "Cemu/FileCache/FileCache.h"
 #include "util/helpers/helpers.h"
@@ -143,6 +144,8 @@ RendererShaderD3D12::RendererShaderD3D12(ShaderType type, uint64 baseHash, uint6
 
 RendererShaderD3D12::~RendererShaderD3D12()
 {
+	if (recordingOwner)
+		recordingOwner->RetireResource(recordingId);
 	// make sure no compiler thread still references this object
 	s_shaderD3D12ThreadPool.m_queueMutex.lock();
 	auto &q = s_shaderD3D12ThreadPool.m_queue;

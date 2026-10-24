@@ -79,15 +79,37 @@ struct IndexKey
 class ContentSnapshot
 {
   public:
+	struct Comparison
+	{
+		bool matches;
+		size_t comparedBytes;
+		bool sampleRejected = false;
+	};
+	Comparison Compare(const void *data, size_t size) const
+	{
+		if (m_bytes.size() != size)
+			return {false, 0};
+		if (size >= kSampleThreshold)
+		{
+			const auto samples = Sample(data, size);
+			if (samples != m_samples)
+				return {false, sizeof(samples), true};
+		}
+		// Samples only reject candidates. Matching samples still verify every
+		// byte: guest stores have no comprehensive write-generation authority.
+		return {!size || std::memcmp(m_bytes.data(), data, size) == 0, size};
+	}
 	bool Matches(const void *data, size_t size) const
 	{
-		return m_bytes.size() == size && (!size || std::memcmp(m_bytes.data(), data, size) == 0);
+		return Compare(data, size).matches;
 	}
 	void Assign(const void *data, size_t size)
 	{
 		m_bytes.resize(size);
 		if (size)
 			std::memcpy(m_bytes.data(), data, size);
+		if (size >= kSampleThreshold)
+			m_samples = Sample(m_bytes.data(), size);
 	}
 	void Clear()
 	{
@@ -95,6 +117,17 @@ class ContentSnapshot
 	}
 
   private:
+	static constexpr size_t kSampleThreshold = 256;
+	static std::array<uint64_t, 4> Sample(const void *data, size_t size)
+	{
+		const auto *bytes = static_cast<const uint8_t *>(data);
+		std::array<uint64_t, 4> samples;
+		const std::array<size_t, 4> offsets{0, size / 3, size * 2 / 3, size - sizeof(uint64_t)};
+		for (size_t i = 0; i < offsets.size(); ++i)
+			std::memcpy(&samples[i], bytes + offsets[i], sizeof(uint64_t));
+		return samples;
+	}
+	std::array<uint64_t, 4> m_samples{};
 	std::vector<uint8_t> m_bytes;
 };
 
@@ -112,8 +145,7 @@ bool StoreBigEndianWords(uint32_t *destination, const void *source, size_t count
 {
 	const auto *bytes = static_cast<const uint8_t *>(source);
 	uint32_t difference = 0;
-	for (size_t i = 0; i < count; ++i)
-	{
+	auto store = [&](size_t i) {
 		uint32_t value;
 		std::memcpy(&value, bytes + i * sizeof(value), sizeof(value));
 		if constexpr (std::endian::native == std::endian::little)
@@ -121,7 +153,32 @@ bool StoreBigEndianWords(uint32_t *destination, const void *source, size_t count
 		if constexpr (Compare)
 			difference |= destination[i] ^ value;
 		destination[i] = value;
+	};
+	// Most PM4 register packets carry two to four words. Avoid the general
+	// vector-loop setup and tail checks on that path.
+	if (count <= 4)
+	{
+		switch (count)
+		{
+		case 4:
+			store(3);
+			[[fallthrough]];
+		case 3:
+			store(2);
+			[[fallthrough]];
+		case 2:
+			store(1);
+			[[fallthrough]];
+		case 1:
+			store(0);
+			[[fallthrough]];
+		default:
+			break;
+		}
 	}
+	else
+		for (size_t i = 0; i < count; ++i)
+			store(i);
 	return difference != 0;
 }
 } // namespace LatteDrawCache

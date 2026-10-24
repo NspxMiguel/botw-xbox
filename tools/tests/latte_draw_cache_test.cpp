@@ -95,10 +95,15 @@ int main()
 		indices[i] = uint8_t(i);
 	snapshot.Assign(indices.data(), indices.size());
 	assert(snapshot.Matches(indices.data(), indices.size()));
-	for (size_t i : {size_t(0), size_t(511), indices.size() - 1})
+	for (size_t i = 0; i < indices.size(); ++i)
 	{
 		indices[i] ^= 1;
-		assert(!snapshot.Matches(indices.data(), indices.size()));
+		const auto result = snapshot.Compare(indices.data(), indices.size());
+		assert(!result.matches);
+		if (i == indices.size() - 1)
+			assert(result.sampleRejected && result.comparedBytes == 32);
+		if (i == 511)
+			assert(!result.sampleRejected && result.comparedBytes == indices.size());
 		indices[i] ^= 1;
 	}
 	assert(!snapshot.Matches(indices.data(), indices.size() - 1));

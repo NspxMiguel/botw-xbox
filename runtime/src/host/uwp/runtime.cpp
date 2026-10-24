@@ -12,6 +12,7 @@
 #include "../../sim_series_s.h"
 #include "first_frame.h"
 #include "output_policy.h"
+#include "latte_pipeline_config.h"
 #if defined(_WIN32)
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
@@ -27,6 +28,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 
 // Keep the POSIX implementation of GuestThread out of the UWP host. W1 owns thread.h/thread.cpp.
 namespace threads {
@@ -173,6 +175,9 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
         setenv("CEMU_LATTE_PROFILE", "1", 1);
 #endif
     }
+    // Ship the single back recorder. Modes 0/1/2/3 remain explicitly selectable.
+    _putenv_s("CEMU_LATTE_PIPELINE",
+              ReadLattePipelineMode(std::filesystem::path(user) / "latte-pipeline.txt"));
     try {
         mem::init();
         dispatch::init();

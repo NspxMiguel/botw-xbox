@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureD3D12.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 
@@ -16,8 +18,20 @@ class LatteTextureD3D12;
 class LatteTextureViewD3D12 : public LatteTextureView
 {
   public:
+	LattePipeline::ResourceId recordingId;
 	LatteTextureViewD3D12(D3D12Renderer *renderer, LatteTextureD3D12 *texture, Latte::E_DIM dim, Latte::E_GX2SURFFMT format, sint32 firstMip, sint32 mipCount, sint32 firstSlice, sint32 sliceCount);
 	~LatteTextureViewD3D12() override;
+	void ReleaseNative();
+	struct NativeDefinition
+	{
+		sint32 firstMip, numMip, firstSlice, numSlice;
+		Latte::E_DIM dim;
+		Latte::E_GX2SURFFMT format;
+	};
+	const NativeDefinition &GetNativeDefinition() const
+	{
+		return m_definition;
+	}
 
 	LatteTextureD3D12 *GetBaseTexture() const
 	{
@@ -35,7 +49,25 @@ class LatteTextureViewD3D12 : public LatteTextureView
 	}
 
 	// staging (non shader-visible) SRV for the given GPU7 sampler swizzle (SQ_TEX_RESOURCE_WORD4)
+	bool RequiresSliceCopy() const
+	{
+		return m_usesSliceCopy;
+	}
+	void RefreshForSampling()
+	{
+		if (m_usesSliceCopy)
+			UpdateSliceCopy();
+	}
 	D3D12_CPU_DESCRIPTOR_HANDLE GetSRV(uint32 gpuSamplerSwizzle);
+	// Coordinator pins the view and native definition and excludes slice-copy
+	// views. Only this mutex-protected native descriptor cache is shared.
+	D3D12_CPU_DESCRIPTOR_HANDLE GetRecordingSRV(uint32 swizzle)
+	{
+		if (m_usesSliceCopy)
+			throw std::logic_error("Slice-copy SRV cannot resolve on a chunk worker");
+		std::lock_guard lock(m_srvMutex);
+		return GetSRV(swizzle);
+	}
 	D3D12_CPU_DESCRIPTOR_HANDLE GetSRVRGBA()
 	{
 		return GetSRV(kRGBASwizzle);
@@ -77,6 +109,7 @@ class LatteTextureViewD3D12 : public LatteTextureView
 	uint64 m_sliceCopyVersion = 0;
 
 	LatteDrawCache::VersionMemo m_shaderReadState;
+	const NativeDefinition m_definition;
 	D3D12Renderer *m_renderer;
 	LatteTextureD3D12 *m_baseTexture;
 	DXGI_FORMAT m_srvFormat;
@@ -90,6 +123,7 @@ class LatteTextureViewD3D12 : public LatteTextureView
 		uint32 swizzle = 0xFFFFFFFF;
 		D3D12_CPU_DESCRIPTOR_HANDLE handle{};
 	};
+	std::mutex m_srvMutex;
 	SRVCacheEntry m_srvCache[2];
 	std::unordered_map<uint32, D3D12_CPU_DESCRIPTOR_HANDLE> m_srvFallbackCache;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_rtv{};

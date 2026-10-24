@@ -144,3 +144,11 @@ inline void D3D12_ThrowIfFailed(HRESULT hr, const char *)
 inline void D3D12_SetDebugName(ID3D12DescriptorHeap *, const std::string &)
 {
 }
+struct D3D12_VIEWPORT
+{
+	float TopLeftX, TopLeftY, Width, Height, MinDepth, MaxDepth;
+};
+struct D3D12_RECT
+{
+	int32_t left, top, right, bottom;
+};

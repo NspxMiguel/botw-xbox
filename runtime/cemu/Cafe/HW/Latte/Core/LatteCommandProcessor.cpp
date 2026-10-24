@@ -55,6 +55,7 @@ public:
 	void beginDrawPass()
 	{
 		LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
+		LatteProfiler::Add(LatteProfiler::Counter::DrawSequences);
 		m_drawPassActive = true;
 		m_drawcallContext.isFirst = true;
 		m_drawcallContext.vertexBufferDirtyMask = 0;
@@ -351,6 +352,9 @@ void LatteCP_itSetRegistersGeneric_handleSpecialRanges(uint32 registerStartIndex
 template<uint32 TRegisterBase>
 LatteCMDPtr LatteCP_itSetRegistersGeneric(LatteCMDPtr cmd, uint32 nWords)
 {
+	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Pm4Registers);
+	LatteProfiler::Add(LatteProfiler::Counter::RegisterPackets);
+	LatteProfiler::Add(LatteProfiler::Counter::RegisterWords, nWords - 1);
 	nWords--; // subtract the register offset field
 	uint32 registerOffset = LatteReadCMD();
 	uint32 registerIndex = TRegisterBase + registerOffset;
@@ -397,6 +401,9 @@ LatteCMDPtr LatteCP_itSetRegistersGeneric(LatteCMDPtr cmd, uint32 nWords)
 template<uint32 TRegisterBase, typename TRegRangeCallback>
 bool LatteCP_itSetRegistersGeneric2(LatteCMDPtr cmd, uint32 nWords, TRegRangeCallback cbRegRange)
 {
+	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Pm4Registers);
+	LatteProfiler::Add(LatteProfiler::Counter::RegisterPackets);
+	LatteProfiler::Add(LatteProfiler::Counter::RegisterWords, nWords - 1);
 	nWords--;
 	const uint32 registerOffset = LatteReadCMD();
 	const uint32 registerIndex = TRegisterBase + registerOffset;
@@ -439,6 +446,8 @@ bool LatteCP_itSetRegistersGeneric2(LatteCMDPtr cmd, uint32 nWords, TRegRangeCal
 	}
 	// some register writes trigger special behavior
 	LatteCP_itSetRegistersGeneric_handleSpecialRanges<TRegisterBase>(registerStartIndex, registerEndIndex);
+	if (hasRegChange)
+		LatteProfiler::Add(LatteProfiler::Counter::RegisterChangedPackets);
 	// callback
 	cbRegRange(registerStartIndex, registerEndIndex, hasRegChange);
 	return hasRegChange;
@@ -741,8 +750,7 @@ LatteCMDPtr LatteCP_itSetPredication(LatteCMDPtr cmd, uint32 nWords)
 
 LatteCMDPtr LatteCP_itDrawIndex2(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
-	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
-	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
+	LatteProfiler::DrawScope profileScope(LatteProfiler::Slot::DrawStateDecode);
 	cemu_assert_debug(nWords == 5);
 	uint32 ukn1 = LatteReadCMD();
 	MPTR physIndices = LatteReadCMD();
@@ -757,8 +765,7 @@ LatteCMDPtr LatteCP_itDrawIndex2(LatteCMDPtr cmd, uint32 nWords, DrawPassContext
 
 LatteCMDPtr LatteCP_itDrawIndexAuto(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
-	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
-	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
+	LatteProfiler::DrawScope profileScope(LatteProfiler::Slot::DrawStateDecode);
 	cemu_assert_debug(nWords == 2);
 	uint32 count = LatteReadCMD();
 	uint32 ukn = LatteReadCMD();
@@ -782,8 +789,7 @@ MPTR _tempIndexArrayMPTR = MPTR_NULL;
 
 LatteCMDPtr LatteCP_itDrawImmediate(LatteCMDPtr cmd, uint32 nWords, DrawPassContext& drawPassCtx)
 {
-	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawOther);
-	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
+	LatteProfiler::DrawScope profileScope(LatteProfiler::Slot::DrawStateDecode);
 	uint32 count = LatteReadCMD();
 	uint32 ukn1 = LatteReadCMD();
 	// reserve array for index data	

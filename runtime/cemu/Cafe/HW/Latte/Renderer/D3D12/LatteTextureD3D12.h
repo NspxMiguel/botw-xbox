@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+
 #include "Cafe/HW/Latte/Core/LatteTexture.h"
 #include "Cafe/HW/Latte/Core/LatteDrawCache.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
@@ -15,11 +17,34 @@ class D3D12Renderer;
 class LatteTextureD3D12 : public LatteTexture
 {
   public:
+	LattePipeline::ResourceId recordingId;
 	LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, MPTR physAddress, MPTR physMipAddress, Latte::E_GX2SURFFMT format, uint32 width, uint32 height, uint32 depth, uint32 pitch, uint32 mipLevels,
 					  uint32 swizzle, Latte::E_HWTILEMODE tileMode, bool isDepth);
 	~LatteTextureD3D12() override;
 
 	void AllocateOnHost() override;
+	struct NativeDefinition
+	{
+		uint32 width, height;
+		Latte::E_GX2SURFFMT format;
+		MPTR physAddress;
+		Latte::E_HWTILEMODE tileMode;
+		bool isDepth;
+	};
+	const NativeDefinition &GetNativeDefinition() const
+	{
+		return m_definition;
+	}
+	sint32 GetNativeMipWidth(sint32 mip) const
+	{
+		return std::max<uint32>(1, m_definition.width >> mip);
+	}
+	sint32 GetNativeMipHeight(sint32 mip) const
+	{
+		return std::max<uint32>(1, m_definition.height >> mip);
+	}
+	void CreateNative();
+	void ReleaseNative();
 
 	ID3D12Resource *GetResource() const
 	{
@@ -116,6 +141,7 @@ class LatteTextureD3D12 : public LatteTexture
 	LatteDrawCache::ExactCache<TransitionKey, bool> m_lastTransition;
 	uint64 m_contentVersion = 1;
 	uint64 m_stateVersion = 1;
+	const NativeDefinition m_definition;
 	D3D12Renderer *m_renderer;
 	ComPtr<ID3D12Resource> m_resource;
 	D3D12_RESOURCE_DESC m_desc{};

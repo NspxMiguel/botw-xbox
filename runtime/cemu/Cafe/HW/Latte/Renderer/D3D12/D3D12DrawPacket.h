@@ -1,0 +1,180 @@
+#pragma once
+
+#include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12BindingModel.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12StageTable.h"
+
+namespace LattePipeline
+{
+struct UniformRange
+{
+	uint32_t offset = 0, size = 0;
+};
+struct TextureBinding
+{
+	ResourceId view;
+	uint32_t swizzle = 0;
+	int32_t reg = -1;
+	Latte::E_DIM nullDimension{};
+};
+struct StageBlock
+{
+	// Unique within this renderer's layout producer; dynamic ranges are excluded.
+	uint64_t layoutIdentity = 0;
+	D3D12Const::Stage stage{};
+	UniformRange uniforms[D3D12Const::kMaxCBVsPerStage]{};
+	TextureBinding textures[D3D12Const::kMaxSRVsPerStage]{};
+	D3D12_SAMPLER_DESC samplers[D3D12Const::kMaxSamplersPerStage]{};
+	Span uniformBytes;
+	int32_t uniformReg = -1;
+	uint32_t samplerCount = 1, textureCount = 0;
+	bool streamout = false;
+};
+// Both recorders resolve the same immutable texture/register mapping at capture.
+// Workers receive native handles, never a second interpretation of the bindings.
+template <class ResolveView, class ResolveNull>
+void ResolveTextureDescriptors(const StageBlock &source, D3D12StageTableDesc &table,
+							   ResolveView resolveView, ResolveNull resolveNull)
+{
+	for (uint32_t i = 0; i < source.textureCount; ++i)
+	{
+		const auto &binding = source.textures[i];
+		if (binding.reg == -1)
+			continue;
+		const auto reg = binding.reg < -1 ? -2 - binding.reg : binding.reg;
+		table.srv[reg] = binding.reg < -1 || !binding.view
+							 ? resolveNull(binding.nullDimension)
+							 : resolveView(binding.view, binding.swizzle);
+	}
+}
+// The PM4 processor ends a sequence on texture/sampler/context changes. Only
+// stable translation lives here; uniform ranges and bytes are refreshed per draw.
+class SequenceStageLayouts
+{
+  public:
+	void BeginSequence()
+	{
+		m_valid.fill(false);
+	}
+	template <class Build>
+	const StageBlock &Get(D3D12Const::Stage stage, uint64_t shaderId, Build build)
+	{
+		const auto index = static_cast<size_t>(stage);
+		if (!m_valid[index] || m_shaderIds[index] != shaderId)
+		{
+			if (m_nextIdentity == UINT64_MAX)
+				throw std::overflow_error("Latte stage layout identity exhausted");
+			m_blocks[index] = {};
+			build(m_blocks[index]);
+			m_blocks[index].layoutIdentity = ++m_nextIdentity;
+			m_shaderIds[index] = shaderId;
+			m_valid[index] = true;
+		}
+		return m_blocks[index];
+	}
+
+  private:
+	uint64_t m_nextIdentity = 0;
+	std::array<StageBlock, 3> m_blocks{};
+	std::array<uint64_t, 3> m_shaderIds{};
+	std::array<bool, 3> m_valid{};
+};
+struct VertexRange
+{
+	uint32_t offset = 0, size = 0, stride = 0;
+	bool bound = false;
+};
+struct DrawBlock
+{
+	StageBlock stages[3];
+	VertexRange vertices[LATTE_MAX_VERTEX_BUFFERS]{};
+	uint32_t stageCount = 0;
+};
+// Unused stage/texture/sampler slots are outside the immutable value. Copy the
+// same active fields that equality and recording read, without clearing tails.
+struct DrawBlockCopy
+{
+	void operator()(DrawBlock &destination, const DrawBlock &source) const
+	{
+		destination.stageCount = source.stageCount;
+		std::memcpy(destination.vertices, source.vertices, sizeof(source.vertices));
+		for (uint32_t i = 0; i < source.stageCount; ++i)
+		{
+			const auto &s = source.stages[i];
+			auto &d = destination.stages[i];
+			d.stage = s.stage;
+			d.uniformReg = s.uniformReg;
+			d.samplerCount = s.samplerCount;
+			d.textureCount = s.textureCount;
+			d.streamout = s.streamout;
+			d.uniformBytes = s.uniformBytes;
+			std::memcpy(d.uniforms, s.uniforms, sizeof(s.uniforms));
+			if (!s.layoutIdentity || d.layoutIdentity != s.layoutIdentity)
+			{
+				std::memcpy(d.textures, s.textures, s.textureCount * sizeof(*s.textures));
+				std::memcpy(d.samplers, s.samplers, s.samplerCount * sizeof(*s.samplers));
+			}
+			d.layoutIdentity = s.layoutIdentity;
+		}
+	}
+};
+struct DrawBlockEqual
+{
+	bool operator()(const DrawBlock &a, const DrawBlock &b) const
+	{
+		if (a.stageCount != b.stageCount || std::memcmp(a.vertices, b.vertices, sizeof(a.vertices)) != 0)
+			return false;
+		for (uint32_t i = 0; i < a.stageCount; ++i)
+		{
+			const auto &x = a.stages[i], &y = b.stages[i];
+			if (x.stage != y.stage || x.uniformReg != y.uniformReg || x.samplerCount != y.samplerCount || x.textureCount != y.textureCount || x.streamout != y.streamout)
+				return false;
+			if (std::memcmp(x.uniforms, y.uniforms, sizeof(x.uniforms)) != 0 ||
+				std::memcmp(x.textures, y.textures, x.textureCount * sizeof(*x.textures)) != 0 ||
+				std::memcmp(x.samplers, y.samplers, x.samplerCount * sizeof(*x.samplers)) != 0)
+				return false;
+		}
+		return true;
+	}
+};
+struct DrawPacket
+{
+	ResourceId pipeline, framebuffer, indices;
+	BlockId state;
+	Span uniformBytes[3];
+	uint32_t baseVertex = 0, baseInstance = 0, instanceCount = 0, count = 0, indexCount = 0;
+	Span runtime;
+	D3D12_VIEWPORT viewport{};
+	D3D12_RECT scissor{};
+	float blendFactor[4]{};
+	uint32_t stencilRef = 0;
+
+	uint32_t indexType = 0;
+	bool streamout = false;
+};
+static_assert(sizeof(DrawPacket) <= 208);
+
+// Own every byte before acknowledging the transport operation. A later front
+// draw may reuse its block slot and wrap the SPSC arena while chunks record.
+struct CapturedDraw
+{
+	DrawPacket packet;
+	DrawBlock block;
+	std::array<std::vector<std::byte>, 3> uniforms;
+	std::vector<std::byte> runtime;
+
+	CapturedDraw(const DrawPacket &source, const DrawBlock &state, const Arena &arena) : packet(source), block(state)
+	{
+		for (uint32_t i = 0; i < state.stageCount; ++i)
+		{
+			if (state.stages[i].uniformReg < 0)
+				continue;
+			const auto bytes = arena.Read(source.uniformBytes[i]);
+			uniforms[i].assign(bytes.begin(), bytes.end());
+		}
+		const auto bytes = arena.Read(source.runtime);
+		runtime.assign(bytes.begin(), bytes.end());
+	}
+};
+} // namespace LattePipeline

@@ -101,31 +101,64 @@ static D3D12_SAMPLER_DESC _MakeSampler(bool linear)
 void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutputShader *shader, bool useLinearTexFilter,
 									   sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
-	if (!AcquireBackbuffer(!padView))
-		return;
-	D3D12SwapChain *swapChain = GetSwapChainObj(!padView);
+	m_pipeline.CheckFront();
 	auto *view = static_cast<LatteTextureViewD3D12 *>(texView);
 	auto *vs = static_cast<RendererShaderD3D12 *>(shader->GetVertexShader());
 	auto *ps = static_cast<RendererShaderD3D12 *>(shader->GetFragmentShader());
-	ID3D12PipelineState *pso = m_pipelineCache->GetInternalPipeline(vs, ps, D3D12SwapChain::kFormat, DXGI_FORMAT_UNKNOWN, false, false);
-	if (!pso)
-		return;
-	// Run the existing color/output transform at internal resolution before EASU.
-	// DRC and downscales keep their existing output path.
+	for (auto *native : {vs, ps})
+		if (!native->recordingId)
+		{
+			native->recordingId = RegisterResource(native);
+			native->recordingOwner = this;
+		}
 	sint32 inputWidth, inputHeight;
-	view->baseTexture->GetEffectiveSize(inputWidth, inputHeight, view->firstMip);
+	view->baseTexture->GetEffectiveSize(inputWidth, inputHeight, view->GetNativeDefinition().firstMip);
 	const std::string_view overrideValue = fsr::upscaler_override();
 	// Off unless the player (or BOTW_UPSCALER) picked FSR 1 or FSR 3.1.
 	const auto requested = overrideValue == "off" ? fsr::Upscaler::Off : fsr::Upscaler::Spatial;
-#ifdef BOTW_HAS_FFX
-	const auto selection = fsr3::select(fsr3::console.load(), false, overrideValue, true, true);
-#endif
-	bool fsr = !padView && !m_fsrFailed &&
-			   fsr::should_upscale(requested, inputWidth, inputHeight, imageWidth, imageHeight);
+	OutputPacket packet{};
+	packet.view = view->recordingId;
+	packet.vertexShader = vs->recordingId;
+	packet.pixelShader = ps->recordingId;
+	packet.uniforms[0] = shader->FillUniformBlockBuffer(*texView, {imageWidth, imageHeight}, padView);
+	packet.uniforms[1] = shader->FillUniformBlockBuffer(*texView, {inputWidth, inputHeight}, padView);
+	packet.imageX = imageX;
+	packet.imageY = imageY;
+	packet.imageWidth = imageWidth;
+	packet.imageHeight = imageHeight;
+	packet.inputWidth = inputWidth;
+	packet.inputHeight = inputHeight;
+	packet.upscaler = static_cast<uint32>(requested);
 #ifdef BOTW_FFX_STATIC
-	// FSR1 only scales up. FSR3 also accepts NativeAA at a 1.0 ratio.
-	fsr = fsr || (!padView && !m_fsrFailed && fsr3::native_aa(selection.path, inputWidth, inputHeight, imageWidth, imageHeight));
+	const auto selection = fsr3::select(fsr3::console.load(), false, overrideValue, true, true);
+	packet.nativeAA = fsr3::native_aa(selection.path, inputWidth, inputHeight, imageWidth, imageHeight);
 #endif
+	packet.linear = useLinearTexFilter;
+	packet.padView = padView;
+	packet.clearBackground = clearBackground;
+	m_operations.Execute<OutputPacket, &D3D12Renderer::output_record>(m_pipeline, LattePipeline::Opcode::Present, packet, *this);
+	ApplyFrontCompletions();
+}
+
+void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipeline::Arena &)
+{
+	m_pipeline.CheckBack();
+	draw_drainParallel();
+	const bool padView = packet.padView, clearBackground = packet.clearBackground, useLinearTexFilter = packet.linear;
+	const auto imageX = packet.imageX, imageY = packet.imageY, imageWidth = packet.imageWidth, imageHeight = packet.imageHeight;
+	const auto inputWidth = packet.inputWidth, inputHeight = packet.inputHeight;
+	if (!AcquireBackbuffer(!padView))
+		return;
+	auto *swapChain = GetSwapChainObj(!padView);
+	auto *view = m_resources.Get<LatteTextureViewD3D12>(packet.view);
+	auto *vs = m_resources.Get<RendererShaderD3D12>(packet.vertexShader);
+	auto *ps = m_resources.Get<RendererShaderD3D12>(packet.pixelShader);
+	auto *pso = m_pipelineCache->GetInternalPipeline(vs, ps, D3D12SwapChain::kFormat, DXGI_FORMAT_UNKNOWN, false, false);
+	if (!pso)
+		return;
+	const auto requested = static_cast<fsr::Upscaler>(packet.upscaler);
+	bool fsr = !padView && !m_fsrFailed && fsr::should_upscale(requested, inputWidth, inputHeight, imageWidth, imageHeight);
+	fsr = fsr || (!padView && !m_fsrFailed && packet.nativeAA);
 	if (fsr && (!m_fsr || !m_fsr->Matches(inputWidth, inputHeight, imageWidth, imageHeight)))
 	{
 		// Keep the user's output filter for this frame; resize between presents.
@@ -142,7 +175,7 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	D3D12_SAMPLER_DESC sampler = _MakeSampler(useLinearTexFilter);
 	const D3D12_GPU_DESCRIPTOR_HANDLE samplerTable = GetSamplerTable(&sampler, 1);
 
-	TransitionTexture(view->GetBaseTexture(), view->firstMip, view->numMip, view->firstSlice, view->numSlice, LatteTextureD3D12::kShaderReadState);
+	TransitionTexture(view->GetBaseTexture(), view->GetNativeDefinition().firstMip, view->GetNativeDefinition().numMip, view->GetNativeDefinition().firstSlice, view->GetNativeDefinition().numSlice, LatteTextureD3D12::kShaderReadState);
 	FlushBarriers();
 
 	if (!m_state.rootSignatureBound)
@@ -162,7 +195,7 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	m_cmdList->SetPipelineState(pso);
 	m_cmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 
-	auto outputUniforms = shader->FillUniformBlockBuffer(*texView, {fsr ? inputWidth : imageWidth, fsr ? inputHeight : imageHeight}, padView);
+	const auto &outputUniforms = packet.uniforms[fsr ? 1 : 0];
 	D3D12UploadAllocation ub = AllocateUpload(AlignUp<uint64>(sizeof(outputUniforms), D3D12Const::kCBVAlignment), D3D12Const::kCBVAlignment);
 	memcpy(ub.cpuPtr, &outputUniforms, sizeof(outputUniforms));
 
@@ -188,6 +221,8 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	swapChain->SetDefinedContent();
 	InvalidateDrawState();
 	m_hasRecordedWork = true;
+	for (auto id : {packet.view, packet.vertexShader, packet.pixelShader, view->GetBaseTexture()->recordingId})
+		m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
 }
 
 void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *sourceTexture, sint32 srcMip, sint32 srcSlice, LatteTexture *destinationTexture, sint32 dstMip, sint32 dstSlice, sint32 width, sint32 height)
@@ -203,22 +238,44 @@ void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *so
 		cemuLog_logDebug(LogType::Force, "surfaceCopy_copySurfaceWithFormatConversion(): Mismatching dimensions");
 		return;
 	}
-	if (Latte::GetFormatBits(srcTex->format) != Latte::GetFormatBits(dstTex->format))
+	if (Latte::GetFormatBits(srcTex->GetNativeDefinition().format) != Latte::GetFormatBits(dstTex->GetNativeDefinition().format))
 	{
 		cemuLog_logDebug(LogType::Force, "surfaceCopy_copySurfaceWithFormatConversion(): Mismatching BPP");
 		return;
 	}
 	cemu_assert_debug(srcTex != dstTex);
+	BackendPacket packet{};
+	packet.kind = BackendPacket::Kind::SurfaceCopy;
+	packet.resources[0] = srcTex->recordingId;
+	packet.resources[1] = dstTex->recordingId;
+	packet.words[0] = srcMip;
+	packet.words[1] = srcSlice;
+	packet.words[2] = dstMip;
+	packet.words[3] = dstSlice;
+	packet.words[4] = effectiveCopyWidth;
+	packet.words[5] = effectiveCopyHeight;
 
-	RendererShaderD3D12 *ps = dstTex->isDepth ? m_internal->copyPSColorToDepth.get() : m_internal->copyPSDepthToColor.get();
-	const DXGI_FORMAT rtvFormat = dstTex->isDepth ? DXGI_FORMAT_UNKNOWN : dstTex->GetFormatInfo().rtvFormat;
-	const DXGI_FORMAT dsvFormat = dstTex->isDepth ? dstTex->GetFormatInfo().dsvFormat : DXGI_FORMAT_UNKNOWN;
-	if (!dstTex->isDepth && rtvFormat == DXGI_FORMAT_UNKNOWN)
+	const auto reply = ExecuteBackend(LattePipeline::Opcode::Copy, packet);
+	if (reply.words[0])
+		LatteTexture_TrackTextureGPUWrite(dstTex, dstSlice, dstMip, LatteTexture_getNextUpdateEventCounter());
+}
+
+void D3D12Renderer::surfaceCopy_record(const BackendPacket &packet)
+{
+	m_pipeline.CheckBack();
+	auto *srcTex = m_resources.Get<LatteTextureD3D12>(packet.resources[0]);
+	auto *dstTex = m_resources.Get<LatteTextureD3D12>(packet.resources[1]);
+	const sint32 srcMip = packet.words[0], srcSlice = packet.words[1], dstMip = packet.words[2], dstSlice = packet.words[3];
+	const sint32 effectiveCopyWidth = packet.words[4], effectiveCopyHeight = packet.words[5];
+	RendererShaderD3D12 *ps = dstTex->GetNativeDefinition().isDepth ? m_internal->copyPSColorToDepth.get() : m_internal->copyPSDepthToColor.get();
+	const DXGI_FORMAT rtvFormat = dstTex->GetNativeDefinition().isDepth ? DXGI_FORMAT_UNKNOWN : dstTex->GetFormatInfo().rtvFormat;
+	const DXGI_FORMAT dsvFormat = dstTex->GetNativeDefinition().isDepth ? dstTex->GetFormatInfo().dsvFormat : DXGI_FORMAT_UNKNOWN;
+	if (!dstTex->GetNativeDefinition().isDepth && rtvFormat == DXGI_FORMAT_UNKNOWN)
 	{
-		cemuLog_logDebugOnce(LogType::Force, "D3D12: Surface copy into non-renderable format {:04x}", (uint32)dstTex->format);
+		cemuLog_logDebugOnce(LogType::Force, "D3D12: Surface copy into non-renderable format {:04x}", (uint32)dstTex->GetNativeDefinition().format);
 		return;
 	}
-	ID3D12PipelineState *pso = m_pipelineCache->GetInternalPipeline(m_internal->copyVS.get(), ps, rtvFormat, dsvFormat, dstTex->isDepth, false);
+	ID3D12PipelineState *pso = m_pipelineCache->GetInternalPipeline(m_internal->copyVS.get(), ps, rtvFormat, dsvFormat, dstTex->GetNativeDefinition().isDepth, false);
 	if (!pso || !srcTex->GetResource() || !dstTex->GetResource())
 		return;
 	// acquire the sampler table before recording any state (see GetSamplerTable)
@@ -245,11 +302,11 @@ void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *so
 	m_device->CreateShaderResourceView(srcTex->GetResource(), &srvDesc, srv);
 
 	TransitionTexture(srcTex, srcMip, 1, srcSlice, 1, LatteTextureD3D12::kShaderReadState);
-	TransitionTexture(dstTex, dstMip, 1, dstSlice, 1, dstTex->isDepth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET);
+	TransitionTexture(dstTex, dstMip, 1, dstSlice, 1, dstTex->GetNativeDefinition().isDepth ? D3D12_RESOURCE_STATE_DEPTH_WRITE : D3D12_RESOURCE_STATE_RENDER_TARGET);
 	FlushBarriers();
 
 	D3D12_CPU_DESCRIPTOR_HANDLE target{};
-	if (dstTex->isDepth)
+	if (dstTex->GetNativeDefinition().isDepth)
 	{
 		D3D12_DEPTH_STENCIL_VIEW_DESC dsvDesc{};
 		dsvDesc.Format = dsvFormat;
@@ -304,14 +361,14 @@ void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *so
 
 	// descriptors were consumed when recording (RTV/DSV) or copied into the shader visible heap (SRV)
 	m_stagingViewHeap->Free(srv);
-	if (dstTex->isDepth)
+	if (dstTex->GetNativeDefinition().isDepth)
 		m_stagingDSVHeap->Free(target);
 	else
 		m_stagingRTVHeap->Free(target);
 
 	InvalidateDrawState();
 	m_hasRecordedWork = true;
-	LatteTexture_TrackTextureGPUWrite(dstTex, dstSlice, dstMip, LatteTexture_getNextUpdateEventCounter());
+	m_operations.Result().words[0] = true;
 }
 
 #endif // ENABLE_D3D12

@@ -46,13 +46,23 @@ static_assert(sizeof(dxil_spirv_vertex_runtime_data) <= D3D12Const::kRuntimeData
 
 void D3D12Renderer::draw_beginSequence()
 {
+	m_pipeline.BeginOperation();
+	m_frontStageLayouts.BeginSequence();
+	m_frontDrawBlockReusable = false;
 	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Sequence);
-	ServicePendingPresent(false); // frame interpolation without vsync: the previous real frame may be due
+	if (!m_pipeline.Queued())
+		ServicePendingPresent(false);
+	else
+	{
+		BackendPacket service{};
+		service.kind = BackendPacket::Kind::ServicePresent;
+		ExecuteBackend(LattePipeline::Opcode::Control, service);
+	}
 	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	// BotWRecomp: Cemu frontend cache trimming is not present in this runtime.
-	m_state.skipDrawSequence = false;
+	m_frontState.skipDrawSequence = false;
 	const bool streamoutEnable = LatteGPUState.contextRegister[mmVGT_STRMOUT_EN] != 0;
-	m_state.streamoutEnabled = streamoutEnable;
+	m_frontState.streamoutEnabled = streamoutEnable;
 	if (!streamoutEnable)
 		LatteStreamout_Disable();
 
@@ -63,7 +73,7 @@ void D3D12Renderer::draw_beginSequence()
 	if (LatteGPUState.activeShaderHasError)
 	{
 		cemuLog_logDebugOnce(LogType::Force, "Skipping drawcalls due to shader error");
-		m_state.skipDrawSequence = true;
+		m_frontState.skipDrawSequence = true;
 		return;
 	}
 
@@ -73,12 +83,12 @@ void D3D12Renderer::draw_beginSequence()
 		LatteGPUState.repeatTextureInitialization = false;
 		if (!LatteMRT::UpdateCurrentFBO())
 		{
-			m_state.skipDrawSequence = true;
+			m_frontState.skipDrawSequence = true;
 			return;
 		}
 		if (!hasValidFramebufferAttached && !streamoutEnable)
 		{
-			m_state.skipDrawSequence = true;
+			m_frontState.skipDrawSequence = true;
 			return;
 		}
 		LatteTexture_updateTextures();
@@ -93,17 +103,27 @@ void D3D12Renderer::draw_beginSequence()
 	if (!LatteGPUState.contextNew.PA_CL_VTE_CNTL.get_VPORT_X_OFFSET_ENA())
 		rasterizerEnable = true;
 	if (!rasterizerEnable && !streamoutEnable)
-		m_state.skipDrawSequence = true;
+		m_frontState.skipDrawSequence = true;
 }
 
 void D3D12Renderer::draw_endSequence()
 {
+	m_pipeline.BeginOperation();
+	LatteProfiler::Add(LatteProfiler::Counter::SequenceEndings);
 	LatteDecompilerShader *pixelShader = LatteSHRC_GetActivePixelShader();
 	if (pixelShader)
 		LatteRenderTarget_trackUpdates();
 	const bool hasReadback = LatteTextureReadback_Update();
-	if (m_drawsInCommandList >= kDrawsPerSubmission || hasReadback || m_uploadRing->GetRecordingOverflowBytes() > 0)
-		SubmitCommandList(false);
+	if (!m_pipeline.Queued())
+	{
+		if (m_drawsInCommandList >= kDrawsPerSubmission || hasReadback || m_uploadRing->GetRecordingOverflowBytes() > 0)
+			SubmitCommandList(false);
+		return;
+	}
+	BackendPacket packet{};
+	packet.kind = BackendPacket::Kind::EndSequence;
+	packet.words[0] = hasReadback;
+	ExecuteBackend(LattePipeline::Opcode::Control, packet);
 }
 
 void D3D12Renderer::draw_handleSpecialState5()
@@ -131,6 +151,21 @@ bool D3D12Renderer::draw_prepareUniformVars(LatteDecompilerShader *shader, D3D12
 	sizeOut = 0;
 	if (shader->resourceMapping.uniformVarsBufferBindingPoint < 0)
 		return false;
+	const auto bytes = draw_buildUniformVars(shader);
+	draw_recordUniformBytes(D3D12StageFromLatte(shader->shaderType), bytes, addressOut, sizeOut);
+	return true;
+}
+
+LattePipeline::Span D3D12Renderer::draw_snapshotUniformVars(LatteDecompilerShader *shader)
+{
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Uniforms);
+	const auto bytes = draw_buildUniformVars(shader);
+	return StageBytes(bytes.data(), bytes.size());
+}
+
+std::span<const std::byte> D3D12Renderer::draw_buildUniformVars(LatteDecompilerShader *shader)
+{
+	m_pipeline.CheckFront();
 	const uint32 rangeSize = shader->uniform.uniformRangeSize;
 	if (m_uniformScratch.size() < AlignUp<uint32>(rangeSize, 16))
 		m_uniformScratch.resize(AlignUp<uint32>(rangeSize, 16) + 256);
@@ -175,29 +210,38 @@ bool D3D12Renderer::draw_prepareUniformVars(LatteDecompilerShader *shader, D3D12
 		LatteMRT::GetCurrentFragCoordScale(GET_UNIFORM_DATA_PTR(shader->uniform.loc_fragCoordScale));
 	if (shader->uniform.loc_verticesPerInstance >= 0)
 	{
-		*(int *)GET_UNIFORM_DATA_PTR(shader->uniform.loc_verticesPerInstance) = (int)m_state.verticesPerInstance;
+		*(int *)GET_UNIFORM_DATA_PTR(shader->uniform.loc_verticesPerInstance) = (int)m_frontState.verticesPerInstance;
 		for (sint32 b = 0; b < LATTE_NUM_STREAMOUT_BUFFER; b++)
 		{
 			if (shader->uniform.loc_streamoutBufferBase[b] >= 0)
-				*(uint32 *)GET_UNIFORM_DATA_PTR(shader->uniform.loc_streamoutBufferBase[b]) = m_state.streamoutBuffer[b].ringBufferOffset;
+				*(uint32 *)GET_UNIFORM_DATA_PTR(shader->uniform.loc_streamoutBufferBase[b]) = m_frontState.streamoutBuffer[b].ringBufferOffset;
 		}
 	}
-	auto &cached = m_uniformCache[(uint32)D3D12StageFromLatte(shader->shaderType)];
+	return {reinterpret_cast<const std::byte *>(uniformBuf), rangeSize};
+}
+
+void D3D12Renderer::draw_recordUniformBytes(D3D12Const::Stage stage, std::span<const std::byte> bytes, D3D12_GPU_VIRTUAL_ADDRESS &addressOut, uint32 &sizeOut)
+{
+	m_pipeline.CheckBack();
+	const uint32 rangeSize = static_cast<uint32>(bytes.size());
+	const auto *uniformBuf = bytes.data();
+	auto &cached = m_uniformCache[(uint32)stage];
 	if (cached.submission == m_lastSubmittedFenceValue && cached.data.size() == rangeSize &&
 		memcmp(cached.data.data(), uniformBuf, rangeSize) == 0)
 	{
 		addressOut = cached.address;
 		sizeOut = rangeSize;
-		return true;
+		return;
 	}
 	D3D12UploadAllocation upload = AllocateUpload(AlignUp<uint32>(std::max<uint32>(rangeSize, 16), D3D12Const::kCBVAlignment), D3D12Const::kCBVAlignment);
+	LatteProfiler::Add(LatteProfiler::Counter::UniformUploadBytes, AlignUp<uint32>(std::max<uint32>(rangeSize, 16), D3D12Const::kCBVAlignment));
 	cached.data.assign((const uint8 *)uniformBuf, (const uint8 *)uniformBuf + rangeSize);
 	cached.address = upload.gpuAddress;
 	cached.submission = m_lastSubmittedFenceValue;
 	memcpy(upload.cpuPtr, uniformBuf, rangeSize);
 	addressOut = upload.gpuAddress;
 	sizeOut = rangeSize;
-	return true;
+	return;
 }
 
 /* --- samplers --- */
@@ -348,11 +392,12 @@ void D3D12Renderer::draw_buildSamplerDesc(LatteDecompilerShader *shader, uint32 
 
 void D3D12Renderer::BindStageRootCBVs(const D3D12StageTableDesc &bindings, D3D12Const::Stage stage)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::RootCBV);
 	for (uint32 i = 0; i < D3D12Const::RootCBVCount(stage); ++i)
 	{
 		// Always replace unused registers with a permanent 64-KiB zero buffer. Keeping
 		// an old upload address could expose retired memory when the next shader changes.
-		const auto address = bindings.cbvAddress[i] ? bindings.cbvAddress[i] : m_zeroConstantBuffer->GetGPUVirtualAddress();
+		const auto address = bindings.cbvAddress[i] ? bindings.cbvAddress[i] : m_zeroConstantBufferAddress;
 		cemu_assert_debug(address % D3D12Const::kCBVAlignment == 0);
 		auto &current = m_state.currentRootCBVs[(uint32)stage][i];
 		if (current == address)
@@ -368,7 +413,7 @@ void D3D12Renderer::BindStageRootCBVs(const D3D12StageTableDesc &bindings, D3D12
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTableDesc &tableDesc, D3D12Const::Stage stage)
 {
-	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DescriptorLookup);
 	using namespace D3D12Const;
 	const auto key = tableDesc.TableKey(stage);
 	auto &last = m_lastViewTable[(uint32)stage];
@@ -389,6 +434,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 	}
 	LatteProfiler::Add(LatteProfiler::Counter::DescriptorMisses);
 
+	LatteProfiler::Scope copyScope(LatteProfiler::Slot::DescriptorCopy);
 	const UINT tableSize = StageTableSize(stage);
 	auto table = m_gpuViewHeap->AllocateTable(tableSize);
 	// Copy stable CBVs, SRVs and null slots in one call; only changed CBVs need to be created.
@@ -473,7 +519,7 @@ void D3D12Renderer::draw_transitionInputTextures(LatteDecompilerShader *shader)
 	{
 		const uint32 relativeTextureUnit = shader->resourceMapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
 		uint32 regIndex;
-		LatteTextureViewD3D12 *view = _GetBoundTextureForShader(m_state.boundTexture, shader, relativeTextureUnit, regIndex);
+		LatteTextureViewD3D12 *view = _GetBoundTextureForShader(m_frontState.boundTexture, shader, relativeTextureUnit, regIndex);
 		if (!view)
 			continue;
 		if (view->ReuseShaderReadTransition())
@@ -481,7 +527,7 @@ void D3D12Renderer::draw_transitionInputTextures(LatteDecompilerShader *shader)
 			LatteProfiler::Add(LatteProfiler::Counter::TransitionHits);
 			continue;
 		}
-		TransitionTexture(view->GetBaseTexture(), view->firstMip, view->numMip, view->firstSlice, view->numSlice, LatteTextureD3D12::kShaderReadState);
+		TransitionTexture(view->GetBaseTexture(), view->GetNativeDefinition().firstMip, view->GetNativeDefinition().numMip, view->GetNativeDefinition().firstSlice, view->GetNativeDefinition().numSlice, LatteTextureD3D12::kShaderReadState);
 		view->RememberShaderReadTransition();
 	}
 }
@@ -512,52 +558,118 @@ void D3D12Renderer::draw_buildStageBindings(LatteDecompilerShader *shader, Rende
 
 	{
 		LatteProfiler::Scope textureScope(LatteProfiler::Slot::TextureBinding);
-		// textures + samplers
-		D3D12_SAMPLER_DESC *samplers = out.samplers;
-		out.samplerCount = std::max<uint32>(remap.srvCount, 1);
-		cemu_assert_debug(out.samplerCount <= kMaxSamplersPerStage);
-		static const auto defaultSamplers = [] {
-			std::array<D3D12_SAMPLER_DESC, kMaxSamplersPerStage> values{};
-			for (auto &sampler : values)
-			{
-				sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
-				sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
-				sampler.MaxAnisotropy = 1;
-				sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
-			}
-			return values;
-		}();
-		memcpy(samplers, defaultSamplers.data(), out.samplerCount * sizeof(*samplers));
-		out.samplerTable = {};
+		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::TextureStage);
+		D3D12TextureStageKey textureKey;
+		textureKey.shaderId = hostShader->GetUniqueId();
+		textureKey.count = 0;
+		LatteTextureViewD3D12 *views[kMaxSRVsPerStage];
 		const sint32 textureBase = mapping.getTextureBaseBindingPoint();
 		const sint32 textureCount = mapping.getTextureCount();
-		for (sint32 i = 0; i < textureCount && textureBase >= 0; i++)
+		for (sint32 i = 0; i < textureCount && textureBase >= 0; ++i)
 		{
-			const sint32 reg = remap.GetSRV(textureBase + i);
-			if (reg < 0)
+			if (remap.GetSRV(textureBase + i) < 0)
 				continue;
-			const uint32 relativeTextureUnit = mapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
-			const Latte::E_DIM shaderDim = shader->textureUnitDim[relativeTextureUnit];
-			uint32 texUnitRegIndex;
-			LatteTextureViewD3D12 *view = _GetBoundTextureForShader(m_state.boundTexture, shader, relativeTextureUnit, texUnitRegIndex);
-			bool dimMismatch = false;
-			if (view)
+			const uint32 unit = mapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
+			uint32 regIndex;
+			auto *view = _GetBoundTextureForShader(m_frontState.boundTexture, shader, unit, regIndex);
+			views[textureKey.count] = view;
+			auto &input = textureKey.units[textureKey.count++];
+			input.viewId = view ? view->GetUniqueId() : 0;
+			memcpy(input.words.data(), LatteGPUState.contextRegister + regIndex, 7 * sizeof(uint32));
+			const uint32 sampler = shader->textureUnitSamplerAssignment[unit];
+			if (sampler != LATTE_DECOMPILER_SAMPLER_NONE)
 			{
-				if (shaderDim == Latte::E_DIM::DIM_1D && view->dim != Latte::E_DIM::DIM_1D)
-					dimMismatch = true;
-				else if (shaderDim == Latte::E_DIM::DIM_2D && view->dim != Latte::E_DIM::DIM_2D && view->dim != Latte::E_DIM::DIM_2D_MSAA)
-					dimMismatch = true;
-			}
-			if (!view || dimMismatch)
-			{
-				tableDesc.srv[reg] = GetNullSRV(shaderDim);
+				const auto *samplerWords = LatteGPUState.contextNew.SQ_TEX_SAMPLER + sampler + LatteDecompiler_getTextureSamplerBaseIndex(shader->shaderType);
+				const _LatteRegisterSetSamplerBorderColor *border;
+				if (shader->shaderType == LatteConst::ShaderType::Vertex)
+					border = LatteGPUState.contextNew.TD_VS_SAMPLER_BORDER_COLOR;
+				else if (shader->shaderType == LatteConst::ShaderType::Pixel)
+					border = LatteGPUState.contextNew.TD_PS_SAMPLER_BORDER_COLOR;
+				else
+					border = LatteGPUState.contextNew.TD_GS_SAMPLER_BORDER_COLOR;
+				memcpy(input.words.data() + 7, samplerWords, sizeof(*samplerWords));
+				memcpy(input.words.data() + 10, border + sampler, sizeof(*border));
 			}
 			else
+				std::fill(input.words.begin() + 7, input.words.begin() + 14, 0);
+			std::fill(input.words.begin() + 14, input.words.end(), 0);
+			if (view)
 			{
-				const uint32 word4 = LatteGPUState.contextRegister[texUnitRegIndex + 4];
-				tableDesc.srv[reg] = view->GetSRV(word4);
+				const auto &overrides = view->GetBaseTexture()->overwriteInfo;
+				input.words[14] = overrides.hasRelativeLodBias;
+				input.words[15] = overrides.relativeLodBias;
+				input.words[16] = overrides.hasLodBias;
+				input.words[17] = overrides.lodBias;
+				input.words[18] = (uint32)overrides.anisotropicLevel;
 			}
-			draw_buildSamplerDesc(shader, relativeTextureUnit, view, samplers[reg]);
+		}
+		const auto textureGeneration = LatteTextureViewLookupCache::GetGeneration();
+		const auto sourceGeneration = m_stagingViewHeap->GetGeneration();
+		auto &textureCache = m_textureStageCache[(uint32)stage];
+		out.samplerTable = {};
+		if (const auto *cached = textureCache.Find(textureKey, textureGeneration, sourceGeneration))
+		{
+			LatteProfiler::Add(LatteProfiler::Counter::TextureStageHits);
+			// Slice copies must observe writes even when registers and native SRVs match.
+			for (uint32 i = 0; i < textureKey.count; ++i)
+				if (views[i])
+					views[i]->RefreshForSampling();
+			memcpy(tableDesc.srv, cached->srv, sizeof(tableDesc.srv));
+			out.samplerCount = cached->samplerCount;
+			memcpy(out.samplers, cached->samplers, out.samplerCount * sizeof(*out.samplers));
+		}
+		else
+		{
+			LatteProfiler::Add(LatteProfiler::Counter::TextureStageMisses);
+			// textures + samplers
+			D3D12_SAMPLER_DESC *samplers = out.samplers;
+			out.samplerCount = std::max<uint32>(remap.srvCount, 1);
+			cemu_assert_debug(out.samplerCount <= kMaxSamplersPerStage);
+			static const auto defaultSamplers = [] {
+				std::array<D3D12_SAMPLER_DESC, kMaxSamplersPerStage> values{};
+				for (auto &sampler : values)
+				{
+					sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+					sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+					sampler.MaxAnisotropy = 1;
+					sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+				}
+				return values;
+			}();
+			memcpy(samplers, defaultSamplers.data(), out.samplerCount * sizeof(*samplers));
+			uint32 liveIndex = 0;
+			for (sint32 i = 0; i < textureCount && textureBase >= 0; i++)
+			{
+				const sint32 reg = remap.GetSRV(textureBase + i);
+				if (reg < 0)
+					continue;
+				const uint32 relativeTextureUnit = mapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
+				const Latte::E_DIM shaderDim = shader->textureUnitDim[relativeTextureUnit];
+				LatteTextureViewD3D12 *view = views[liveIndex];
+				const uint32 word4 = textureKey.units[liveIndex++].words[4];
+				bool dimMismatch = false;
+				if (view)
+				{
+					if (shaderDim == Latte::E_DIM::DIM_1D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_1D)
+						dimMismatch = true;
+					else if (shaderDim == Latte::E_DIM::DIM_2D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_2D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_2D_MSAA)
+						dimMismatch = true;
+				}
+				if (!view || dimMismatch)
+				{
+					tableDesc.srv[reg] = GetNullSRV(shaderDim);
+				}
+				else
+				{
+					tableDesc.srv[reg] = view->GetSRV(word4);
+				}
+				draw_buildSamplerDesc(shader, relativeTextureUnit, view, samplers[reg]);
+			}
+			D3D12TextureStageValue value{};
+			memcpy(value.srv, tableDesc.srv, sizeof(value.srv));
+			value.samplerCount = out.samplerCount;
+			memcpy(value.samplers, out.samplers, out.samplerCount * sizeof(*out.samplers));
+			textureCache.Store(textureKey, value, textureGeneration, m_stagingViewHeap->GetGeneration());
 		}
 	}
 
@@ -571,7 +683,7 @@ void D3D12Renderer::draw_buildStageBindings(LatteDecompilerShader *shader, Rende
 
 void D3D12Renderer::draw_acquireSamplerTables(PreparedStageBindings *stages, uint32 count)
 {
-	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DescriptorSamplers);
 	// all tables of a draw have to come from the same generation of the sampler heap
 	for (int attempt = 0; attempt < 2; attempt++)
 	{
@@ -580,21 +692,15 @@ void D3D12Renderer::draw_acquireSamplerTables(PreparedStageBindings *stages, uin
 		{
 			auto &stage = stages[i];
 			auto &cached = m_stageSamplerCache[(uint32)stage.stage];
-			const size_t bytes = stage.samplerCount * sizeof(D3D12_SAMPLER_DESC);
-			if (cached.generation == m_gpuSamplerHeap->GetGeneration() && cached.count == stage.samplerCount &&
-				memcmp(cached.samplers, stage.samplers, bytes) == 0)
+			const auto generation = m_gpuSamplerHeap->GetGeneration();
+			if (const auto *table = cached.Find(stage.samplerIdentity, generation, stage.SamplerData(), stage.samplerCount))
 			{
-				stage.samplerTable = cached.table;
+				stage.samplerTable = *table;
 				continue;
 			}
-			ok = TryGetSamplerTable(stage.samplers, stage.samplerCount, stage.samplerTable);
+			ok = TryGetSamplerTable(stage.SamplerData(), stage.samplerCount, stage.samplerTable);
 			if (ok)
-			{
-				memcpy(cached.samplers, stage.samplers, bytes);
-				cached.count = stage.samplerCount;
-				cached.table = stage.samplerTable;
-				cached.generation = m_gpuSamplerHeap->GetGeneration();
-			}
+				cached.Store(stage.samplerIdentity, generation, stage.SamplerData(), stage.samplerCount, stage.samplerTable);
 		}
 		if (ok)
 			return;
@@ -611,27 +717,7 @@ void D3D12Renderer::draw_applyRenderTargets()
 {
 	LatteProfiler::Scope profileScope(LatteProfiler::Slot::RenderTargets);
 	CachedFBOD3D12 *fbo = m_state.activeFBO;
-	for (uint32 i = 0; i < 8; i++)
-	{
-		LatteTextureViewD3D12 *view = fbo->GetColorView(i);
-		if (!view || fbo->GetRTVFormat(i) == DXGI_FORMAT_UNKNOWN)
-			continue;
-		TransitionTexture(view->GetBaseTexture(), view->firstMip, 1, view->firstSlice, view->numSlice, D3D12_RESOURCE_STATE_RENDER_TARGET);
-	}
-	if (LatteTextureViewD3D12 *depthView = fbo->GetDepthView())
-	{
-		auto *depth = depthView->GetBaseTexture();
-		TransitionTexture(depth, depthView->firstMip, 1, depthView->firstSlice, depthView->numSlice, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-		// ponytail: full-size scene attachment heuristic, not recovered game-camera metadata.
-		// Shadow maps and smaller auxiliary passes must not replace the scene depth.
-		if (m_fsrInputWidth && depth->GetDesc().Width == m_fsrInputWidth && depth->GetDesc().Height == m_fsrInputHeight &&
-			depthView->firstMip == 0 && depthView->firstSlice == 0 && fbo->GetColorView(0))
-		{
-			const auto uses = ++m_sceneDepthUses[depth];
-			if (!m_sceneDepth || uses > m_sceneDepthUses[m_sceneDepth])
-				m_sceneDepth = depth;
-		}
-	}
+	draw_planRenderTargets(fbo);
 	if (!m_state.renderTargetsDirty)
 		return;
 	D3D12_CPU_DESCRIPTOR_HANDLE dsv = fbo->GetDSV();
@@ -639,13 +725,39 @@ void D3D12Renderer::draw_applyRenderTargets()
 	m_state.renderTargetsDirty = false;
 }
 
+void D3D12Renderer::draw_planRenderTargets(CachedFBOD3D12 *fbo)
+{
+	for (uint32 i = 0; i < 8; i++)
+	{
+		LatteTextureViewD3D12 *view = fbo->GetColorView(i);
+		if (!view || fbo->GetRTVFormat(i) == DXGI_FORMAT_UNKNOWN)
+			continue;
+		TransitionTexture(view->GetBaseTexture(), view->GetNativeDefinition().firstMip, 1, view->GetNativeDefinition().firstSlice, view->GetNativeDefinition().numSlice, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	}
+	if (LatteTextureViewD3D12 *depthView = fbo->GetDepthView())
+	{
+		auto *depth = depthView->GetBaseTexture();
+		TransitionTexture(depth, depthView->GetNativeDefinition().firstMip, 1, depthView->GetNativeDefinition().firstSlice, depthView->GetNativeDefinition().numSlice, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+		// ponytail: full-size scene attachment heuristic, not recovered game-camera metadata.
+		// Shadow maps and smaller auxiliary passes must not replace the scene depth.
+		if (m_fsrInputWidth && depth->GetDesc().Width == m_fsrInputWidth && depth->GetDesc().Height == m_fsrInputHeight &&
+			depthView->GetNativeDefinition().firstMip == 0 && depthView->GetNativeDefinition().firstSlice == 0 && fbo->GetColorView(0))
+		{
+			const auto uses = ++m_sceneDepthUses[depth];
+			if (!m_sceneDepth || uses > m_sceneDepthUses[m_sceneDepth])
+				m_sceneDepth = depth;
+		}
+	}
+}
+
 /* --- draw --- */
 
-void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext &drawcallContext)
+void D3D12Renderer::draw_executeDirect(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext &drawcallContext)
 {
+	m_pipeline.BeginOperation();
 	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
 	LatteGPUState.drawCallCounter++;
-	if (m_state.skipDrawSequence)
+	if (m_frontState.skipDrawSequence)
 		return;
 	if (LatteGPUState.contextNew.GetSpecialStateValues()[8] != 0)
 	{
@@ -658,8 +770,8 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 		return;
 	}
 
-	m_state.verticesPerInstance = count;
-	if (m_state.streamoutEnabled)
+	m_frontState.verticesPerInstance = count;
+	if (m_frontState.streamoutEnabled)
 	{
 		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Streamout);
 		LatteStreamout_PrepareDrawcall(count, instanceCount);
@@ -681,7 +793,7 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 	uint8 stageUniformModifiedMask = 0;
 	LatteBufferCache_Sync(indexMax + baseVertex, baseInstance, instanceCount, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, stageUniformModifiedMask);
 
-	CachedFBOD3D12 *fbo = m_state.activeFBO;
+	CachedFBOD3D12 *fbo = m_frontState.activeFBO;
 	if (!fbo)
 		return;
 
@@ -691,7 +803,7 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 
 	// descriptor content. Sampler tables are acquired first because a full sampler heap forces a submit, which would
 	// discard any command list state recorded for this draw
-	PreparedStageBindings stageBindings[3];
+	auto *stageBindings = m_preparedStages;
 	uint32 stageBindingCount = 0;
 	{
 		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::BindingsPrepare);
@@ -804,7 +916,7 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 	{
 		LatteProfiler::Scope profileScope(LatteProfiler::Slot::VertexBuffers);
 		// index buffer
-		auto *allocation = (D3D12UploadHeapAllocator::Allocation *)indexAllocation.rendererInternal;
+		auto *allocation = static_cast<D3D12UploadHeapAllocator::Allocation *>(indexAllocation.rendererInternal);
 		if (!allocation)
 			return;
 		D3D12_INDEX_BUFFER_VIEW ib;
@@ -876,7 +988,7 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 
 	if (usesStreamout)
 		UAVBarrier(m_xfbRingBuffer.Get());
-	if (m_state.streamoutEnabled)
+	if (m_frontState.streamoutEnabled)
 	{
 		LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Streamout);
 		LatteStreamout_FinishDrawcall(false);
@@ -884,6 +996,671 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 	m_drawsInCommandList++;
 	m_statDrawsPerFrame++;
 	m_hasRecordedWork = true;
+}
+
+LattePipeline::Span D3D12Renderer::StageBytes(const void *data, size_t size)
+{
+	m_pipeline.CheckFront();
+	LattePipeline::Span span;
+	if (!m_operations.Staging().Copy({static_cast<const std::byte *>(data), size}, span))
+	{
+		// A full-capacity upload may need to skip the previous empty tail.
+		// ResetEmpty refuses to invalidate a live draw's uniform spans.
+		m_operations.WaitCapacity();
+		if (m_operations.Staging().Copy({static_cast<const std::byte *>(data), size}, span))
+			return span;
+		m_operations.Staging().ResetEmpty();
+		if (!m_operations.Staging().Copy({static_cast<const std::byte *>(data), size}, span))
+			throw std::runtime_error("Latte CPU staging arena exhausted by one operation");
+	}
+	return span;
+}
+
+void D3D12Renderer::draw_prepareStage(LatteDecompilerShader *shader, LattePipeline::StageBlock &out)
+{
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
+	m_pipeline.CheckFront();
+	const auto stage = D3D12StageFromLatte(shader->shaderType);
+	auto *native = static_cast<RendererShaderD3D12 *>(shader->shader);
+	const auto &remap = native->GetBindingRemap();
+	auto &mapping = shader->resourceMapping;
+	bool built = false;
+	const auto &layout = m_frontStageLayouts.Get(stage, native->GetUniqueId(), [&](LattePipeline::StageBlock &out) {
+		built = true;
+		out.stage = stage;
+		out.samplerCount = std::max<uint32>(remap.srvCount, 1);
+		cemu_assert_debug(out.samplerCount <= D3D12Const::kMaxSamplersPerStage);
+		for (uint32 i = 0; i < out.samplerCount; ++i)
+		{
+			auto &sampler = out.samplers[i];
+			sampler.Filter = D3D12_FILTER_MIN_MAG_MIP_POINT;
+			sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP;
+			sampler.MaxAnisotropy = 1;
+			sampler.ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER;
+		}
+		out.textureCount = mapping.getTextureCount();
+		cemu_assert_debug(out.textureCount <= D3D12Const::kMaxSRVsPerStage);
+		const sint32 textureBase = mapping.getTextureBaseBindingPoint();
+		{
+			LatteProfiler::Scope textureScope(LatteProfiler::Slot::TextureBinding);
+			for (uint32 i = 0; i < out.textureCount; ++i)
+			{
+				const auto unit = mapping.getRelativeTextureUnitFromRelativeBindingPoint(i);
+				uint32 regIndex;
+				auto *view = _GetBoundTextureForShader(m_frontState.boundTexture, shader, unit, regIndex);
+				auto &binding = out.textures[i];
+				binding.view = view ? view->recordingId : LattePipeline::ResourceId{};
+				binding.swizzle = LatteGPUState.contextRegister[regIndex + 4];
+				binding.reg = textureBase >= 0 ? remap.GetSRV(textureBase + i) : -1;
+				binding.nullDimension = shader->textureUnitDim[unit];
+				if (binding.reg < 0)
+					continue;
+				const bool mismatch = view && ((binding.nullDimension == Latte::E_DIM::DIM_1D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_1D) || (binding.nullDimension == Latte::E_DIM::DIM_2D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_2D && view->GetNativeDefinition().dim != Latte::E_DIM::DIM_2D_MSAA));
+				// Transition all bound inputs even when dimension validation selects a null SRV.
+				if (mismatch)
+					binding.nullDimension = shader->textureUnitDim[unit];
+				draw_buildSamplerDesc(shader, unit, view, out.samplers[binding.reg]);
+				if (mismatch)
+					binding.reg = -2 - binding.reg;
+			}
+		}
+		out.streamout = mapping.tfStorageBindingPoint >= 0 && remap.GetUAV(mapping.tfStorageBindingPoint) == 0;
+		if (mapping.uniformVarsBufferBindingPoint >= 0)
+			out.uniformReg = remap.GetCBV(mapping.uniformVarsBufferBindingPoint);
+	});
+	// The persistent front block already contains this layout on a memo hit.
+	// Sequence/shader/view changes clear the memo before reusing a destination.
+	if (built)
+		out = layout;
+	LatteProfiler::Add(built ? LatteProfiler::Counter::TextureStageMisses : LatteProfiler::Counter::TextureStageHits);
+	// Buffer-cache offsets and per-draw uniforms can change inside a sequence.
+	for (uint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; ++i)
+	{
+		if (mapping.uniformBuffersBindingPoint[i] < 0)
+			continue;
+		const sint32 reg = remap.GetCBV(mapping.uniformBuffersBindingPoint[i]);
+		if (reg >= 0)
+			out.uniforms[reg] = m_frontBindings.uniforms[(uint32)stage][i];
+	}
+	if (out.uniformReg >= 0)
+		out.uniformBytes = draw_snapshotUniformVars(shader);
+}
+
+void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 instanceCount, uint32 count, MPTR indexDataMPTR, Latte::LATTE_VGT_DMA_INDEX_TYPE::E_INDEX_TYPE indexType, const LatteDrawcallContext &drawcallContext)
+{
+	m_pipeline.CheckFront();
+	if (!m_pipeline.Queued())
+	{
+		draw_executeDirect(baseVertex, baseInstance, instanceCount, count, indexDataMPTR, indexType, drawcallContext);
+		return;
+	}
+	LatteProfiler::Scope decodeScope(LatteProfiler::Slot::DrawStateDecode);
+	LatteGPUState.drawCallCounter++;
+	if (m_frontState.skipDrawSequence)
+		return;
+	if (LatteGPUState.contextNew.GetSpecialStateValues()[8])
+	{
+		LatteDraw_handleSpecialState8_clearAsDepth();
+		return;
+	}
+	if (LatteGPUState.contextNew.GetSpecialStateValues()[5])
+	{
+		draw_handleSpecialState5();
+		return;
+	}
+	m_frontState.verticesPerInstance = count;
+	if (m_frontState.streamoutEnabled)
+		LatteStreamout_PrepareDrawcall(count, instanceCount);
+	auto [fetch, vs, ps, gs] = LatteSHRC_GetActiveShaders();
+	if (!fetch || !vs)
+		return;
+	INDEX_TYPE hostIndexType;
+	uint32 indexCount, indexMax = 0;
+	IndexAllocation allocation{};
+	const auto primitive = static_cast<LattePrimitiveMode>(LatteGPUState.contextRegister[mmVGT_PRIMITIVE_TYPE]);
+	LatteIndices_decode(memory_getPointerFromVirtualOffset(indexDataMPTR), indexType, count, primitive, indexMax, hostIndexType, indexCount, allocation);
+	uint8 modified = 0;
+	LatteBufferCache_Sync(indexMax + baseVertex, baseInstance, instanceCount, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF, modified);
+	auto *fbo = m_frontState.activeFBO;
+	if (!fbo)
+		return;
+	auto *pipeline = m_pipelineCache->GetOrCreate(fetch, vs, gs, ps, fbo, LatteGPUState.contextNew, hostIndexType);
+	if (!pipeline->isValid())
+		return;
+	if (!pipeline->recordingId)
+		pipeline->recordingId = RegisterResource(pipeline);
+	LattePipeline::DrawPacket packet{};
+	packet.pipeline = pipeline->recordingId;
+	packet.framebuffer = fbo->recordingId;
+	if (hostIndexType != INDEX_TYPE::NONE)
+	{
+		if (!allocation.rendererInternal)
+			return;
+		packet.indices = static_cast<IndexResource *>(allocation.rendererInternal)->id;
+	}
+	packet.baseVertex = baseVertex;
+	packet.baseInstance = baseInstance;
+	packet.instanceCount = instanceCount;
+	packet.count = count;
+	packet.indexCount = indexCount;
+	packet.indexType = static_cast<uint32>(hostIndexType);
+	packet.streamout = vs->resourceMapping.tfStorageBindingPoint >= 0;
+	uint32 runtimeDwords[D3D12Const::kRuntimeDataDwords]{};
+#ifdef CEMU_D3D12_SPIRV_TO_DXIL
+	if (D3D12ShaderCompiler::GetBackend() == D3D12ShaderCompiler::Backend::SpirvToDXIL)
+	{
+		dxil_spirv_vertex_runtime_data runtime{};
+		runtime.first_vertex = baseVertex;
+		runtime.base_instance = baseInstance;
+		runtime.is_indexed_draw = hostIndexType != INDEX_TYPE::NONE;
+		memcpy(runtimeDwords, &runtime, sizeof(runtime));
+	}
+	else
+#endif
+	{
+		runtimeDwords[0] = baseVertex;
+		runtimeDwords[1] = baseInstance;
+	}
+	size_t stagingBytes = sizeof(runtimeDwords);
+	for (auto *shader : {vs, ps, gs})
+		if (shader)
+			stagingBytes += AlignUp<size_t>(shader->uniform.uniformRangeSize, 16);
+	if (!m_operations.Staging().Prepare(stagingBytes))
+	{
+		m_operations.WaitCapacity();
+		if (!m_operations.Staging().Prepare(stagingBytes))
+		{
+			m_operations.Staging().ResetEmpty();
+			if (!m_operations.Staging().Prepare(stagingBytes))
+				throw std::runtime_error("Latte draw exceeds CPU staging capacity");
+		}
+	}
+	packet.runtime = StageBytes(runtimeDwords, sizeof(runtimeDwords));
+	packet.viewport = m_frontState.viewport;
+	packet.scissor = m_frontState.scissor;
+	memcpy(packet.blendFactor, LatteGPUState.contextRegister + Latte::REGADDR::CB_BLEND_RED, sizeof(packet.blendFactor));
+	packet.stencilRef = LatteGPUState.contextNew.DB_STENCILREFMASK.get_STENCILREF_F();
+	const std::array<LatteDecompilerShader *, 3> drawShaders{vs, ps, gs};
+	if (m_frontDrawShaders != drawShaders)
+	{
+		m_frontDrawBlockReusable = false;
+		m_frontStageLayouts.BeginSequence();
+		m_frontDrawShaders = drawShaders;
+	}
+	auto &block = m_frontDrawBlock;
+	if (!m_frontDrawBlockReusable)
+	{
+		block.stageCount = 0;
+		memcpy(block.vertices, m_frontBindings.vertices, sizeof(block.vertices));
+		{
+			LatteProfiler::DetailScope detail(LatteProfiler::Detail::BindingsPrepare);
+			draw_prepareStage(vs, block.stages[block.stageCount++]);
+			if (ps)
+				draw_prepareStage(ps, block.stages[block.stageCount++]);
+			if (gs)
+				draw_prepareStage(gs, block.stages[block.stageCount++]);
+		}
+		for (uint32 i = 0; i < block.stageCount; ++i)
+		{
+			packet.uniformBytes[i] = block.stages[i].uniformBytes;
+			block.stages[i].uniformBytes = {};
+		}
+		packet.state = m_drawBlocks.Intern(block, m_pipeline.Sequence() + 1, m_operations.Progress().recorded);
+		while (!packet.state)
+		{
+			m_operations.WaitCapacity(m_operations.Progress().recorded + 1);
+			packet.state = m_drawBlocks.Intern(block, m_pipeline.Sequence() + 1, m_operations.Progress().recorded);
+		}
+		m_frontDrawBlockId = packet.state;
+		m_frontDrawBlockReusable = true;
+	}
+	else
+	{
+		// Texture/sampler/context changes start a new sequence; binding methods
+		// invalidate this path on every changed vertex or uniform range.
+		uint32 stageIndex = 0;
+		for (auto *shader : {vs, ps, gs})
+			if (shader)
+			{
+				if (block.stages[stageIndex].uniformReg >= 0)
+					packet.uniformBytes[stageIndex] = draw_snapshotUniformVars(shader);
+				++stageIndex;
+			}
+		packet.state = m_drawBlocks.Reuse(m_frontDrawBlockId, m_pipeline.Sequence() + 1);
+		LatteProfiler::Add(LatteProfiler::Counter::DrawBlockReuses);
+	}
+	m_operations.Execute<LattePipeline::DrawPacket, &D3D12Renderer::draw_record>(m_pipeline, LattePipeline::Opcode::Draw, packet, *this);
+	ApplyFrontCompletions();
+	UpdatePipelineProfile();
+	if (m_frontState.streamoutEnabled)
+		LatteStreamout_FinishDrawcall(false);
+}
+
+void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena)
+{
+	LatteProfiler::Scope recordScope(LatteProfiler::Slot::DrawSetup);
+	m_pipeline.CheckBack();
+	if (m_pipeline.Parallel())
+	{
+		if (draw_captureParallel(packet, arena))
+			return;
+		draw_drainParallel();
+		LatteProfiler::Add(LatteProfiler::Counter::SerialDraws);
+	}
+	const auto &block = m_drawBlocks.Get(packet.state);
+	if (m_pipeline.Parallel() && packet.indices)
+		if (const auto &deferred = m_resources.Get<IndexResource>(packet.indices)->deferred)
+			deferred->Finish();
+
+	auto *pipeline = m_resources.Get<D3D12PipelineInfo>(packet.pipeline);
+	m_state.activeFBO = m_resources.Get<CachedFBOD3D12>(packet.framebuffer);
+	// Binding caches are recorder-owned; incoming blocks contain complete values.
+	m_state.renderTargetsDirty = m_state.renderTargetsDirty || m_recordingFBO != packet.framebuffer;
+	m_recordingFBO = packet.framebuffer;
+	if (memcmp(&m_state.viewport, &packet.viewport, sizeof(packet.viewport)) != 0)
+	{
+		m_state.viewport = packet.viewport;
+		m_state.viewportDirty = true;
+	}
+	if (memcmp(&m_state.scissor, &packet.scissor, sizeof(packet.scissor)) != 0)
+	{
+		m_state.scissor = packet.scissor;
+		m_state.scissorDirty = true;
+	}
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::VertexBuffers);
+		const auto baseAddress = m_bufferCacheAddress;
+		for (uint32 i = 0; i < LATTE_MAX_VERTEX_BUFFERS; ++i)
+		{
+			const auto &v = block.vertices[i];
+			D3D12_VERTEX_BUFFER_VIEW view{};
+			// Unbound slots must remain zero, as in the reference recorder.
+			if (v.bound)
+			{
+				view.BufferLocation = baseAddress + v.offset;
+				view.SizeInBytes = std::min(v.size, m_bufferCacheSize - v.offset);
+				view.StrideInBytes = v.stride;
+			}
+			if (memcmp(&view, &m_state.vertexBuffers[i], sizeof(view)) != 0)
+			{
+				m_state.vertexBuffers[i] = view;
+				m_state.vertexBufferDirtyMask |= 1u << i;
+			}
+		}
+	}
+	const uint32 baseVertex = packet.baseVertex, baseInstance = packet.baseInstance;
+	const uint32 instanceCount = packet.instanceCount, count = packet.count, hostIndexCount = packet.indexCount;
+	const auto hostIndexType = static_cast<INDEX_TYPE>(packet.indexType);
+	const uint32 stageBindingCount = block.stageCount;
+	PreparedStageBindings stageBindings[3];
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::DescriptorPrepare);
+		for (uint32 i = 0; i < stageBindingCount; ++i)
+		{
+			const auto &source = block.stages[i];
+			auto &out = stageBindings[i];
+			out.stage = source.stage;
+			out.samplerCount = source.samplerCount;
+			// The immutable block remains live throughout recording, including a
+			// sampler rollover. Read its active sampler span without copying it.
+			out.samplerSource = source.samplers;
+			out.samplerIdentity = packet.state.value;
+			for (uint32 reg = 0; reg < D3D12Const::kMaxCBVsPerStage; ++reg)
+			{
+				const auto &range = source.uniforms[reg];
+				if (!range.size)
+					continue;
+				out.tableDesc.cbvAddress[reg] = GetAlignedUniformBufferAddress(range.offset, range.size);
+				out.tableDesc.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
+			}
+			LattePipeline::ResolveTextureDescriptors(source, out.tableDesc, [&](LattePipeline::ResourceId id, uint32 swizzle) { return m_resources.Get<LatteTextureViewD3D12>(id)->GetSRV(swizzle); }, [&](Latte::E_DIM dimension) { return GetNullSRV(dimension); });
+			if (source.streamout)
+			{
+				out.tableDesc.uavResource = m_xfbRingBuffer.Get();
+				out.tableDesc.uavSize = m_xfbRingBufferSize;
+			}
+		}
+		// Rollover can submit/reset/retire. No transient uniform GPU allocation is
+		// created until every sampler table belongs to the current heap generation.
+		draw_acquireSamplerTables(stageBindings, stageBindingCount);
+	}
+	for (uint32 i = 0; i < stageBindingCount; ++i)
+	{
+		const auto &source = block.stages[i];
+		if (source.uniformReg >= 0)
+		{
+			LatteProfiler::Scope uniformScope(LatteProfiler::Slot::Uniforms);
+			draw_recordUniformBytes(source.stage, arena.Read(packet.uniformBytes[i]), stageBindings[i].tableDesc.cbvAddress[source.uniformReg], stageBindings[i].tableDesc.cbvSize[source.uniformReg]);
+		}
+	}
+	const bool usesStreamout = packet.streamout;
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::RenderState);
+		// resource states. Inputs first so render targets win if a texture is both sampled and rendered to
+		for (uint32 i = 0; i < block.stageCount; ++i)
+			for (uint32 j = 0; j < block.stages[i].textureCount; ++j)
+			{
+				const auto id = block.stages[i].textures[j].view;
+				if (!id)
+					continue;
+				auto *view = m_resources.Get<LatteTextureViewD3D12>(id);
+				if (view->ReuseShaderReadTransition())
+					LatteProfiler::Add(LatteProfiler::Counter::TransitionHits);
+				else
+				{
+					TransitionTexture(view->GetBaseTexture(), view->GetNativeDefinition().firstMip, view->GetNativeDefinition().numMip, view->GetNativeDefinition().firstSlice, view->GetNativeDefinition().numSlice, LatteTextureD3D12::kShaderReadState);
+					view->RememberShaderReadTransition();
+				}
+			}
+		draw_applyRenderTargets();
+		TransitionResource(m_bufferCache.Get(), m_bufferCacheState, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_COPY_SOURCE);
+		if (usesStreamout)
+			TransitionResource(m_xfbRingBuffer.Get(), m_xfbRingBufferState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+		FlushBarriers();
+	}
+
+	// pipeline state
+	if (!m_state.rootSignatureBound)
+		BindRootSignatureAndHeaps();
+
+	if (m_state.currentPSO != pipeline->pso.Get() || m_state.currentTopology != pipeline->topology)
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::PipelineBind);
+		if (m_state.currentPSO != pipeline->pso.Get())
+		{
+			m_cmdList->SetPipelineState(pipeline->pso.Get());
+			m_state.currentPSO = pipeline->pso.Get();
+		}
+		if (m_state.currentTopology != pipeline->topology)
+		{
+			m_cmdList->IASetPrimitiveTopology(pipeline->topology);
+			m_state.currentTopology = pipeline->topology;
+		}
+	}
+
+	if (m_state.vertexBufferDirtyMask)
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::VertexBuffers);
+		const uint32 first = std::countr_zero(m_state.vertexBufferDirtyMask);
+		const uint32 last = 32 - std::countl_zero(m_state.vertexBufferDirtyMask);
+		m_cmdList->IASetVertexBuffers(first, last - first, m_state.vertexBuffers + first);
+		m_state.vertexBufferDirtyMask = 0;
+	}
+
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::RenderState);
+		if (m_state.viewportDirty)
+		{
+			m_cmdList->RSSetViewports(1, &m_state.viewport);
+			m_state.viewportDirty = false;
+		}
+		if (m_state.scissorDirty)
+		{
+			m_cmdList->RSSetScissorRects(1, &m_state.scissor);
+			m_state.scissorDirty = false;
+		}
+		if (pipeline->usesBlendConstants)
+		{
+			float blendFactor[4];
+			memcpy(blendFactor, packet.blendFactor, sizeof(blendFactor));
+			if (pipeline->blendConstantAlphaOnly)
+				blendFactor[0] = blendFactor[1] = blendFactor[2] = blendFactor[3];
+			if (memcmp(blendFactor, m_state.currentBlendFactor, sizeof(blendFactor)) != 0)
+			{
+				m_cmdList->OMSetBlendFactor(blendFactor);
+				memcpy(m_state.currentBlendFactor, blendFactor, sizeof(blendFactor));
+			}
+		}
+		if (pipeline->usesStencil)
+		{
+			const uint32 ref = packet.stencilRef;
+			if (ref != m_state.currentStencilRef)
+			{
+				m_cmdList->OMSetStencilRef(ref);
+				m_state.currentStencilRef = ref;
+			}
+		}
+	}
+
+	const bool isIndexed = hostIndexType != INDEX_TYPE::NONE;
+	if (isIndexed)
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::VertexBuffers);
+		// index buffer
+		auto *allocation = m_resources.Get<IndexResource>(packet.indices)->native;
+		if (!allocation)
+			return;
+		D3D12_INDEX_BUFFER_VIEW ib;
+		ib.BufferLocation = allocation->gpuAddress;
+		ib.Format = (hostIndexType == INDEX_TYPE::U16) ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+		ib.SizeInBytes = allocation->size;
+		if (memcmp(&ib, &m_state.currentIndexBuffer, sizeof(ib)) != 0)
+		{
+			m_cmdList->IASetIndexBuffer(&ib);
+			m_state.currentIndexBuffer = ib;
+		}
+	}
+
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
+		// descriptor tables
+		for (uint32 i = 0; i < stageBindingCount; i++)
+		{
+			const PreparedStageBindings &b = stageBindings[i];
+			BindStageRootCBVs(b.tableDesc, b.stage);
+			const auto table = WriteStageTable(b.tableDesc, b.stage);
+			auto &currentView = m_state.currentViewTables[(uint32)b.stage];
+			auto &currentSampler = m_state.currentSamplerTables[(uint32)b.stage];
+			if (currentView.ptr != table.ptr)
+			{
+				m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(b.stage), table);
+				currentView = table;
+			}
+			if (currentSampler.ptr != b.samplerTable.ptr)
+			{
+				m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageSamplers(b.stage), b.samplerTable);
+				currentSampler = b.samplerTable;
+			}
+		}
+
+		// gl_VertexIndex / gl_InstanceIndex include the base vertex/instance in Vulkan but SV_VertexID / SV_InstanceID
+		// don't. The translated shaders add these offsets back, see D3D12ShaderTranslate::SPIRVToHLSL
+		uint32 runtimeDwords[D3D12Const::kRuntimeDataDwords];
+		const auto runtimeBytes = arena.Read(packet.runtime);
+		if (runtimeBytes.size() != sizeof(runtimeDwords))
+			throw std::logic_error("Invalid Latte runtime constants");
+		memcpy(runtimeDwords, runtimeBytes.data(), sizeof(runtimeDwords));
+		if (!m_state.runtimeDataValid || memcmp(m_state.currentRuntimeData, runtimeDwords, sizeof(runtimeDwords)) != 0)
+		{
+			m_cmdList->SetGraphicsRoot32BitConstants(D3D12Const::kRootParamRuntimeData, D3D12Const::kRuntimeDataDwords, runtimeDwords, 0);
+			memcpy(m_state.currentRuntimeData, runtimeDwords, sizeof(runtimeDwords));
+			m_state.runtimeDataValid = true;
+		}
+	}
+
+	{
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::DrawCall);
+		if (isIndexed)
+			m_cmdList->DrawIndexedInstanced(hostIndexCount, instanceCount, 0, (INT)baseVertex, baseInstance);
+		else
+			m_cmdList->DrawInstanced(count, instanceCount, baseVertex, baseInstance);
+	}
+
+	if (usesStreamout)
+		UAVBarrier(m_xfbRingBuffer.Get());
+	LatteProfiler::Scope pinScope(LatteProfiler::Slot::ResourcePin);
+	// A sampler rollover can have advanced the recording fence after front
+	// pinned the IDs. Retirement must cover the submission that actually uses them.
+	const auto recordedSequence = m_operations.ActiveHeader().sequence, recordingFence = GetRecordingSubmissionId();
+	for (auto id : {packet.pipeline, packet.framebuffer, packet.indices})
+		m_resources.Use(id, recordedSequence, recordingFence);
+	auto pinView = [&](LatteTextureViewD3D12 *view) {
+		if (!view)
+			return;
+		m_resources.Use(view->recordingId, recordedSequence, recordingFence);
+		m_resources.Use(view->GetBaseTexture()->recordingId, recordedSequence, recordingFence);
+	};
+	if (m_pinnedDrawBlock != packet.state || m_pinnedDrawFence != recordingFence)
+	{
+		for (uint32 i = 0; i < block.stageCount; ++i)
+			for (uint32 j = 0; j < block.stages[i].textureCount; ++j)
+				if (block.stages[i].textures[j].view)
+					pinView(m_resources.Get<LatteTextureViewD3D12>(block.stages[i].textures[j].view));
+		m_pinnedDrawBlock = packet.state;
+	}
+	if (m_pinnedFramebuffer != packet.framebuffer || m_pinnedDrawFence != recordingFence)
+	{
+		for (uint32 i = 0; i < 8; ++i)
+			pinView(m_state.activeFBO->GetColorView(i));
+		pinView(m_state.activeFBO->GetDepthView());
+		m_pinnedFramebuffer = packet.framebuffer;
+	}
+	m_pinnedDrawFence = recordingFence;
+	m_drawsInCommandList++;
+	m_statDrawsPerFrame++;
+	m_hasRecordedWork = true;
+}
+
+bool D3D12Renderer::draw_captureParallel(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena)
+{
+	const auto &block = m_drawBlocks.Get(packet.state);
+	auto fallback = [](LatteProfiler::Counter reason) { LatteProfiler::Add(reason); return false; };
+	if (packet.streamout)
+		return fallback(LatteProfiler::Counter::ChunkFallbackStreamout);
+	if (HasActiveOcclusionQuery())
+		return fallback(LatteProfiler::Counter::ChunkFallbackQuery);
+	if (m_simSeriesS)
+		return fallback(LatteProfiler::Counter::ChunkFallbackSimulation);
+	for (uint32 i = 0; i < block.stageCount; ++i)
+	{
+		const auto &stage = block.stages[i];
+		if (stage.streamout)
+			return fallback(LatteProfiler::Counter::ChunkFallbackStreamout);
+		for (const auto &range : stage.uniforms)
+			if (range.size && ((range.offset % D3D12Const::kCBVAlignment) != 0 ||
+							   static_cast<uint64>(range.offset) + AlignUp<uint32>(range.size, D3D12Const::kCBVAlignment) > m_bufferCacheSize))
+				return fallback(LatteProfiler::Counter::ChunkFallbackAlignment);
+		for (uint32 j = 0; j < stage.textureCount; ++j)
+			if (stage.textures[j].view && m_resources.Get<LatteTextureViewD3D12>(stage.textures[j].view)->RequiresSliceCopy())
+				return fallback(LatteProfiler::Counter::ChunkFallbackSlice);
+	}
+	const size_t limit = LattePipeline::ChunkWorkers::DrawsPerChunk * (m_requestedChunks ? m_requestedChunks : 4);
+	size_t bytes = sizeof(D3D12ResolvedDraw) + packet.runtime.size;
+	for (uint32 i = 0; i < block.stageCount; ++i)
+		bytes += packet.uniformBytes[i].size;
+	if (m_parallelDraws.size() == limit || m_parallelBytes + bytes > 16 * 1024 * 1024)
+		draw_drainParallel();
+	m_parallelBytes += bytes;
+	if (m_parallelDraws.empty())
+	{
+		FlushBarriers(); // preceding coordinator work must precede the first draw
+		m_parallelBatchStart = LatteProfiler::Clock::now();
+	}
+	auto *pipeline = m_resources.Get<D3D12PipelineInfo>(packet.pipeline);
+	auto *fbo = m_resources.Get<CachedFBOD3D12>(packet.framebuffer);
+	D3D12ResolvedDraw draw(packet, block, arena);
+	draw.pipeline = pipeline->pso.Get();
+	draw.topology = pipeline->topology;
+	draw.blendConstants = pipeline->usesBlendConstants;
+	draw.blendAlphaOnly = pipeline->blendConstantAlphaOnly;
+	draw.stencil = pipeline->usesStencil;
+	draw.targetCount = fbo->GetNumRTVs();
+	std::copy_n(fbo->GetRTVs(), draw.targetCount, draw.targets.begin());
+	if (fbo->HasDSV())
+		draw.depth = fbo->GetDSV();
+	for (uint32 i = 0; i < LATTE_MAX_VERTEX_BUFFERS; ++i)
+	{
+		const auto &range = block.vertices[i];
+		if (range.bound)
+			draw.vertices[i] = {m_bufferCacheAddress + range.offset, std::min(range.size, m_bufferCacheSize - range.offset), range.stride};
+	}
+	if (packet.indices)
+	{
+		const auto *resource = m_resources.Get<IndexResource>(packet.indices);
+		const auto *allocation = resource->native;
+		draw.deferredIndices = resource->deferred;
+		if (!allocation)
+			throw std::logic_error("Missing Latte chunk index allocation");
+		draw.indices = {allocation->gpuAddress, allocation->size,
+						static_cast<INDEX_TYPE>(packet.indexType) == INDEX_TYPE::U16 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT};
+	}
+	const auto sequence = m_operations.ActiveHeader().sequence;
+	const auto fence = GetRecordingSubmissionId();
+	auto pinView = [&](LatteTextureViewD3D12 *view) {
+		if (view)
+		{
+			m_resources.Use(view->recordingId, sequence, fence);
+			m_resources.Use(view->GetBaseTexture()->recordingId, sequence, fence);
+		}
+	};
+	for (auto id : {packet.pipeline, packet.framebuffer, packet.indices})
+		m_resources.Use(id, sequence, fence);
+	for (uint32 i = 0; i < block.stageCount; ++i)
+	{
+		const auto &stage = block.stages[i];
+		auto &native = draw.stages[i];
+		for (uint32 reg = 0; reg < D3D12Const::kMaxCBVsPerStage; ++reg)
+			if (const auto &range = stage.uniforms[reg]; range.size)
+			{
+				native.cbvAddress[reg] = m_bufferCacheAddress + range.offset;
+				native.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
+			}
+		LattePipeline::ResolveTextureDescriptors(stage, native, [&](LattePipeline::ResourceId id, uint32 swizzle) { return m_resources.Get<LatteTextureViewD3D12>(id)->GetSRV(swizzle); }, [&](Latte::E_DIM dimension) { return GetNullSRV(dimension); });
+		for (uint32 j = 0; j < stage.textureCount; ++j)
+		{
+			const auto &binding = stage.textures[j];
+			auto *view = binding.view ? m_resources.Get<LatteTextureViewD3D12>(binding.view) : nullptr;
+			pinView(view);
+			// Preserve the reference's input-before-target transition order even
+			// for a dimensional mismatch selecting a null descriptor.
+			if (view)
+			{
+				const auto &definition = view->GetNativeDefinition();
+				TransitionTexture(view->GetBaseTexture(), definition.firstMip, definition.numMip,
+								  definition.firstSlice, definition.numSlice, LatteTextureD3D12::kShaderReadState);
+				view->RememberShaderReadTransition();
+			}
+		}
+	}
+	for (uint32 i = 0; i < 8; ++i)
+		pinView(fbo->GetColorView(i));
+	pinView(fbo->GetDepthView());
+	draw_planRenderTargets(fbo);
+	TransitionResource(m_bufferCache.Get(), m_bufferCacheState,
+					   D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER | D3D12_RESOURCE_STATE_INDEX_BUFFER | D3D12_RESOURCE_STATE_COPY_SOURCE);
+	draw.barriers.swap(m_pendingBarriers);
+	m_statBarriersPerFrame += static_cast<uint32>(draw.barriers.size());
+	m_parallelDraws.push_back(std::move(draw));
+	m_drawsInCommandList++;
+	m_statDrawsPerFrame++;
+	m_hasRecordedWork = true;
+	LatteProfiler::Add(LatteProfiler::Counter::ParallelDraws);
+	return true;
+}
+
+void D3D12Renderer::draw_drainParallel()
+{
+	if (m_parallelDraws.empty() || m_parallelReady)
+		return;
+	if (!m_parallelRecorder)
+		m_parallelRecorder = std::make_unique<D3D12ParallelRecorder>(m_device.Get(), m_fence.Get(), m_rootSignature.Get(),
+																	 m_nullCBV, m_nullSRV2D, m_nullUAV, m_zeroConstantBufferAddress);
+	const auto timing = m_parallelRecorder->Record(m_parallelDraws, GetRecordingSubmissionId(), m_requestedChunks, LatteProfiler::s_state.enabled, m_stagingViewHeap->GetGeneration());
+	if (LatteProfiler::s_state.enabled)
+	{
+		auto &profile = LatteProfiler::s_state;
+		for (size_t i = 0; i < timing.busyNs.size(); ++i)
+			profile.chunkBusyNs[i] += timing.busyNs[i];
+		profile.chunkCriticalPathNs += timing.criticalPathNs;
+		profile.chunkCount += timing.count;
+		profile.chunkBatches++;
+		LatteProfiler::Add(LatteProfiler::Counter::UniformUploadBytes, timing.uniformUploadBytes);
+		LatteProfiler::Add(LatteProfiler::Counter::UploadBytes, timing.uniformUploadBytes);
+	}
+	m_parallelReady = true;
+	SubmitCommandList_record(false);
+	m_parallelDraws.clear();
+	m_parallelBytes = 0;
 }
 
 #endif // ENABLE_D3D12
