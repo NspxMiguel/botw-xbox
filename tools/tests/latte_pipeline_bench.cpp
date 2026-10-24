@@ -208,7 +208,8 @@ static void LayoutBenchmark()
 			}
 		time[cached] = std::chrono::duration<double, std::milli>(Clock::now() - start).count() / frames;
 	}
-	assert(checksum[0] == checksum[1]);
+	if (checksum[0] != checksum[1])
+		throw std::logic_error("Stage layout benchmark changed dynamic bindings");
 	std::cout << "Synthetic stage translation, production sequence memo: rebuild " << time[0] << " ms/5000 stages; cached " << time[1] << " ms/5000 stages; identical dynamic bindings\n";
 }
 
