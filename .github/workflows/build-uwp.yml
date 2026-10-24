@@ -47,7 +47,10 @@ jobs:
         run: |
           gh release view deps-uwp 2>$null
           if ($LASTEXITCODE -ne 0) { gh release create deps-uwp --prerelease --title 'UWP third-party dependencies' --notes 'vcpkg x64-uwp and x64-windows trees for local game builds. No game data.' }
-          gh release upload deps-uwp vcpkg-uwp-deps.zip --clobber
+          # The builder pins this asset by SHA-256, so it is published once and never replaced.
+          # To refresh dependencies, delete the asset by hand and update VCPKG_SHA256 in tools/builder/botw_builder.py.
+          $assets = gh release view deps-uwp --json assets -q '.assets[].name'
+          if ($assets -notcontains 'vcpkg-uwp-deps.zip') { gh release upload deps-uwp vcpkg-uwp-deps.zip }
           if ($LASTEXITCODE -ne 0) { throw 'Dependency bundle upload failed' }
       - name: Configure MSVC UWP x64 D3D12 runtime and launcher
         run: |
