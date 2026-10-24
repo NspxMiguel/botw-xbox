@@ -158,7 +158,7 @@ No Microsoft license flag was passed and no consent was given on the player's be
 
 The published vcpkg ZIP was streamed through Python's `urllib.request.urlopen` and
 `hashlib.sha256` without writing a copy to disk: **194,538,629 bytes**, **4.25 s**,
-SHA-256 **3b304cbb65d29c08f66ca2de3328855a7b4f7a745187bde6e52a1c8358e0ac6a**.
+SHA-256 **8e74f4df51e8cf6b099ca073510ce28133e099093214172f47298c95e79d91d4 (re-pinned on 2026-10-24 after CI stopped replacing the asset)**.
 That exact hash is pinned in the builder.
 
 The pinned shader tarball was downloaded, hashed and extracted in a temporary

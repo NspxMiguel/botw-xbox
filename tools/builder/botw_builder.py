@@ -36,7 +36,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA = Path.home() / ".botw-builder"
 RELEASE = "https://github.com/NspxMiguel/botw-xbox/releases/download/deps-uwp"
-VCPKG_SHA256 = "3b304cbb65d29c08f66ca2de3328855a7b4f7a745187bde6e52a1c8358e0ac6a"
+VCPKG_SHA256 = "8e74f4df51e8cf6b099ca073510ce28133e099093214172f47298c95e79d91d4"
 FFX_SHA256 = "7b57fd0a3f0e4e0fe24f3bb881f21480754842ff887b96ec9398b857f950e3de"
 PACKS_COMMIT = "975f3759d7837da5a374150347d3202360b13ca3"
 # Last published xwin release with binaries for both macOS architectures.
