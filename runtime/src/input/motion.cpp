@@ -3,6 +3,7 @@
 // its SDL sensor handling (SDLControllerProvider), MPL-2.0, so values match what games expect there.
 #include <atomic>
 #include <cmath>
+#include <chrono>
 #include <cstdlib>
 #include <mutex>
 
@@ -112,39 +113,96 @@ void integrate(float dt) {
     g_valid = true;
 }
 
-std::atomic<bool> g_real_sensor{false}, g_tilt_mode{false};
-float g_tilt[2]{};  // virtual pitch, roll (rad)
+std::atomic<bool> g_tilt_mode{false};
+uint64_t g_real_received_ns = 0, g_virtual_timestamp = 0;
+Quat g_virtual_pose;
+float g_virtual_angles[3]{};
+bool g_virtual_active = false;
 
 void feed(bool gyro, const float data[3], uint64_t ts);
 }  // namespace
 
 void motion_sensor(bool gyro, const float data[3], uint64_t ts) {
-    g_real_sensor.store(true, std::memory_order_relaxed);
+    {
+        std::lock_guard<std::mutex> lock(g_lock);
+        // SDL sensor timestamps and steady_clock have different epochs. Source
+        // freshness must use the same clock as VPAD's virtual samples, not SDL ticks.
+        g_real_received_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                       std::chrono::steady_clock::now().time_since_epoch())
+                                                       .count());
+    }
     feed(gyro, data, ts);
 }
 
 void set_tilt_mode(bool on) { g_tilt_mode.store(on, std::memory_order_relaxed); }
 
-bool virtual_tilt(float sx, float sy, uint64_t ts) {
-    if (g_real_sensor.load(std::memory_order_relaxed)) return false;
-    static const bool forced = [] { const char* e = std::getenv("BOTW_VIRTUAL_TILT"); return e && *e == '1'; }();
-    if (!forced && !g_tilt_mode.load(std::memory_order_relaxed)) sx = sy = 0;  // ease back to flat
-    static uint64_t last = 0;
-    float dt = last ? std::fmin((float)(ts - last) / 1e9f, 0.1f) : 1.0f / 60;
-    last = ts;
-    // ponytail: 40 degree range with a fixed smoothing constant; tune on the Myahm Agana maze.
-    const float range = 0.70f, k = 1 - expf(-dt * 12);
-    float target[2] = {sy * range, sx * range}, rate[2];
-    for (int i = 0; i < 2; i++) {
-        float next = g_tilt[i] + (target[i] - g_tilt[i]) * k;
-        rate[i] = dt > 0 ? (next - g_tilt[i]) / dt : 0;
-        g_tilt[i] = next;
+bool virtual_tilt(float sx, float sy, uint64_t ts, float twist, bool recenter) {
+    std::lock_guard<std::mutex> lock(g_lock);
+    // A disconnected/disabled sensor must not disable Xbox fallback forever.
+    if (g_real_received_ns && (ts <= g_real_received_ns || ts - g_real_received_ns <= 500000000ull)) {
+        g_virtual_timestamp = 0;
+        return false;
     }
-    float p = g_tilt[0], r = g_tilt[1];
-    const float acc[3] = {9.81f * sinf(r) * cosf(p), 9.81f * cosf(r) * cosf(p), 9.81f * sinf(p)};  // flat: +y
-    const float gyro[3] = {rate[0], 0, rate[1]};
-    feed(true, gyro, ts);
-    feed(false, acc, ts + 1);
+    static const bool forced = [] {
+        const char *e = std::getenv("BOTW_VIRTUAL_TILT");
+        return e && *e == '1';
+    }();
+    const bool active = forced || g_tilt_mode.load(std::memory_order_relaxed);
+    const bool reset_pose = !g_virtual_timestamp || recenter || active != g_virtual_active;
+    if (reset_pose) {
+        g_virtual_pose = Quat{};
+        for (auto &angle : g_virtual_angles)
+            angle = 0;
+    }
+    float dt = g_virtual_timestamp && ts > g_virtual_timestamp
+                   ? std::fmin(float(ts - g_virtual_timestamp) / 1e9f, .1f)
+                   : 0.f;
+    g_virtual_timestamp = ts;
+    g_virtual_active = active;
+    auto rate = [active](float axis) {
+        if (!active || !std::isfinite(axis))
+            return 0.f;
+        // Deadzone also covers hosts which do not prefilter their sticks.
+        axis = std::fmax(-1.f, std::fmin(axis, 1.f));
+        return std::fabs(axis) <= .15f ? 0.f : std::copysign((std::fabs(axis) - .15f) / .85f, axis) * kPi / 2;
+    };
+    const float rates[3] = {rate(sy), rate(twist), rate(sx)};
+    if (reset_pose)
+        dt = 0;
+    for (int i = 0; i < 3; ++i) {
+        g_virtual_angles[i] += rates[i] * dt / (2 * kPi);
+        if (rates[i] != 0) {
+            auto rotation = Quat::angle_axis(rates[i] * dt, i == 0, i == 1, i == 2);
+            g_virtual_pose = g_virtual_pose * rotation;
+        }
+    }
+    g_virtual_pose.normalize_xyzw();
+    const auto &q = g_virtual_pose;
+    Motion m{};
+    // VPAD attitude columns in the same x/y/z coordinate system as angular rates.
+    // Keeping these together matters: yaw (triggers) must not change gravity,
+    // while both right-stick axes must tilt it.
+    m.dir[0] = 1 - 2 * (q.y * q.y + q.z * q.z);
+    m.dir[1] = 2 * (q.x * q.y + q.z * q.w);
+    m.dir[2] = 2 * (q.x * q.z - q.y * q.w);
+    m.dir[3] = 2 * (q.x * q.y - q.z * q.w);
+    m.dir[4] = 1 - 2 * (q.x * q.x + q.z * q.z);
+    m.dir[5] = 2 * (q.y * q.z + q.x * q.w);
+    m.dir[6] = 2 * (q.x * q.z + q.y * q.w);
+    m.dir[7] = 2 * (q.y * q.z - q.x * q.w);
+    m.dir[8] = 1 - 2 * (q.x * q.x + q.y * q.y);
+    float acceleration = 0;
+    for (int i = 0; i < 3; ++i) {
+        m.acc[i] = -m.dir[3 * i + 1]; // local gravity, neutral (0, -1, 0)
+        const float delta = g_valid && !reset_pose ? m.acc[i] - g_out.acc[i] : 0.f;
+        acceleration += delta * delta;
+        m.gyro_change[i] = reset_pose ? 0.f : rates[i] / (2 * kPi);
+        m.orientation[i] = g_virtual_angles[i];
+    }
+    m.acc_magnitude = 1;
+    m.acc_acceleration = std::sqrt(acceleration);
+    g_out = m;
+    g_valid = true;
     return true;
 }
 
@@ -181,6 +239,11 @@ void feed(bool gyro, const float data[3], uint64_t ts) {
 void motion_reset() {
     std::lock_guard<std::mutex> l(g_lock);
     g_imu = Mahony{};
+    g_real_received_ns = g_virtual_timestamp = 0;
+    g_virtual_pose = Quat{};
+    g_virtual_active = false;
+    for (auto &angle : g_virtual_angles)
+        angle = 0;
     g_valid = g_has_acc = g_has_gyro = false;
     g_ts_acc = g_ts_gyro = g_ts_integrate = 0;
 }

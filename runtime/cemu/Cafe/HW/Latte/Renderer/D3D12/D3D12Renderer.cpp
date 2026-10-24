@@ -153,6 +153,9 @@ D3D12Renderer::~D3D12Renderer()
 		occlusionQuery_destroyAll();
 		m_imgui.reset();
 		m_pipelineCache.reset();
+#if defined(BOTW_PLATFORM_UWP)
+		ReleaseScanoutSnapshots();
+#endif
 		m_internal.reset();
 		m_deferredReleaser.ReleaseAll();
 	});
@@ -1146,7 +1149,7 @@ void D3D12Renderer::PresentSwapChain(bool mainWindow)
 	if (mainWindow && m_ffx)
 	{
 #if defined(BOTW_PLATFORM_UWP)
-		m_ffx->PreparePresent(swapChain->GetTargetType() == D3D12SwapChain::TargetType::CoreWindow && uwp::quick_menu.requested.load());
+		m_ffx->PreparePresent(swapChain->GetTargetType() == D3D12SwapChain::TargetType::CoreWindow && (uwp::quick_menu.requested.load() || uwp::gamepad_screen.load() != uwp::GamepadScreen::Off));
 #else
 		m_ffx->PreparePresent();
 #endif
@@ -1582,17 +1585,25 @@ void D3D12Renderer::SwapBuffers_record(bool swapTV, bool swapDRC)
 		std::ofstream(m_implicitCacheMarker, std::ios::trunc) << "ok\n";
 		cemuLog_log(LogType::Force, "D3D12: Implicit shader cache: test passed");
 	}
-	if (swapTV && m_swapChainMain)
+#if defined(BOTW_PLATFORM_UWP)
+	// DRC-only titles/guest screen switches must still advance the single TV swapchain.
+	const bool mainSwap = swapTV || swapDRC;
+	if (mainSwap)
+		ComposeGamepadScreen();
+#else
+	const bool mainSwap = swapTV;
+#endif
+	if (mainSwap && m_swapChainMain)
 		PresentSwapChain(true);
 	if (swapDRC && m_swapChainPad)
 		PresentSwapChain(false);
-	if (swapTV && m_ffx)
+	if (mainSwap && m_ffx)
 		m_ffx->EndFrame();
 	if (!swapTV && !swapDRC)
 		SubmitCommandList(false);
 	// All TV/DRC backbuffers have been submitted and presented. Apply the size
 	// requested by the output pass for the next frame, never during acquisition.
-	if (swapTV && m_fsrResizePending && !m_fsrFailed && m_fsrInputWidth && m_fsrInputHeight)
+	if (mainSwap && m_fsrResizePending && !m_fsrFailed && m_fsrInputWidth && m_fsrInputHeight)
 	{
 		m_fsrResizePending = false;
 		try
@@ -3067,6 +3078,9 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		occlusionQuery_updateState_record();
 		break;
 	case BackendPacket::Kind::RegistryRetire:
+#if defined(BOTW_PLATFORM_UWP)
+		m_scanoutFrames.release(packet.resources[0]);
+#endif
 		m_resources.Release(packet.resources[0]);
 		break;
 	case BackendPacket::Kind::UICreate:
@@ -3152,6 +3166,9 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		m_resources.Get<LatteTextureD3D12>(packet.resources[0])->ReleaseNative();
 		break;
 	case BackendPacket::Kind::ViewRelease:
+#if defined(BOTW_PLATFORM_UWP)
+		m_scanoutFrames.release(packet.resources[0]);
+#endif
 		m_resources.Get<LatteTextureViewD3D12>(packet.resources[0])->ReleaseNative();
 		break;
 	case BackendPacket::Kind::FramebufferRelease:
@@ -3589,6 +3606,9 @@ void D3D12Renderer::RetireResource(LattePipeline::ResourceId id)
 {
 	if (m_operations.Recording())
 	{
+#if defined(BOTW_PLATFORM_UWP)
+		m_scanoutFrames.release(id);
+#endif
 		m_resources.Release(id);
 		return;
 	}

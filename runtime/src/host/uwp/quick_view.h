@@ -207,14 +207,16 @@ inline void draw_quick_menu(void *native_device, void *native_queue, void *nativ
             brush->SetColor(art_style::white(opacity));
             text(title, 64 + offset, 40, true);
             for (size_t i = 0; i < rows.size(); ++i) {
-                float y = 108 + float(i) * 56;
+                const float row_step = std::min(56.f, 532.f / std::max(1.f, float(rows.size())));
+                float y = 108 + float(i) * row_step;
                 bool selected = int(i) == focus;
                 brush->SetColor(art_style::white((selected ? 1.f : art_style::quick_surface) * opacity));
                 canvas->FillRoundedRectangle(
-                    D2D1::RoundedRect(D2D1::RectF(64 + offset, y, 650 + offset, y + 50), 25, 25),
+                    D2D1::RoundedRect(D2D1::RectF(64 + offset, y, 650 + offset, y + row_step - 6),
+                                      (row_step - 6) / 2, (row_step - 6) / 2),
                     brush.Get());
                 brush->SetColor(selected ? art_style::black(opacity) : art_style::white(opacity));
-                text(rows[i], 88 + offset, y + 12);
+                text(rows[i], 88 + offset, y + (row_step - 32) / 2);
             }
             brush->SetColor(art_style::white(opacity));
             text(hints, 64, 650);

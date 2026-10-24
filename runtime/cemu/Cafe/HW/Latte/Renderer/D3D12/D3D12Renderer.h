@@ -4,6 +4,9 @@
 // Ported from PrismFox67/Cemu-UWP; see runtime/cemu/VENDORED.md.
 
 #pragma once
+#if defined(BOTW_PLATFORM_UWP)
+#include "../../../../../../src/host/uwp/gamepad_screen.h"
+#endif
 
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteBatchPolicy.h"
 
@@ -424,7 +427,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void occlusionQuery_createHeap_record();
 	struct OutputPacket
 	{
-		LattePipeline::ResourceId view, vertexShader, pixelShader;
+		LattePipeline::ResourceId view, vertexShader, pixelShader, copyVertexShader, copyPixelShader;
 		RendererOutputShader::OutputUniformVariables uniforms[2];
 		sint32 imageX, imageY, imageWidth, imageHeight, inputWidth, inputHeight;
 		uint32 upscaler;
@@ -432,6 +435,21 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	};
 	static_assert(sizeof(OutputPacket) <= 208);
 	void output_record(const OutputPacket &packet, const LattePipeline::Arena &arena);
+	bool output_draw(const OutputPacket &packet, int snapshotTarget = -1, int snapshotSource = -1);
+#if defined(BOTW_PLATFORM_UWP)
+	uwp::ScanoutFrames<OutputPacket> m_scanoutFrames;
+	struct ScanoutSnapshot
+	{
+		ComPtr<ID3D12Resource> resource;
+		D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_RENDER_TARGET;
+		D3D12_CPU_DESCRIPTOR_HANDLE srv{}, rtv{};
+		uint32 width = 0, height = 0;
+	};
+	ScanoutSnapshot m_scanoutSnapshots[2];
+	void CaptureScanout(const OutputPacket &packet);
+	void ReleaseScanoutSnapshots();
+	void ComposeGamepadScreen();
+#endif
 	struct BackendPacket
 	{
 		using Kind = LattePipeline::BackendKind;

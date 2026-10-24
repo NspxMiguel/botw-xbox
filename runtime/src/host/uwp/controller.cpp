@@ -67,6 +67,17 @@ MappedInput Controller::update(const Reading &r, int layout) {
     stick(r.rx, r.ry, out.pad.rx, out.pad.ry);
     return out;
 }
+void apply_motion_controls(input::PadState &pad, const Reading &r, bool active) {
+    pad.virtual_motion = active;
+    if (!active)
+        return;
+    pad.tilt_x = pad.ry;
+    pad.tilt_y = pad.rx;
+    pad.tilt_z = std::isfinite(r.rt - r.lt) ? static_cast<float>(std::clamp(r.rt - r.lt, -1.0, 1.0)) : 0.f;
+    pad.recenter_motion = (pad.buttons & input::BTN_STICK_L) != 0;
+    pad.rx = pad.ry = 0;
+    pad.buttons &= ~(input::BTN_ZL | input::BTN_ZR | input::BTN_STICK_L);
+}
 uint32_t pro_buttons(uint32_t v) {
     const struct {
         uint32_t vpad, pro;

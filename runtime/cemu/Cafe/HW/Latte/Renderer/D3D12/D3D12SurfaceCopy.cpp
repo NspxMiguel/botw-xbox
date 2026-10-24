@@ -79,6 +79,9 @@ void D3D12Renderer::surfaceCopy_init()
 
 void D3D12Renderer::surfaceCopy_shutdown()
 {
+#if defined(BOTW_PLATFORM_UWP)
+	ReleaseScanoutSnapshots();
+#endif
 	m_internal.reset();
 }
 
@@ -105,7 +108,9 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	auto *view = static_cast<LatteTextureViewD3D12 *>(texView);
 	auto *vs = static_cast<RendererShaderD3D12 *>(shader->GetVertexShader());
 	auto *ps = static_cast<RendererShaderD3D12 *>(shader->GetFragmentShader());
-	for (auto *native : {vs, ps})
+	auto *copyVS = static_cast<RendererShaderD3D12 *>(RendererOutputShader::s_copy_shader->GetVertexShader());
+	auto *copyPS = static_cast<RendererShaderD3D12 *>(RendererOutputShader::s_copy_shader->GetFragmentShader());
+	for (auto *native : {vs, ps, copyVS, copyPS})
 		if (!native->recordingId)
 		{
 			native->recordingId = RegisterResource(native);
@@ -120,6 +125,8 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 	packet.view = view->recordingId;
 	packet.vertexShader = vs->recordingId;
 	packet.pixelShader = ps->recordingId;
+	packet.copyVertexShader = copyVS->recordingId;
+	packet.copyPixelShader = copyPS->recordingId;
 	packet.uniforms[0] = shader->FillUniformBlockBuffer(*texView, {imageWidth, imageHeight}, padView);
 	packet.uniforms[1] = shader->FillUniformBlockBuffer(*texView, {inputWidth, inputHeight}, padView);
 	packet.imageX = imageX;
@@ -143,22 +150,156 @@ void D3D12Renderer::DrawBackbufferQuad(LatteTextureView *texView, RendererOutput
 void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipeline::Arena &)
 {
 	m_pipeline.CheckBack();
+#if defined(BOTW_PLATFORM_UWP)
+	CaptureScanout(packet);
+#else
+	output_draw(packet);
+#endif
+}
+
+#if defined(BOTW_PLATFORM_UWP)
+void D3D12Renderer::ReleaseScanoutSnapshots()
+{
+	for (auto &snapshot : m_scanoutSnapshots)
+	{
+		if (snapshot.srv.ptr)
+			m_stagingViewHeap->Free(snapshot.srv);
+		if (snapshot.rtv.ptr)
+			m_stagingRTVHeap->Free(snapshot.rtv);
+		ReleaseResourceDeferred(std::move(snapshot.resource));
+		snapshot = {};
+	}
+	for (auto &frame : m_scanoutFrames.frames)
+		frame.reset();
+}
+
+void D3D12Renderer::CaptureScanout(const OutputPacket &packet)
+{
+	const int index = packet.padView ? 1 : 0;
+	auto &snapshot = m_scanoutSnapshots[index];
+	if (packet.inputWidth <= 0 || packet.inputHeight <= 0)
+		return;
+	if (snapshot.width != uint32(packet.inputWidth) || snapshot.height != uint32(packet.inputHeight))
+	{
+		// Capture at source resolution, not HDMI resolution. This freezes DRC content
+		// even when the guest reuses or retires the original render target before swap.
+		D3D12_RESOURCE_DESC desc{};
+		desc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+		desc.Width = packet.inputWidth;
+		desc.Height = packet.inputHeight;
+		desc.DepthOrArraySize = desc.MipLevels = 1;
+		desc.Format = D3D12SwapChain::kFormat;
+		desc.SampleDesc.Count = 1;
+		desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
+		auto heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
+		ComPtr<ID3D12Resource> resource;
+		D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+															  D3D12_RESOURCE_STATE_RENDER_TARGET, nullptr, IID_PPV_ARGS(&resource)),
+							"Create scanout snapshot");
+		if (snapshot.srv.ptr)
+			m_stagingViewHeap->Free(snapshot.srv);
+		if (snapshot.rtv.ptr)
+			m_stagingRTVHeap->Free(snapshot.rtv);
+		ReleaseResourceDeferred(std::move(snapshot.resource));
+		snapshot = {};
+		m_scanoutFrames.frames[index].reset();
+		snapshot.resource = std::move(resource);
+		snapshot.width = packet.inputWidth;
+		snapshot.height = packet.inputHeight;
+		snapshot.rtv = m_stagingRTVHeap->Allocate();
+		snapshot.srv = m_stagingViewHeap->Allocate();
+		m_device->CreateRenderTargetView(snapshot.resource.Get(), nullptr, snapshot.rtv);
+		m_device->CreateShaderResourceView(snapshot.resource.Get(), nullptr, snapshot.srv);
+	}
+	auto capture = packet;
+	capture.imageX = capture.imageY = 0;
+	capture.imageWidth = packet.inputWidth;
+	capture.imageHeight = packet.inputHeight;
+	capture.uniforms[0] = packet.uniforms[1];
+	capture.upscaler = static_cast<uint32>(fsr::Upscaler::Off);
+	capture.nativeAA = false;
+	capture.clearBackground = false;
+	if (!output_draw(capture, index))
+		return;
+	// Gamma, swizzles and graphic-pack output effects were applied exactly once.
+	// Composition only scales the immutable snapshot, using the plain copy shader.
+	capture.view = {};
+	capture.vertexShader = packet.copyVertexShader;
+	capture.pixelShader = packet.copyPixelShader;
+	for (auto &uniforms : capture.uniforms)
+	{
+		uniforms.applySRGBEncoding = false;
+		uniforms.targetGamma = uniforms.displayGamma = 1.f;
+	}
+	capture.upscaler = packet.upscaler;
+	capture.nativeAA = packet.nativeAA;
+	m_scanoutFrames.store(capture);
+}
+
+void D3D12Renderer::ComposeGamepadScreen()
+{
+	const auto plan = uwp::scanout_plan(uwp::gamepad_screen.load(), m_scanoutFrames.frames[0].has_value(), m_scanoutFrames.frames[1].has_value());
+	if (plan.primary < 0 || !m_swapChainMain)
+		return;
+	auto primary = *m_scanoutFrames.frames[plan.primary];
+	// Refit even retained frames after a resize. Keep DRC's own gamma uniforms.
+	auto fit = [&](OutputPacket &packet, int x, int y, int width, int height) {
+		const auto rect = uwp::gamepad_fit(width, height, packet.inputWidth, packet.inputHeight);
+		packet.imageWidth = rect.width;
+		packet.imageHeight = rect.height;
+		packet.imageX = x + (width - rect.width) / 2;
+		packet.imageY = y + (height - rect.height) / 2;
+		packet.uniforms[0].outputResolution = {(float)rect.width, (float)rect.height};
+	};
+	// Acquire first so pending HDMI/window resizes are applied before computing viewports.
+	if (!AcquireBackbuffer(true))
+		return;
+	fit(primary, 0, 0, m_swapChainMain->GetWidth(), m_swapChainMain->GetHeight());
+	primary.padView = false;
+	primary.clearBackground = true;
+	if (plan.primary == 1)
+	{
+		primary.upscaler = static_cast<uint32>(fsr::Upscaler::Off);
+		primary.nativeAA = false;
+	}
+	output_draw(primary, -1, plan.primary);
+	if (plan.corner)
+	{
+		auto corner = *m_scanoutFrames.frames[1];
+		const auto rect = uwp::gamepad_corner(m_swapChainMain->GetWidth(), m_swapChainMain->GetHeight(), corner.inputWidth, corner.inputHeight);
+		corner.imageX = rect.x;
+		corner.imageY = rect.y;
+		corner.imageWidth = rect.width;
+		corner.imageHeight = rect.height;
+		corner.uniforms[0].outputResolution = {(float)rect.width, (float)rect.height};
+		corner.padView = false;
+		corner.clearBackground = false;
+		corner.upscaler = static_cast<uint32>(fsr::Upscaler::Off);
+		corner.nativeAA = false;
+		output_draw(corner, -1, 1);
+	}
+}
+#endif
+
+bool D3D12Renderer::output_draw(const OutputPacket &packet, int snapshotTarget, int snapshotSource)
+{
+	m_pipeline.CheckBack();
 	draw_drainParallel();
 	const bool padView = packet.padView, clearBackground = packet.clearBackground, useLinearTexFilter = packet.linear;
 	const auto imageX = packet.imageX, imageY = packet.imageY, imageWidth = packet.imageWidth, imageHeight = packet.imageHeight;
 	const auto inputWidth = packet.inputWidth, inputHeight = packet.inputHeight;
-	if (!AcquireBackbuffer(!padView))
-		return;
+	if (snapshotTarget < 0 && !AcquireBackbuffer(!padView))
+		return false;
 	auto *swapChain = GetSwapChainObj(!padView);
-	auto *view = m_resources.Get<LatteTextureViewD3D12>(packet.view);
+	auto *view = snapshotSource < 0 ? m_resources.Get<LatteTextureViewD3D12>(packet.view) : nullptr;
 	auto *vs = m_resources.Get<RendererShaderD3D12>(packet.vertexShader);
 	auto *ps = m_resources.Get<RendererShaderD3D12>(packet.pixelShader);
 	auto *pso = m_pipelineCache->GetInternalPipeline(vs, ps, D3D12SwapChain::kFormat, DXGI_FORMAT_UNKNOWN, false, false);
 	if (!pso)
-		return;
+		return false;
 	const auto requested = static_cast<fsr::Upscaler>(packet.upscaler);
-	bool fsr = !padView && !m_fsrFailed && fsr::should_upscale(requested, inputWidth, inputHeight, imageWidth, imageHeight);
-	fsr = fsr || (!padView && !m_fsrFailed && packet.nativeAA);
+	bool fsr = snapshotTarget < 0 && !padView && !m_fsrFailed && fsr::should_upscale(requested, inputWidth, inputHeight, imageWidth, imageHeight);
+	fsr = fsr || (snapshotTarget < 0 && !padView && !m_fsrFailed && packet.nativeAA);
 	if (fsr && (!m_fsr || !m_fsr->Matches(inputWidth, inputHeight, imageWidth, imageHeight)))
 	{
 		// Keep the user's output filter for this frame; resize between presents.
@@ -175,12 +316,25 @@ void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipelin
 	D3D12_SAMPLER_DESC sampler = _MakeSampler(useLinearTexFilter);
 	const D3D12_GPU_DESCRIPTOR_HANDLE samplerTable = GetSamplerTable(&sampler, 1);
 
-	TransitionTexture(view->GetBaseTexture(), view->GetNativeDefinition().firstMip, view->GetNativeDefinition().numMip, view->GetNativeDefinition().firstSlice, view->GetNativeDefinition().numSlice, LatteTextureD3D12::kShaderReadState);
+#if defined(BOTW_PLATFORM_UWP)
+	if (snapshotTarget >= 0)
+		TransitionResource(m_scanoutSnapshots[snapshotTarget].resource.Get(), m_scanoutSnapshots[snapshotTarget].state, D3D12_RESOURCE_STATE_RENDER_TARGET);
+	if (snapshotSource >= 0)
+		TransitionResource(m_scanoutSnapshots[snapshotSource].resource.Get(), m_scanoutSnapshots[snapshotSource].state, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+#endif
+	if (view)
+		TransitionTexture(view->GetBaseTexture(), view->GetNativeDefinition().firstMip, view->GetNativeDefinition().numMip, view->GetNativeDefinition().firstSlice, view->GetNativeDefinition().numSlice, LatteTextureD3D12::kShaderReadState);
 	FlushBarriers();
 
 	if (!m_state.rootSignatureBound)
 		BindRootSignatureAndHeaps();
-	D3D12_CPU_DESCRIPTOR_HANDLE rtv = fsr ? m_fsr->InputRTV() : swapChain->GetCurrentRTV();
+	D3D12_CPU_DESCRIPTOR_HANDLE rtv{};
+#if defined(BOTW_PLATFORM_UWP)
+	if (snapshotTarget >= 0)
+		rtv = m_scanoutSnapshots[snapshotTarget].rtv;
+	else
+#endif
+		rtv = fsr ? m_fsr->InputRTV() : swapChain->GetCurrentRTV();
 	m_cmdList->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
 	if (clearBackground && !fsr)
 	{
@@ -189,7 +343,7 @@ void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipelin
 	}
 	D3D12_VIEWPORT vp{fsr ? 0.f : (float)imageX, fsr ? 0.f : (float)imageY,
 					  fsr ? (float)inputWidth : (float)imageWidth, fsr ? (float)inputHeight : (float)imageHeight, 0.0f, 1.0f};
-	D3D12_RECT scissor{0, 0, fsr ? inputWidth : (LONG)swapChain->GetWidth(), fsr ? inputHeight : (LONG)swapChain->GetHeight()};
+	D3D12_RECT scissor{0, 0, fsr || snapshotTarget >= 0 ? inputWidth : (LONG)swapChain->GetWidth(), fsr || snapshotTarget >= 0 ? inputHeight : (LONG)swapChain->GetHeight()};
 	m_cmdList->RSSetViewports(1, &vp);
 	m_cmdList->RSSetScissorRects(1, &scissor);
 	m_cmdList->SetPipelineState(pso);
@@ -207,7 +361,14 @@ void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipelin
 		table.cbvSize[reg] = (uint32)sizeof(outputUniforms);
 	}
 	if (sint32 reg = remap.GetSRV(0); reg >= 0)
-		table.srv[reg] = view->GetSRVRGBA();
+	{
+#if defined(BOTW_PLATFORM_UWP)
+		if (snapshotSource >= 0)
+			table.srv[reg] = m_scanoutSnapshots[snapshotSource].srv;
+		else
+#endif
+			table.srv[reg] = view->GetSRVRGBA();
+	}
 	BindStageRootCBVs(table, D3D12Const::Stage::Pixel);
 	m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageTable(D3D12Const::Stage::Pixel), WriteStageTable(table, D3D12Const::Stage::Pixel));
 	m_cmdList->SetGraphicsRootDescriptorTable(D3D12Const::RootParamStageSamplers(D3D12Const::Stage::Pixel), samplerTable);
@@ -218,11 +379,13 @@ void D3D12Renderer::output_record(const OutputPacket &packet, const LattePipelin
 	if (fsr)
 		m_fsr->Draw(*swapChain, imageX, imageY, imageWidth, imageHeight, clearBackground);
 
-	swapChain->SetDefinedContent();
+	if (snapshotTarget < 0)
+		swapChain->SetDefinedContent();
 	InvalidateDrawState();
 	m_hasRecordedWork = true;
-	for (auto id : {packet.view, packet.vertexShader, packet.pixelShader, view->GetBaseTexture()->recordingId})
+	for (auto id : {packet.view, packet.vertexShader, packet.pixelShader, view ? view->GetBaseTexture()->recordingId : LattePipeline::ResourceId{}})
 		m_resources.Use(id, m_operations.ActiveHeader().sequence, GetRecordingSubmissionId());
+	return true;
 }
 
 void D3D12Renderer::surfaceCopy_copySurfaceWithFormatConversion(LatteTexture *sourceTexture, sint32 srcMip, sint32 srcSlice, LatteTexture *destinationTexture, sint32 dstMip, sint32 dstSlice, sint32 width, sint32 height)

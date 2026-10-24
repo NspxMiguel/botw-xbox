@@ -42,6 +42,8 @@ class Controller {
         blocked_ = true;
     }
 };
+// Apparatus mode consumes camera/trigger/recenter inputs while preserving movement and cancel.
+void apply_motion_controls(input::PadState &pad, const Reading &reading, bool active);
 // Wii U Pro Controller button ABI for a padscore adapter. Sticks use the same axes as VPAD.
 uint32_t pro_buttons(uint32_t vpad_buttons);
 } // namespace uwp
