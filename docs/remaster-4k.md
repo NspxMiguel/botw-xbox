@@ -165,7 +165,8 @@ identity. Full initial Remaster recompilation here took **49 s analysis + 23 s
 code generation** (1126 TUs); every variant pays analysis/codegen plus changed-TU
 compile, link, package and install. Initial build has ~1297 Ninja edges; incremental
 cost depends on which PPC writes changed. Shader-only changes can be much smaller;
-do not promise a fixed rebuild time. Ten unique packages serve thirteen captures.
+do not promise a fixed rebuild time. Ten unique packages serve twelve default captures
+and an optional thirteenth 2160p-internal experiment.
 The initial `nice ninja ... -j4` build on this Mac took approximately **18 minutes**
 (1077 s in `.ninja_log`); a subsequent three-object viewport rebuild and link took
 only seconds. A category therefore pays about 72 s for analysis/codegen plus its
@@ -193,8 +194,9 @@ waits 40 s, presses A six times at 8 s intervals, stands still 100 s, then captu
 `end.png` and `runtime.log`. It follows `botw-bench.sh` without its destructive
 output-directory removal. Output must be new. `--only baseline` permits a first
 calibration; `--only internal-2160` is the explicit 4K-internal experiment after
-review. The default full plan includes that experiment; remove it from plan.json
-when memory headroom is inadequate. The tool removes its profiling marker on
+review. The prepared plan includes that experiment, but the runner skips it unless
+`--include-2160` or `--only internal-2160` is supplied. Add `--include-2160` to the dry
+run to inspect all thirteen cases. The tool removes its profiling marker on
 exit, including failed runs. Packages/preferences remain the test configuration.
 
 Before running, choose the same manual save and camera in a scene showing ground,

@@ -85,6 +85,20 @@ class RemasterCheckTests(unittest.TestCase):
                     root / "prepared/plan.json", root / "results", root / "absent-tools"
                 )
             self.assertFalse((root / "results").exists())
+            self.assertEqual(capture.getvalue().count("CASE "), 12)
+            self.assertNotIn("CASE internal-2160:", capture.getvalue())
+            capture = io.StringIO()
+            with (
+                patch("subprocess.run", side_effect=AssertionError("external command")),
+                patch("time.sleep", side_effect=AssertionError("sleep")),
+                contextlib.redirect_stdout(capture),
+            ):
+                run(
+                    root / "prepared/plan.json",
+                    root / "results",
+                    root / "absent-tools",
+                    include_2160=True,
+                )
             self.assertEqual(capture.getvalue().count("CASE "), 13)
             self.assertEqual(capture.getvalue().count("botw-probe.ts"), 13)
             self.assertEqual(capture.getvalue().count("press a"), 13 * 6)

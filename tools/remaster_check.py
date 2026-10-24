@@ -154,7 +154,7 @@ def package_fingerprint(case):
     return snapshot["fingerprint"]
 
 
-def run(plan_path, output, tools, execute=False, only=None):
+def run(plan_path, output, tools, execute=False, only=None, include_2160=False):
     if execute and not os.environ.get("TESTER_LOCK_HELD"):
         # Hold the existing console-wide lock for the entire experiment. The dry
         # run never executes this wrapper (or dp.py, which reads the keychain).
@@ -172,12 +172,21 @@ def run(plan_path, output, tools, execute=False, only=None):
                 str(tools.resolve()),
                 "--execute",
                 *(["--only", only] if only else []),
+                *(["--include-2160"] if include_2160 else []),
             ],
             check=True,
         )
         return
     plan = json.loads(plan_path.read_text())
-    cases = [case for case in plan["cases"] if only is None or case["name"] == only]
+    cases = [
+        case
+        for case in plan["cases"]
+        if (
+            case["name"] == only
+            if only
+            else include_2160 or case["name"] != "internal-2160"
+        )
+    ]
     if not cases:
         raise ValueError(f"Unknown case: {only}")
     if execute:
@@ -476,6 +485,11 @@ def main():
         help="Human-only opt-in: acquire the console lock and access Device Portal",
     )
     bench.add_argument("--only", help="Run a single named case")
+    bench.add_argument(
+        "--include-2160",
+        action="store_true",
+        help="Include the 2160p internal experiment after reviewing baseline memory",
+    )
     summary = commands.add_parser("report")
     summary.add_argument("out", type=Path)
     summary.add_argument(
@@ -489,7 +503,7 @@ def main():
     if args.command == "prepare":
         prepare(args.packs, args.out, args.helper)
     elif args.command == "run":
-        run(args.plan, args.out, args.tools, args.execute, args.only)
+        run(args.plan, args.out, args.tools, args.execute, args.only, args.include_2160)
     elif args.command == "report":
         report(args.out, args.crop)
     else:
