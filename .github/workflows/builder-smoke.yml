@@ -1,0 +1,98 @@
+name: Builder smoke (no game data)
+
+on:
+  push:
+    paths:
+      - ".github/workflows/builder-smoke.yml"
+      - "tools/builder/**"
+      - "tools/pack_appx.py"
+      - "cmake/toolchains/uwp-clang-cl.cmake"
+      - "runtime/src/host/uwp/Package.appxmanifest"
+      - "runtime/src/host/uwp/setup.h"
+  pull_request:
+    paths:
+      - ".github/workflows/builder-smoke.yml"
+      - "tools/builder/**"
+      - "tools/pack_appx.py"
+      - "cmake/toolchains/uwp-clang-cl.cmake"
+      - "runtime/src/host/uwp/Package.appxmanifest"
+      - "runtime/src/host/uwp/setup.h"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: builder-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+# Fresh dependency downloads on every run; no caches, game input, build/install
+# commands or artifact uploads. pytest signs only a disposable synthetic payload.
+jobs:
+  ubuntu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: false
+      - name: Install Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang clang-tools llvm lld cmake ninja-build git openssl libssl-dev zlib1g-dev pkg-config procps
+      - name: Install pinned APPX-capable osslsigncode
+        # Ubuntu's packaged version can predate the APPX directory-order fix.
+        env:
+          SIGNER_ROOT: ${{ runner.temp }}/osslsigncode
+        run: |
+          curl --fail --location --retry 3 https://github.com/mtrojnar/osslsigncode/archive/refs/tags/2.14.tar.gz -o "$RUNNER_TEMP/osslsigncode.tar.gz"
+          echo '0f033fd6069387d2e489fbd2187e62f624764eb8c2758ee94e3e793e5150b5c5  '"$RUNNER_TEMP/osslsigncode.tar.gz" | sha256sum --check
+          mkdir -p "$SIGNER_ROOT"
+          tar -xzf "$RUNNER_TEMP/osslsigncode.tar.gz" -C "$SIGNER_ROOT" --strip-components=1
+          cmake -S "$SIGNER_ROOT" -B "$SIGNER_ROOT/build" -G 'Unix Makefiles' -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build "$SIGNER_ROOT/build" --parallel 4
+          echo "$SIGNER_ROOT/build" >> "$GITHUB_PATH"
+      - name: Doctor
+        run: uv run tools/builder/botw_builder.py doctor
+      - name: Fresh pinned dependency setup
+        # CI-only noninteractive consent, authorized for these disposable jobs.
+        # Players must read the Microsoft notice and give their own consent.
+        run: uv run tools/builder/botw_builder.py setup --data-dir "$RUNNER_TEMP/builder data" --accept-microsoft-license
+      - name: Builder tests (synthetic fixtures only)
+        run: uv run --no-project --with pytest python -m pytest tools/builder/tests -v
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+          enable-cache: false
+      - name: Install full LLVM assembler tools (including PowerPC)
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          cache: false
+          install: mingw-w64-ucrt-x86_64-llvm-tools
+      - name: Expose native LLVM tools to PowerShell
+        env:
+          MSYS2_LOCATION: ${{ steps.msys2.outputs.msys2-location }}
+        run: Add-Content -Path $env:GITHUB_PATH -Value "$env:MSYS2_LOCATION/ucrt64/bin"
+      # The image supplies clang-cl, CMake, Ninja, Git, OpenSSL and SDK
+      # SignTool. Doctor must discover them without a VS developer shell.
+      - name: Doctor
+        run: uv run tools/builder/botw_builder.py doctor
+      - name: Fresh pinned dependency setup
+        # CI-only noninteractive Microsoft consent; never a player default.
+        run: uv run tools/builder/botw_builder.py setup --data-dir "$env:RUNNER_TEMP/builder data" --accept-microsoft-license
+      - name: Builder tests (synthetic fixtures and native SignTool)
+        run: uv run --no-project --with pytest python -m pytest tools/builder/tests -v

@@ -1,4 +1,87 @@
-# Builder validation — 2026-10-23
+# Builder validation
+
+## Windows/Linux smoke coverage — 2026-10-24
+
+`.github/workflows/builder-smoke.yml` adds `ubuntu-latest` and `windows-latest`
+jobs. Each runs doctor, fresh setup with the builder's pinned xwin, vcpkg,
+FidelityFX and graphic-pack dependencies, then the builder pytest suite. Setup's
+data directory contains a space and lives in the runner's temporary directory,
+outside the repository. No game input, gameplay build, console connection,
+artifact upload or dependency cache is used. The signing integration test uses
+only an authored synthetic payload and a disposable certificate.
+
+The workflow's `--accept-microsoft-license` is **CI-only automated consent** for
+these disposable jobs. It must not become a default in player scripts: players
+must read Microsoft's notice and explicitly accept for themselves. No Microsoft
+license was accepted and no Microsoft SDK was downloaded during local validation
+of this change.
+
+Linux installs the distro LLVM tools and builds checksum-pinned osslsigncode
+2.14, because older distro packages lack the APPX directory-order fix. Windows
+uses native SDK SignTool and MSYS2's native UCRT64 `llvm-tools`; the regular
+[LLVM Windows installer build](https://github.com/llvm/llvm-project/blob/llvmorg-20.1.8/llvm/utils/release/build_llvm_release.bat)
+omits PowerPC from its target set and installs only a subset of LLVM tools.
+[MSYS2's LLVM package](https://github.com/msys2/MINGW-packages/blob/master/mingw-w64-llvm/PKGBUILD)
+enables all targets. Doctor now assembles `blr` and checks its encoding, so a
+partial installation fails before a player supplies game data.
+
+Portability fixes covered by regression tests:
+
+- Discover version-suffixed Linux LLVM tools, Windows `.exe` tools, Git's
+  bundled OpenSSL, SDK SignTool and common MSYS2 locations. Forward the discovered
+  tools explicitly to CMake, using forward-slash paths and separate argv entries.
+- Prefer native SignTool on Windows; tolerate unusable osslsigncode executables.
+  The real synthetic signing test now runs with either signer. SignTool signing
+  checks the embedded signature container without importing a certificate into
+  the user's stores; local osslsigncode signing also verifies cryptographically.
+- Override `core.autocrlf`/`core.eol` in dependency clones before checkout, enable
+  Git long paths, and write sparse patterns with LF. A real synthetic Git clone
+  verifies pinned UTF-8/LF bytes survive an initial `core.autocrlf=true` setting.
+  Run the isolated recompiler in explicit UTF-8 mode on Windows.
+- Preserve the Store CRT outside xwin's output and unpack trees, then restore it
+  after splat. The pinned
+  [xwin prep_splat implementation](https://github.com/Jake-Shadle/xwin/blob/0.6.6-rc.2/src/splat.rs)
+  deletes the output CRT tree; the previous copy-before-splat sequence lost the
+  saved libraries on a fresh setup. Mocks reproduce output deletion and cache
+  consumption for Windows, Linux x64 and Linux arm64.
+- Check Windows tasklist CRLF output, POSIX display quoting, paths with spaces,
+  Linux distro install guidance, and CMake cache overrides on the native host.
+
+Local verification on macOS arm64 (Python 3.12.14 and 3.11.16):
+
+```sh
+uv run tools/builder/botw_builder.py doctor
+uv run --no-project --with pytest python -m pytest tools/builder/tests -q
+uv run --no-project --python 3.11 --with pytest python -m pytest tools/builder/tests -q
+uv run --no-project --with pytest --with pillow python -m pytest tools/tests tools/packs/tests -q
+uvx ruff check tools/builder
+uvx ruff format --check tools/builder
+actionlint .github/workflows/builder-smoke.yml
+git diff --check
+```
+
+Builder tests: **75 passed** on each Python version. Other Python tests:
+**45 passed, 33 subtests passed** (Pillow is required by the remaster tests).
+Native host suites: **20 CTest cases passed** across platform, VFS, mods and UWP
+host tests; tilt, pack hooks/dispatch, Latte perf3, pipeline and perf7 tests also
+passed, including their default sanitizer runs. Existing build directories were
+retained. No gameplay recompilation or UWP rebuild was needed for these Python
+and workflow changes.
+
+The real pinned Windows x64 and Linux x64 xwin tarballs were downloaded, hashed
+and extracted locally without executing their binaries. Both matched
+`XWIN_HASHES` and each contains exactly one expected executable; this also checks
+the safe extractor against the actual release layout. No APPX was published.
+
+**Still pending:** the human must push and inspect both smoke jobs. Their results
+are not available from this macOS-host review. `windows-latest` is a Windows
+Server runner, not a Windows 11 desktop; Arch and Fedora install guidance is
+mock-tested, not executed. Full player-dump recompile, CMake compilation/linking,
+SignTool trust verification and Device Portal installation on those hosts remain
+unverified. A human must check certificate acceptance, installation, launcher and
+gameplay on Xbox; no console was contacted.
+
+## Earlier macOS validation — 2026-10-23
 
 A real end-to-end macOS arm64 build from an actual v208 dump succeeded on
 2026-10-23: recompile, CMake, Ninja, staging and signing in **1196.90 s** total
