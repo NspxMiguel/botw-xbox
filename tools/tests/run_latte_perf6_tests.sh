@@ -8,3 +8,7 @@ cxx="${CXX:-clang++}"
   -Itools/tests/d3d12_stubs -Iruntime/cemu \
   tools/tests/latte_perf6_benchmark.cpp -o build/tests/latte_perf6_benchmark
 build/tests/latte_perf6_benchmark
+"$cxx" -std=c++20 -O3 -Wall -Wextra -Werror -pthread \
+  -Itools/tests/d3d12_stubs -Iruntime/cemu \
+  tools/tests/latte_stage_copy_bench.cpp -o build/tests/latte_stage_copy_bench
+build/tests/latte_stage_copy_bench

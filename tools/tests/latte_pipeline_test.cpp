@@ -264,6 +264,7 @@ static void SequenceLayoutTests()
 	{
 		auto dynamic = layouts.Get(D3D12Const::Stage::Vertex, 123, build);
 		assert(builds == 1 && dynamic.textures[0].swizzle == 1);
+		assert(dynamic.layoutIdentity == 1);
 		assert(dynamic.uniforms[0].size == 0 && dynamic.uniformBytes.size == 0);
 		dynamic.uniforms[0] = {draw * 256, 512};
 		dynamic.uniformBytes = {draw * 16, 16};
@@ -274,6 +275,25 @@ static void SequenceLayoutTests()
 	layouts.BeginSequence();
 	assert(layouts.Get(D3D12Const::Stage::Vertex, 124, build).textures[0].swizzle == 3);
 	assert(layouts.Get(D3D12Const::Stage::Pixel, 124, build).textures[0].swizzle == 4);
+	DrawBlock source{}, copied{};
+	source.stageCount = 1;
+	for (uint32_t draw = 0; draw < 2000; ++draw)
+	{
+		if (draw % 17 == 0)
+			layouts.BeginSequence();
+		source.stages[0] = layouts.Get(D3D12Const::Stage::Vertex, 124, build);
+		source.stages[0].uniforms[1] = {draw * 256, 512};
+		source.stages[0].uniformBytes = {draw * 16, 16};
+		DrawBlockCopy{}(copied, source);
+		assert(DrawBlockEqual{}(copied, source));
+		assert(copied.stages[0].uniformBytes.position == draw * 16);
+		assert(copied.stages[0].layoutIdentity == source.stages[0].layoutIdentity);
+	}
+	// Hand-built values have no producer identity and always copy all active data.
+	source.stages[0].layoutIdentity = 0;
+	source.stages[0].textures[0].swizzle = 9999;
+	DrawBlockCopy{}(copied, source);
+	assert(DrawBlockEqual{}(copied, source));
 }
 
 static void LifetimeTests()

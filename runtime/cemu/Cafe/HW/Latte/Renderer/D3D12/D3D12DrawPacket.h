@@ -19,6 +19,8 @@ struct TextureBinding
 };
 struct StageBlock
 {
+	// Unique within this renderer's layout producer; dynamic ranges are excluded.
+	uint64_t layoutIdentity = 0;
 	D3D12Const::Stage stage{};
 	UniformRange uniforms[D3D12Const::kMaxCBVsPerStage]{};
 	TextureBinding textures[D3D12Const::kMaxSRVsPerStage]{};
@@ -43,8 +45,11 @@ class SequenceStageLayouts
 		const auto index = static_cast<size_t>(stage);
 		if (!m_valid[index] || m_shaderIds[index] != shaderId)
 		{
+			if (m_nextIdentity == UINT64_MAX)
+				throw std::overflow_error("Latte stage layout identity exhausted");
 			m_blocks[index] = {};
 			build(m_blocks[index]);
+			m_blocks[index].layoutIdentity = ++m_nextIdentity;
 			m_shaderIds[index] = shaderId;
 			m_valid[index] = true;
 		}
@@ -52,6 +57,7 @@ class SequenceStageLayouts
 	}
 
   private:
+	uint64_t m_nextIdentity = 0;
 	std::array<StageBlock, 3> m_blocks{};
 	std::array<uint64_t, 3> m_shaderIds{};
 	std::array<bool, 3> m_valid{};
@@ -86,8 +92,12 @@ struct DrawBlockCopy
 			d.streamout = s.streamout;
 			d.uniformBytes = s.uniformBytes;
 			std::memcpy(d.uniforms, s.uniforms, sizeof(s.uniforms));
-			std::memcpy(d.textures, s.textures, s.textureCount * sizeof(*s.textures));
-			std::memcpy(d.samplers, s.samplers, s.samplerCount * sizeof(*s.samplers));
+			if (!s.layoutIdentity || d.layoutIdentity != s.layoutIdentity)
+			{
+				std::memcpy(d.textures, s.textures, s.textureCount * sizeof(*s.textures));
+				std::memcpy(d.samplers, s.samplers, s.samplerCount * sizeof(*s.samplers));
+			}
+			d.layoutIdentity = s.layoutIdentity;
 		}
 	}
 };
