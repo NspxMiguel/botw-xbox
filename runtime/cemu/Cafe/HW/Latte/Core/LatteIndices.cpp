@@ -19,6 +19,7 @@ namespace
 {
 constexpr size_t kPersistentEntries = LatteDrawCache::kSmallIndexEntries + LatteDrawCache::kLargeIndexEntries;
 constexpr size_t kIndexWays = LatteDrawCache::kIndexCacheWays;
+constexpr size_t kTransientEntries = 8;
 } // namespace
 
 struct
@@ -42,7 +43,7 @@ struct
 	};
 	// Separate small/large four-way banks retain more geometry without multiplying
 	// the large-entry bound: at most 24 MiB input + 36 MiB output payload.
-	std::array<CacheEntry, kPersistentEntries + 8> entry;
+	std::array<CacheEntry, kPersistentEntries + kTransientEntries> entry;
 	uint64 currentUsageCounter{0};
 	LatteDrawCache::ContentIndex<> contentIndex;
 	// Relocated addresses keep a non-owning hint. Full shape and byte validation
@@ -675,22 +676,40 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 		begin = LatteIndexCache.entry.begin() + slot;
 		end = begin + kIndexWays;
 	}
+	std::array<size_t, std::max(kIndexWays, kTransientEntries) + 1> rejectedSlots;
+	size_t rejectedCount = 0;
+	auto matchesContent = [&](const auto &entry, LatteProfiler::Counter path) {
+		const auto comparison = entry.content.Compare(indexData, inputSize);
+		LatteProfiler::Add(LatteProfiler::Counter::IndexComparedBytes, comparison.comparedBytes);
+		LatteProfiler::Add(path, comparison.comparedBytes);
+		if (comparison.sampleRejected)
+			LatteProfiler::Add(LatteProfiler::Counter::IndexSampleRejects);
+		return comparison.matches;
+	};
 	auto cacheEntry = std::find_if(begin, end, [&](const auto &entry) {
 		if (!entry.lastPtr || entry.key != key)
 			return false;
-		if (validateContent)
-			LatteProfiler::Add(LatteProfiler::Counter::IndexComparedBytes, inputSize);
-		return !validateContent || entry.content.Matches(indexData, inputSize);
+		if (!validateContent || matchesContent(entry, LatteProfiler::Counter::IndexAddressComparedBytes))
+			return true;
+		rejectedSlots[rejectedCount++] = &entry - LatteIndexCache.entry.data();
+		return false;
 	});
 	bool cacheHit = cacheEntry != end;
 	uint64 contentHash = 0;
 	auto tryCandidate = [&](size_t slot) {
+		// A stale address hint and the content directory can both name a bank
+		// candidate already rejected above. Never compare the same bytes twice.
+		if (std::find(rejectedSlots.begin(), rejectedSlots.begin() + rejectedCount, slot) != rejectedSlots.begin() + rejectedCount)
+			return false;
 		auto candidate = LatteIndexCache.entry.begin() + slot;
 		if (!candidate->lastPtr || candidate->key.count != key.count || candidate->key.type != key.type || candidate->key.primitive != key.primitive)
 			return false;
-		LatteProfiler::Add(LatteProfiler::Counter::IndexComparedBytes, inputSize);
-		if (!candidate->content.Matches(indexData, inputSize))
+		if (!matchesContent(*candidate, LatteProfiler::Counter::IndexRelocatedComparedBytes))
+		{
+			if (rejectedCount < rejectedSlots.size())
+				rejectedSlots[rejectedCount++] = slot;
 			return false;
+		}
 		cacheEntry = candidate;
 		LatteProfiler::Add(LatteProfiler::Counter::IndexRelocatedHits);
 		return true;

@@ -571,6 +571,12 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		D3D12_SAMPLER_DESC samplers[D3D12Const::kMaxSamplersPerStage];
 		uint32 samplerCount;
 		D3D12_GPU_DESCRIPTOR_HANDLE samplerTable;
+		const D3D12_SAMPLER_DESC *samplerSource = nullptr;
+		uint64 samplerIdentity = 0;
+		const D3D12_SAMPLER_DESC *SamplerData() const
+		{
+			return samplerSource ? samplerSource : samplers;
+		}
 	};
 	void draw_buildStageBindings(LatteDecompilerShader *shader, RendererShaderD3D12 *hostShader, PreparedStageBindings &out);
 	void draw_acquireSamplerTables(PreparedStageBindings *stages, uint32 count);
@@ -769,14 +775,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 		uint32 size = 0;
 	};
 	UAVCacheEntry m_stageUAVCache[(uint32)D3D12Const::Stage::Count + 1];
-	struct SamplerTableCacheEntry
-	{
-		D3D12_SAMPLER_DESC samplers[D3D12Const::kMaxSamplersPerStage]{};
-		uint32 count = 0;
-		uint64 generation = 0;
-		D3D12_GPU_DESCRIPTOR_HANDLE table{};
-	};
-	SamplerTableCacheEntry m_stageSamplerCache[3];
+	D3D12SamplerTableMemo m_stageSamplerCache[3];
 	struct SamplerDescCacheEntry
 	{
 		std::array<uint32, 13> key{};

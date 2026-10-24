@@ -19,6 +19,11 @@ int main()
 	s_state.last = Clock::now();
 	const auto start = s_state.last;
 	{
+		Scope inactive(Slot::Transport, false);
+		assert(s_state.last == start && s_state.current == Slot::Pm4);
+	}
+	assert(s_state.last == start);
+	{
 		Scope draw(Slot::DrawOther);
 		Scope decode(Slot::DrawStateDecode);
 		const auto beforeSameSlot = s_state.last;

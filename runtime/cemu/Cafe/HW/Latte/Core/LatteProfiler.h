@@ -31,6 +31,27 @@ enum class Slot : size_t
 	DrawCall,
 	RootCBV,
 	Barriers,
+	DrawSetup,
+	ResourcePin,
+	BackendCreate,
+	BackendRelease,
+	BackendUpload,
+	BackendCopy,
+	BackendPresent,
+	BackendQuery,
+	BackendMaintenance,
+	Transport,
+	DescriptorPrepare,
+	DescriptorSamplers,
+	DescriptorLookup,
+	DescriptorCopy,
+	ReplyCreate,
+	ReplyRelease,
+	ReplyPresent,
+	ReplySubmit,
+	ReplyReadback,
+	ReplyOther,
+	BackendReadback,
 	Count,
 	Unaccounted = Count,
 };
@@ -88,6 +109,10 @@ enum class Counter : size_t
 	SubmissionReadback,
 	SubmissionOverflow,
 	DrawBlockReuses,
+	IndexAddressComparedBytes,
+	IndexRelocatedComparedBytes,
+	IndexSampleRejects,
+	AsyncSubmissions,
 	Count,
 };
 
@@ -190,7 +215,7 @@ class ThreadScope
 class Scope
 {
   public:
-	explicit Scope(Slot slot) : m_slot(slot), m_enabled(s_state.enabled && s_state.current != slot)
+	explicit Scope(Slot slot, bool active = true) : m_slot(slot), m_enabled(active && s_state.enabled && s_state.current != slot)
 	{
 		if (!m_enabled)
 			return;

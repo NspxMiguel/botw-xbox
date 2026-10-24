@@ -137,7 +137,10 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 	constexpr std::array<const char *, count> names{
 		"draw-other", "shader-pipeline", "texture-bind", "texture-load", "buffer-sync", "indices",
 		"uniforms", "descriptors", "render-targets", "submit", "pm4",
-		"draw-state", "pipeline-bind", "vertex-buffers", "root-signature", "render-state", "draw-call", "root-cbv", "barriers"};
+		"draw-state", "pipeline-bind", "vertex-buffers", "root-signature", "render-state", "draw-call", "root-cbv", "barriers",
+		"draw-setup", "resource-pin", "backend-create", "backend-release", "backend-upload", "backend-copy",
+		"backend-present", "backend-query", "backend-maintenance", "transport", "descriptor-prepare", "descriptor-samplers",
+		"descriptor-lookup", "descriptor-copy", "reply-create", "reply-release", "reply-present", "reply-submit", "reply-readback", "reply-other", "backend-readback"};
 	std::array<size_t, count> order{};
 	int64_t coveredNs = 0;
 	for (size_t i = 0; i < count; ++i)
@@ -149,12 +152,18 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 		return s_state.timeNs[a] != s_state.timeNs[b] ? s_state.timeNs[a] > s_state.timeNs[b] : a < b;
 	});
 	const double msPerNsPerFrame = 1.0 / (1e6 * frames);
-	const auto ms = [&](Slot slot) { return s_state.timeNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };
-	const auto backMs = [&](Slot slot) { return s_state.backTimeNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };
+	const auto slotMs = [&](const auto &times, Slot slot) {
+		int64_t ns = times[static_cast<size_t>(slot)];
+		if (slot == Slot::Descriptors)
+			for (auto child : {Slot::DescriptorPrepare, Slot::DescriptorSamplers, Slot::DescriptorLookup, Slot::DescriptorCopy})
+				ns += times[static_cast<size_t>(child)];
+		return ns * msPerNsPerFrame;
+	};
+	const auto ms = [&](Slot slot) { return slotMs(s_state.timeNs, slot); };
+	const auto backMs = [&](Slot slot) { return slotMs(s_state.backTimeNs, slot); };
 	int64_t backCategorizedNs = 0;
-	for (const auto slot : {Slot::Descriptors, Slot::RootCBV, Slot::VertexBuffers, Slot::RenderState, Slot::Barriers,
-							Slot::DrawCall, Slot::Submit, Slot::Uniforms, Slot::RenderTargets, Slot::PipelineBind, Slot::RootSignature})
-		backCategorizedNs += s_state.backTimeNs[static_cast<size_t>(slot)];
+	for (auto ns : s_state.backTimeNs)
+		backCategorizedNs += ns;
 	const double backOtherMs = std::max<int64_t>(0, int64_t(s_state.backRecordWallNs) - backCategorizedNs) * msPerNsPerFrame;
 	const auto perFrame = [&](Counter counter) { return (double)s_state.counters[static_cast<size_t>(counter)] / frames; };
 	const double covered = std::clamp(coveredNs / (seconds * 1e9), 0.0, 1.0);
@@ -199,6 +208,19 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				backMs(Slot::Barriers), backMs(Slot::DrawCall), backMs(Slot::Submit), backMs(Slot::Uniforms),
 				backMs(Slot::RenderTargets), backMs(Slot::PipelineBind), backMs(Slot::RootSignature),
 				backOtherMs);
+	// Print every exclusive worker slot, including unexpected ones: new native
+	// operations cannot silently disappear into a hand-maintained residual sum.
+	if (s_state.threaded)
+	{
+		std::string buckets;
+		for (size_t i = 0; i < count; ++i)
+			if (s_state.backTimeNs[i])
+				buckets += fmt::format("{}{} {:.3f}", buckets.empty() ? "" : ", ", names[i], s_state.backTimeNs[i] * msPerNsPerFrame);
+		cemuLog_log(LogType::Force, "Latte back slots (exclusive ms/frame): {}; residual {:.3f}", buckets, backOtherMs);
+	}
+	cemuLog_log(LogType::Force, "Latte replies (ms/frame): create {:.3f}, release {:.3f}, present {:.3f}, submit {:.3f}, readback {:.3f}, other {:.3f}; async-submit/frame {:.1f}; index-address-compared {:.0f} B/frame, index-relocated-compared {:.0f} B/frame, index-sample-reject/frame {:.1f}",
+				ms(Slot::ReplyCreate), ms(Slot::ReplyRelease), ms(Slot::ReplyPresent), ms(Slot::ReplySubmit), ms(Slot::ReplyReadback), ms(Slot::ReplyOther), perFrame(Counter::AsyncSubmissions),
+				perFrame(Counter::IndexAddressComparedBytes), perFrame(Counter::IndexRelocatedComparedBytes), perFrame(Counter::IndexSampleRejects));
 	if (s_state.detailEnabled)
 	{
 		const auto detail = [&](Detail slot) { return s_state.detailNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };

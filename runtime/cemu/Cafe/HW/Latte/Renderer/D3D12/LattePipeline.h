@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
+
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -1231,6 +1233,7 @@ class Stream
 	void ConsumeOperation(Context &context, const Header &header, uint64_t arenaEnd, Record record)
 	{
 		const auto start = m_threaded && m_measureRecording ? Clock::now() : Clock::time_point{};
+		LatteProfiler::Scope transportScope(LatteProfiler::Slot::Transport, m_threaded);
 		NativeScope scope(*this, context);
 		m_activeHeader = header;
 		const bool resultNeeded = m_threaded || m_handler || (header.reserved & 1);

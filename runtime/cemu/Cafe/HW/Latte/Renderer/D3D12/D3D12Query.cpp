@@ -277,6 +277,7 @@ void D3D12Renderer::occlusionQuery_destroyAll()
 
 void D3D12Renderer::query_record(const QueryPacket &packet, const LattePipeline::Arena &)
 {
+	LatteProfiler::Scope recordScope(LatteProfiler::Slot::BackendQuery);
 	m_pipeline.CheckBack();
 	auto *query = m_resources.Get<LatteQueryObjectD3D12>(packet.query);
 	switch (packet.action)

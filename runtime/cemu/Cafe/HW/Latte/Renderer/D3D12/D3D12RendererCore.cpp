@@ -413,7 +413,7 @@ void D3D12Renderer::BindStageRootCBVs(const D3D12StageTableDesc &bindings, D3D12
 
 D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTableDesc &tableDesc, D3D12Const::Stage stage)
 {
-	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DescriptorLookup);
 	using namespace D3D12Const;
 	const auto key = tableDesc.TableKey(stage);
 	auto &last = m_lastViewTable[(uint32)stage];
@@ -434,6 +434,7 @@ D3D12_GPU_DESCRIPTOR_HANDLE D3D12Renderer::WriteStageTable(const D3D12StageTable
 	}
 	LatteProfiler::Add(LatteProfiler::Counter::DescriptorMisses);
 
+	LatteProfiler::Scope copyScope(LatteProfiler::Slot::DescriptorCopy);
 	const UINT tableSize = StageTableSize(stage);
 	auto table = m_gpuViewHeap->AllocateTable(tableSize);
 	// Copy stable CBVs, SRVs and null slots in one call; only changed CBVs need to be created.
@@ -682,7 +683,7 @@ void D3D12Renderer::draw_buildStageBindings(LatteDecompilerShader *shader, Rende
 
 void D3D12Renderer::draw_acquireSamplerTables(PreparedStageBindings *stages, uint32 count)
 {
-	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::DescriptorSamplers);
 	// all tables of a draw have to come from the same generation of the sampler heap
 	for (int attempt = 0; attempt < 2; attempt++)
 	{
@@ -691,21 +692,15 @@ void D3D12Renderer::draw_acquireSamplerTables(PreparedStageBindings *stages, uin
 		{
 			auto &stage = stages[i];
 			auto &cached = m_stageSamplerCache[(uint32)stage.stage];
-			const size_t bytes = stage.samplerCount * sizeof(D3D12_SAMPLER_DESC);
-			if (cached.generation == m_gpuSamplerHeap->GetGeneration() && cached.count == stage.samplerCount &&
-				memcmp(cached.samplers, stage.samplers, bytes) == 0)
+			const auto generation = m_gpuSamplerHeap->GetGeneration();
+			if (const auto *table = cached.Find(stage.samplerIdentity, generation, stage.SamplerData(), stage.samplerCount))
 			{
-				stage.samplerTable = cached.table;
+				stage.samplerTable = *table;
 				continue;
 			}
-			ok = TryGetSamplerTable(stage.samplers, stage.samplerCount, stage.samplerTable);
+			ok = TryGetSamplerTable(stage.SamplerData(), stage.samplerCount, stage.samplerTable);
 			if (ok)
-			{
-				memcpy(cached.samplers, stage.samplers, bytes);
-				cached.count = stage.samplerCount;
-				cached.table = stage.samplerTable;
-				cached.generation = m_gpuSamplerHeap->GetGeneration();
-			}
+				cached.Store(stage.samplerIdentity, generation, stage.SamplerData(), stage.samplerCount, stage.samplerTable);
 		}
 		if (ok)
 			return;
@@ -1238,7 +1233,7 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 
 void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena)
 {
-	LatteProfiler::Scope recordScope(LatteProfiler::Slot::DrawOther);
+	LatteProfiler::Scope recordScope(LatteProfiler::Slot::DrawSetup);
 	m_pipeline.CheckBack();
 	const auto &block = m_drawBlocks.Get(packet.state);
 	auto *pipeline = m_resources.Get<D3D12PipelineInfo>(packet.pipeline);
@@ -1281,16 +1276,19 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 	const uint32 instanceCount = packet.instanceCount, count = packet.count, hostIndexCount = packet.indexCount;
 	const auto hostIndexType = static_cast<INDEX_TYPE>(packet.indexType);
 	const uint32 stageBindingCount = block.stageCount;
-	PreparedStageBindings stageBindings[3]{};
+	PreparedStageBindings stageBindings[3];
 	{
-		LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::DescriptorPrepare);
 		for (uint32 i = 0; i < stageBindingCount; ++i)
 		{
 			const auto &source = block.stages[i];
 			auto &out = stageBindings[i];
 			out.stage = source.stage;
 			out.samplerCount = source.samplerCount;
-			memcpy(out.samplers, source.samplers, out.samplerCount * sizeof(*out.samplers));
+			// The immutable block remains live throughout recording, including a
+			// sampler rollover. Read its active sampler span without copying it.
+			out.samplerSource = source.samplers;
+			out.samplerIdentity = packet.state.value;
 			for (uint32 reg = 0; reg < D3D12Const::kMaxCBVsPerStage; ++reg)
 			{
 				const auto &range = source.uniforms[reg];
@@ -1485,6 +1483,7 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 
 	if (usesStreamout)
 		UAVBarrier(m_xfbRingBuffer.Get());
+	LatteProfiler::Scope pinScope(LatteProfiler::Slot::ResourcePin);
 	// A sampler rollover can have advanced the recording fence after front
 	// pinned the IDs. Retirement must cover the submission that actually uses them.
 	const auto recordedSequence = m_operations.ActiveHeader().sequence, recordingFence = GetRecordingSubmissionId();

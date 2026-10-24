@@ -133,7 +133,10 @@ void LatteTextureReadbackInfoD3D12::Dispatch(uint32 action)
 	}
 	const auto sequence = m_renderer->m_operations.Execute<D3D12Renderer::ReadbackPacket, &D3D12Renderer::readback_record>(m_renderer->m_pipeline, LattePipeline::Opcode::Readback, packet, *m_renderer);
 	if (action >= 2)
+	{
+		LatteProfiler::Scope replyScope(LatteProfiler::Slot::ReplyReadback);
 		m_renderer->m_operations.Wait(sequence);
+	}
 }
 
 void D3D12Renderer::AcceptReadbackResult(const LattePipeline::Completion &completion)
@@ -154,6 +157,7 @@ void D3D12Renderer::AcceptReadbackResult(const LattePipeline::Completion &comple
 
 void D3D12Renderer::readback_record(const ReadbackPacket &packet, const LattePipeline::Arena &)
 {
+	LatteProfiler::Scope recordScope(LatteProfiler::Slot::BackendReadback);
 	m_pipeline.CheckBack();
 	auto *readback = m_resources.Get<LatteTextureReadbackInfoD3D12>(packet.readback);
 	switch (packet.action)

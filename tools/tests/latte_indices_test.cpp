@@ -126,6 +126,14 @@ int main()
 	std::vector<uint16> large(40000, _swapEndianU16(3));
 	Decode(large.data(), large.size());
 	assert(g_renderer->live == 1);
+	// Fill all eight transient slots with previous values of one guest address.
+	// Every candidate can reject on the next mutation without overflowing the
+	// per-lookup duplicate-rejection list.
+	for (uint16 value = 4; value < 20; ++value)
+	{
+		large[100] = _swapEndianU16(value);
+		Decode(large.data(), large.size());
+	}
 	LatteIndices_invalidateOnWait();
 	assert(g_renderer->live == 0);
 	// Large generated outputs are transient too, despite having no input bytes.

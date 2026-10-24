@@ -2808,10 +2808,13 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 {
 	m_pipeline.CheckFront();
 	using Kind = BackendPacket::Kind;
+	// Nonblocking submit/flush packets carry no CPU result. Queue order preserves
+	// their fence and resource dependencies; only waitIdle asks the front to join.
 	const bool needsReply = (opcode == LattePipeline::Opcode::Create && packet.kind != Kind::IndexCreate) ||
 							(opcode == LattePipeline::Opcode::Release && packet.kind != Kind::IndexRelease) ||
 							opcode == LattePipeline::Opcode::Present || opcode == LattePipeline::Opcode::Shutdown ||
-							opcode == LattePipeline::Opcode::Readback || opcode == LattePipeline::Opcode::Submit ||
+							opcode == LattePipeline::Opcode::Readback ||
+							(opcode == LattePipeline::Opcode::Submit && packet.words[0]) ||
 							packet.kind == Kind::UIAcquire || packet.kind == Kind::UIRender || packet.kind == Kind::BeginFrame ||
 							packet.kind == Kind::DebugSnapshot || packet.kind == Kind::SurfaceCopy || packet.kind == Kind::occlusionQuery_flush;
 	const auto sequence = m_operations.Execute<BackendPacket, &D3D12Renderer::RecordBackend>(m_pipeline, opcode, packet, *this, needsReply);
@@ -2820,9 +2823,31 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 	{
 		if (m_pipeline.Threaded() && opcode == LattePipeline::Opcode::Create)
 			LatteProfiler::Add(LatteProfiler::Counter::ResourceCreateReplies);
+		const auto replySlot = [&] {
+			using Opcode = LattePipeline::Opcode;
+			using Slot = LatteProfiler::Slot;
+			switch (opcode)
+			{
+			case Opcode::Create:
+				return Slot::ReplyCreate;
+			case Opcode::Release:
+				return Slot::ReplyRelease;
+			case Opcode::Present:
+				return Slot::ReplyPresent;
+			case Opcode::Submit:
+				return Slot::ReplySubmit;
+			case Opcode::Readback:
+				return Slot::ReplyReadback;
+			default:
+				return Slot::ReplyOther;
+			}
+		}();
+		LatteProfiler::Scope replyScope(replySlot);
 		m_operations.Wait(sequence);
 		reply = m_operations.TakeReply(sequence);
 	}
+	if (!needsReply && opcode == LattePipeline::Opcode::Submit)
+		LatteProfiler::Add(LatteProfiler::Counter::AsyncSubmissions);
 	// Logical destructors publish Release while their front cache entry can
 	// still be on an outer readback/query traversal. Defer cache callbacks
 	// until that traversal has removed the adapter; transport polling is safe.
@@ -2834,7 +2859,51 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 
 void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeline::Arena &arena)
 {
-	LatteProfiler::Scope recordScope(LatteProfiler::Slot::DrawOther);
+	using Slot = LatteProfiler::Slot;
+	using Kind = BackendPacket::Kind;
+	const auto category = [&] {
+		switch (packet.kind)
+		{
+		case Kind::TextureCreate:
+		case Kind::FramebufferCreate:
+		case Kind::QueryHeap:
+		case Kind::BufferInit:
+		case Kind::UICreate:
+			return Slot::BackendCreate;
+		case Kind::TextureRelease:
+		case Kind::ViewRelease:
+		case Kind::FramebufferRelease:
+		case Kind::IndexRelease:
+		case Kind::NativeRelease:
+		case Kind::RegistryRetire:
+		case Kind::UIRelease:
+			return Slot::BackendRelease;
+		case Kind::BufferUpload:
+		case Kind::IndexCreate:
+		case Kind::IndexUpload:
+		case Kind::TexturePlane:
+		case Kind::UIUpload:
+			return Slot::BackendUpload;
+		case Kind::SurfaceCopy:
+		case Kind::texture_copyImageSubData:
+		case Kind::bufferCache_copy:
+		case Kind::bufferCache_copyStreamoutToMainBuffer:
+			return Slot::BackendCopy;
+		case Kind::SwapBuffers:
+		case Kind::DrawEmptyFrame:
+		case Kind::ServicePresent:
+		case Kind::UIAcquire:
+		case Kind::UIRender:
+		case Kind::BeginFrame:
+			return Slot::BackendPresent;
+		case Kind::occlusionQuery_flush:
+		case Kind::occlusionQuery_updateState:
+			return Slot::BackendQuery;
+		default:
+			return Slot::BackendMaintenance;
+		}
+	}();
+	LatteProfiler::Scope recordScope(category);
 	m_pipeline.CheckBack();
 	UpdatePipelineProfile();
 	switch (packet.kind)
@@ -3059,6 +3128,7 @@ void D3D12Renderer::ApplyFrontCompletions()
 
 void D3D12Renderer::WorkerIdle()
 {
+	LatteProfiler::Scope idleScope(LatteProfiler::Slot::BackendMaintenance);
 	m_pipeline.CheckBack();
 	ServicePendingPresent(false);
 	ProcessPadSwapChainShutdown();

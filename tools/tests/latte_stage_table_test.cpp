@@ -48,6 +48,18 @@ int main()
 		volatileBindings.cbvAddress[RootCBVCount(stage)] = 4096;
 		assert(!(volatileBindings.TableKey(stage) == desc.TableKey(stage)));
 	}
+	// A complete 64-bit hash collision must still compare the actual CBV fields.
+	auto collisionA = desc, collisionB = desc;
+	collisionA.cbvAddress[0] = uint64(1) << 40;
+	collisionB.cbvSize[0] = uint32(1) << 8;
+	assert(collisionA.Hash() == collisionB.Hash());
+	assert(!(collisionA == collisionB));
+	D3D12StageTableCache<4> exactCollision;
+	exactCollision.Store(collisionA, {321}, 1, 1);
+	assert(!exactCollision.Find(collisionB, 1, 1));
+	exactCollision.Store(collisionB, {654}, 1, 1);
+	assert(exactCollision.Find(collisionA, 1, 1)->ptr == 321);
+	assert(exactCollision.Find(collisionB, 1, 1)->ptr == 654);
 	D3D12StageTableCache<4> hashCache;
 	assert(!hashCache.Find(desc, 1, 1));
 	hashCache.Store(desc, {77}, 1, 1);
@@ -102,5 +114,21 @@ int main()
 	assert(!bounded.Find(chain[0], 1, 1));
 	for (uint32 i = 1; i < chain.size(); ++i)
 		assert(bounded.Find(chain[i], 1, 1)->ptr == 200 + i);
+	// Identities include slot generations. A changed block or direct pass must
+	// still compare values, and heap rollover invalidates even an unchanged block.
+	D3D12SamplerTableMemo samplers;
+	std::array<D3D12_SAMPLER_DESC, 8> samplerValues{};
+	samplers.Store(1024, 1, samplerValues.data(), samplerValues.size(), {777});
+	assert(samplers.Find(1024, 1, samplerValues.data(), samplerValues.size())->ptr == 777);
+	assert(!samplers.Find(1024, 2, samplerValues.data(), samplerValues.size()));
+	assert(!samplers.Find(1024, 1, samplerValues.data(), samplerValues.size() - 1));
+	auto changedSamplers = samplerValues;
+	changedSamplers[4].words[6] = 16;
+	assert(!samplers.Find(2048, 1, changedSamplers.data(), changedSamplers.size()));
+	assert(!samplers.Find(0, 1, changedSamplers.data(), changedSamplers.size()));
+	assert(samplers.Find(2048, 1, samplerValues.data(), samplerValues.size())->ptr == 777);
+	samplers.Store(2048, 2, changedSamplers.data(), changedSamplers.size(), {888});
+	assert(samplers.Find(2048, 2, changedSamplers.data(), changedSamplers.size())->ptr == 888);
+	assert(!samplers.Find(1024, 2, samplerValues.data(), samplerValues.size()));
 	std::cout << "Production stage table tests passed (all fields, epochs, reset).\n";
 }

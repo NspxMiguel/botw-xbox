@@ -76,9 +76,13 @@ int main()
 	largeB[8191] = _swapEndianU16(321);
 	assert(fingerprint == LatteDrawCache::IndexContentHash(largeB.data(), largeB.size() * 2, uint32(largeB.size()), uint32(LatteIndexType::U16_BE), uint32(LattePrimitiveMode::TRIANGLES)));
 	uploads = g_renderer->uploads;
+	const auto comparedBefore = LatteProfiler::s_state.counters[size_t(LatteProfiler::Counter::IndexComparedBytes)];
 	const auto largeModified = Decode(largeB.data(), uint32(largeB.size()));
 	assert(g_renderer->uploads == uploads + 1);
 	assert(static_cast<uint16 *>(largeModified.mem)[8191] == 321);
+	// The address hint and content directory name the same old allocation.
+	// An unsampled mutation requires exactly one complete comparison, not two.
+	assert(LatteProfiler::s_state.counters[size_t(LatteProfiler::Counter::IndexComparedBytes)] - comparedBefore == largeB.size() * 2);
 	assert(Decode(largeA.data(), uint32(largeA.size())).rendererInternal == largeOriginal);
 	LatteIndices_invalidate(largeA.data(), uint32(largeA.size() * 2));
 	largeB = largeA;
