@@ -37,7 +37,11 @@ class Context
 	}
 	bool Threaded() const
 	{
-		return m_mode == 2;
+		return m_mode >= 2;
+	}
+	bool Parallel() const
+	{
+		return m_mode == 3;
 	}
 	void CheckFront() const
 	{
@@ -150,7 +154,7 @@ class Context
 	std::thread::id m_back;
 	const bool m_checks = EnvironmentFlag("CEMU_LATTE_PIPELINE_CHECKS");
 	const unsigned m_mode = [] { const char *v = std::getenv("CEMU_LATTE_PIPELINE");
-		return v && std::strcmp(v, "2") == 0 ? 2u : EnvironmentFlag("CEMU_LATTE_PIPELINE") ? 1u : 0u; }();
+		return v && std::strcmp(v, "3") == 0 ? 3u : v && std::strcmp(v, "2") == 0 ? 2u : EnvironmentFlag("CEMU_LATTE_PIPELINE") ? 1u : 0u; }();
 	inline static thread_local const Context *s_recording = nullptr;
 	inline static thread_local const Context *s_frontCallback = nullptr;
 	std::atomic<bool> m_backActive{false};

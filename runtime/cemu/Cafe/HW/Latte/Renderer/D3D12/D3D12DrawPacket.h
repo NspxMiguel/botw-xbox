@@ -136,4 +136,27 @@ struct DrawPacket
 	bool streamout = false;
 };
 static_assert(sizeof(DrawPacket) <= 208);
+
+// Own every byte before acknowledging the transport operation. A later front
+// draw may reuse its block slot and wrap the SPSC arena while chunks record.
+struct CapturedDraw
+{
+	DrawPacket packet;
+	DrawBlock block;
+	std::array<std::vector<std::byte>, 3> uniforms;
+	std::vector<std::byte> runtime;
+
+	CapturedDraw(const DrawPacket &source, const DrawBlock &state, const Arena &arena) : packet(source), block(state)
+	{
+		for (uint32_t i = 0; i < state.stageCount; ++i)
+		{
+			if (state.stages[i].uniformReg < 0)
+				continue;
+			const auto bytes = arena.Read(source.uniformBytes[i]);
+			uniforms[i].assign(bytes.begin(), bytes.end());
+		}
+		const auto bytes = arena.Read(source.runtime);
+		runtime.assign(bytes.begin(), bytes.end());
+	}
+};
 } // namespace LattePipeline
