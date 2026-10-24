@@ -442,7 +442,8 @@ def test_cmake_toolchain_discovery_and_cache_overrides(tmp_path, override):
         assert "XWIN_ROOT=" + (tmp_path / "custom xwin").as_posix() in result.stdout
         assert "VCPKG_UWP_ROOT=" + (tmp_path / "custom vcpkg").as_posix() in result.stdout
         assert "XWIN_SDK_INCLUDE_DIR=" + (tmp_path / "custom include").as_posix() in result.stdout
-        assert "CMAKE_C_COMPILER=" + Path(cmake).as_posix() in result.stdout
+        # Windows paths are case-insensitive and CMake may normalise the extension case.
+        assert ("CMAKE_C_COMPILER=" + Path(cmake).as_posix()).lower() in result.stdout.lower()
     else:
         assert "clang-cl" in result.stdout
         assert "lld-link" in result.stdout
