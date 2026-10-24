@@ -289,10 +289,15 @@ class ArtView {
                 return -40 - std::clamp(int((x - 300) / 180), 0, 4);
             if (x >= 48 && x < 276 && y >= 204 && y < 636)
                 return -20 - std::clamp(int((y - 204) / 48), 0, 8);
-            if (x >= 300 && x < 1216 && y >= 200 && y < 640) {
-                int i = int((y - 200) / 230) * 3 + int((x - 300) / 312) + int(store.first(focus));
-                if (i < int(store.cards.size()))
-                    return i;
+            using namespace store_layout;
+            auto top = store.grid_top(focus);
+            if (x >= grid_x && x < grid_x + 3 * (card_w + gap) - gap && y >= top &&
+                y < top + 2 * (card_h + gap) - gap) {
+                auto column = size_t((x - grid_x) / (card_w + gap));
+                auto row = size_t((y - top) / (card_h + gap));
+                auto i = store.card_at(store.first_slot(focus) + row * 3 + column);
+                if (i < store.cards.size())
+                    return int(i);
             }
             return -1;
         }
@@ -605,12 +610,19 @@ class ArtView {
             write(store.category_label(i), 51, y + 4, 220, 32);
             target->SetTransform(before);
         }
-        auto first = store.first(focus);
+        auto first = store.first_slot(focus);
+        if (store.featured_count() && first == 0) {
+            brush->SetColor(ink);
+            write(label(Text::store_featured), grid_x, 220, 900, 24, false, false, true);
+        }
         for (size_t n = 0; n < 6; ++n) {
-            auto i = first + n;
+            auto i = store.card_at(first + n);
+            if (first + n < store.slot(store.featured_count()) && i >= store.cards.size())
+                continue; // The remainder of the featured row stays empty.
             if (i >= store.cards.size() && !store.busy)
                 break;
-            float x = grid_x + float(n % 3) * (card_w + gap), y = grid_y + float(n / 3) * (card_h + gap);
+            float x = grid_x + float(n % 3) * (card_w + gap),
+                  y = store.grid_top(focus) + float(n / 3) * (card_h + gap);
             bool selected = int(i) == focus;
             float grow = selected && !reduced_motion ? float(store_pop.value) * 4 : 0;
             D2D1_MATRIX_3X2_F transform;
@@ -642,7 +654,9 @@ class ArtView {
             write(utf(c.title), x + 13, y + 127, card_w - 26, 32, false, true);
             brush->SetColor(muted);
             std::wstring meta = c.source == "Graphic packs" ? L"GitHub packs" : utf(c.source);
-            if (c.size)
+            if (c.featured)
+                meta = utf(c.author) + L" · " + meta;
+            else if (c.size)
                 meta += L" · " + std::to_wstring(c.size / 1024) + L" KiB";
             else if (c.downloads_count)
                 meta += L" · ↓ " + std::to_wstring(c.downloads_count);

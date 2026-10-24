@@ -2,6 +2,7 @@
 #pragma once
 #include "../../mods/store.h"
 #include "strings.h"
+#include <algorithm>
 #include <optional>
 namespace uwp {
 namespace store_layout {
@@ -17,7 +18,27 @@ struct StoreView {
     std::vector<mods::store::Card> cards;
     std::optional<mods::store::Card> detail;
     float progress = -1;
-    size_t first(int focus) const { return focus < 0 ? 0 : size_t(focus / 6) * 6; }
+    size_t featured_count() const {
+        if (tab != 0 || !query.empty())
+            return 0;
+        return size_t(std::find_if(cards.begin(), cards.end(), [](auto &c) { return !c.featured; }) -
+                      cards.begin());
+    }
+    size_t slot(size_t index) const {
+        auto count = featured_count();
+        return index < count ? index : index + (count + 2) / 3 * 3 - count;
+    }
+    size_t card_at(size_t position) const {
+        auto count = featured_count(), end = (count + 2) / 3 * 3;
+        if (position >= count && position < end)
+            return cards.size();
+        return std::min(position < count ? position : position - end + count, cards.size());
+    }
+    size_t first_slot(int focus) const { return focus < 0 ? 0 : slot(size_t(focus)) / 6 * 6; }
+    size_t first(int focus) const { return card_at(first_slot(focus)); }
+    float grid_top(int focus) const {
+        return store_layout::grid_y + (featured_count() && first_slot(focus) == 0 ? 12.f : 0.f);
+    }
     std::wstring label(Text t) const { return std::wstring(text(t, pt)); }
     std::wstring category_label(int i) const { return label(static_cast<Text>(int(Text::store_all) + i)); }
     std::wstring source_label(int i) const {
@@ -91,27 +112,32 @@ struct StoreView {
             focus = direction == 0 && !cards.empty() ? int(cards.size()) - 1 : -50;
             return;
         }
-        if (error && direction == 2 && focus >= 0 && focus + 3 >= int(cards.size())) {
-            focus = -70;
-            return;
-        }
         if (cards.empty()) {
             focus = -20;
             return;
         }
-        if (direction == 0 && focus < 3) {
+        if (error && direction == 2 && focus >= 0 && slot(size_t(focus)) + 3 > slot(cards.size() - 1)) {
+            focus = -70;
+            return;
+        }
+        auto position = slot(size_t(focus));
+        if (direction == 0 && position < 3) {
             focus = -40;
             return;
         }
-        if (direction == 3 && focus % 3 == 0) {
+        if (direction == 3 && position % 3 == 0) {
             focus = -20 - category;
             return;
         }
-        focus = std::clamp(focus + (direction == 0   ? -3
-                                    : direction == 2 ? 3
-                                    : direction == 3 ? -1
-                                                     : 1),
-                           0, int(cards.size()) - 1);
+        if (direction == 0 || direction == 2) {
+            auto target = direction == 0 ? position - 3 : std::min(position + 3, slot(cards.size() - 1));
+            auto count = featured_count();
+            if (target >= count && target < (count + 2) / 3 * 3)
+                focus = int(count - 1);
+            else
+                focus = int(card_at(target));
+        } else
+            focus = std::clamp(focus + (direction == 3 ? -1 : 1), 0, int(cards.size()) - 1);
     }
 };
 } // namespace uwp

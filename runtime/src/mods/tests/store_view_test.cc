@@ -84,4 +84,39 @@ int main() {
     focus = 0;
     view.navigate(0, focus);
     assert(focus == -20);
+    // A featured row reserves its unused columns without adding selectable phantom cards.
+    view.cards.resize(12);
+    view.cards[0].featured = true;
+    assert(view.featured_count() == 1);
+    assert(view.slot(0) == 0 && view.slot(1) == 3);
+    assert(view.card_at(1) == view.cards.size() && view.card_at(2) == view.cards.size());
+    assert(view.card_at(3) == 1 && view.first(4) == 4);
+    focus = 0;
+    view.navigate(2, focus);
+    assert(focus == 1);
+    view.navigate(1, focus);
+    assert(focus == 2);
+    view.navigate(0, focus);
+    assert(focus == 0);
+    view.navigate(1, focus);
+    assert(focus == 1);
+    view.navigate(3, focus);
+    assert(focus == -20);
+    view.cards[1].featured = true;
+    view.cards[2].featured = true;
+    view.cards[3].featured = true;
+    assert(view.featured_count() == 4 && view.slot(4) == 6);
+    focus = 4;
+    view.navigate(0, focus);
+    assert(focus == 3);
+    view.query = L"voice";
+    assert(view.featured_count() == 0 && view.slot(4) == 4);
+    view.query.clear();
+    view.tab = 1;
+    assert(view.featured_count() == 0);
+    assert(uwp::text(uwp::Text::store_featured, false) == L"Featured");
+    assert(uwp::text(uwp::Text::store_featured, true) == L"Destaques");
+    assert(uwp::text(uwp::Text::translation_offer, true) ==
+           L"Instalar a tradução em português do Brasil (mod da comunidade, baixado do GameBanana)?");
+    assert(!uwp::text(uwp::Text::translation_offer, false).empty());
 }
