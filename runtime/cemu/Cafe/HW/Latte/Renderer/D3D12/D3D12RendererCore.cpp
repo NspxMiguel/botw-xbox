@@ -395,7 +395,7 @@ void D3D12Renderer::BindStageRootCBVs(const D3D12StageTableDesc &bindings, D3D12
 	{
 		// Always replace unused registers with a permanent 64-KiB zero buffer. Keeping
 		// an old upload address could expose retired memory when the next shader changes.
-		const auto address = bindings.cbvAddress[i] ? bindings.cbvAddress[i] : m_zeroConstantBuffer->GetGPUVirtualAddress();
+		const auto address = bindings.cbvAddress[i] ? bindings.cbvAddress[i] : m_zeroConstantBufferAddress;
 		cemu_assert_debug(address % D3D12Const::kCBVAlignment == 0);
 		auto &current = m_state.currentRootCBVs[(uint32)stage][i];
 		if (current == address)
@@ -1218,7 +1218,7 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 	}
 	{
 		LatteProfiler::Scope profileScope(LatteProfiler::Slot::VertexBuffers);
-		const auto baseAddress = m_bufferCache->GetGPUVirtualAddress();
+		const auto baseAddress = m_bufferCacheAddress;
 		for (uint32 i = 0; i < LATTE_MAX_VERTEX_BUFFERS; ++i)
 		{
 			const auto &v = block.vertices[i];

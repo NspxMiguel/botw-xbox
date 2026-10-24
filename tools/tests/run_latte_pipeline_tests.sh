@@ -21,4 +21,6 @@ if [[ "${LATTE_PIPELINE_BENCHMARK:-1}" == 1 ]]; then
   build/tests/latte_pipeline_bench
   "$cxx" -std=c++20 -O3 -Wall -Wextra -Werror -pthread -Iruntime/cemu tools/tests/latte_worker_bench.cpp -o build/tests/latte_worker_bench
   build/tests/latte_worker_bench
+  "$cxx" -std=c++20 -O3 -Wall -Wextra -Werror -pthread -Iruntime/cemu tools/tests/latte_recording_bench.cpp -o build/tests/latte_recording_bench
+  build/tests/latte_recording_bench
 fi

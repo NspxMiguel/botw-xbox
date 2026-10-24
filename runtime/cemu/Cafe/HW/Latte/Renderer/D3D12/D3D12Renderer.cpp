@@ -370,6 +370,7 @@ void D3D12Renderer::CreateNullDescriptors()
 	D3D12_ThrowIfFailed(m_zeroConstantBuffer->Map(0, &noRead, &zeroData), "Map (zero constants)");
 	memset(zeroData, 0, D3D12Const::kMaxConstantBufferBytes);
 	m_zeroConstantBuffer->Unmap(0, nullptr);
+	m_zeroConstantBufferAddress = m_zeroConstantBuffer->GetGPUVirtualAddress();
 	m_nullCBV = m_stagingViewHeap->Allocate();
 	D3D12_CONSTANT_BUFFER_VIEW_DESC cbvDesc{};
 	cbvDesc.BufferLocation = 0;
@@ -2220,6 +2221,7 @@ void D3D12Renderer::bufferCache_init_record(uint32 bufferSize, uint32 streamoutS
 	D3D12_HEAP_PROPERTIES heap = D3D12_HeapProps(D3D12_HEAP_TYPE_DEFAULT);
 	D3D12_RESOURCE_DESC desc = D3D12_BufferDesc((uint64)bufferSize + D3D12Const::kMaxConstantBufferBytes);
 	D3D12_ThrowIfFailed(m_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&m_bufferCache)), "CreateCommittedResource (buffer cache)");
+	m_bufferCacheAddress = m_bufferCache->GetGPUVirtualAddress();
 	D3D12_SetDebugName(m_bufferCache.Get(), "BufferCache");
 	m_bufferCacheState = D3D12_RESOURCE_STATE_COMMON;
 
@@ -2312,7 +2314,7 @@ void D3D12Renderer::buffer_bindVertexBuffers(std::span<BindBufferParam> bindings
 
 void D3D12Renderer::buffer_bindVertexBuffers_record(std::span<const BindBufferParam> bindings)
 {
-	const D3D12_GPU_VIRTUAL_ADDRESS base = m_bufferCache->GetGPUVirtualAddress();
+	const D3D12_GPU_VIRTUAL_ADDRESS base = m_bufferCacheAddress;
 	for (const auto &b : bindings)
 	{
 		cemu_assert_debug(b.index < LATTE_MAX_VERTEX_BUFFERS);
@@ -2360,7 +2362,7 @@ D3D12_GPU_VIRTUAL_ADDRESS D3D12Renderer::GetAlignedUniformBufferAddress(uint32 c
 	// CBVs must start at 256 byte boundaries. GX2 requires the same alignment for uniform blocks and the buffer cache
 	// preserves it, so this is the common case
 	if ((cacheOffset % D3D12Const::kCBVAlignment) == 0 && (uint64)cacheOffset + AlignUp<uint32>(size, D3D12Const::kCBVAlignment) <= m_bufferCacheSize)
-		return m_bufferCache->GetGPUVirtualAddress() + cacheOffset;
+		return m_bufferCacheAddress + cacheOffset;
 	// otherwise copy the data to an aligned location in the scratch buffer
 	cemuLog_logDebugOnce(LogType::Force, "D3D12: Unaligned uniform buffer at cache offset {:08x}", cacheOffset);
 	const uint32 alignedSize = AlignUp<uint32>(size, D3D12Const::kCBVAlignment);
@@ -2408,13 +2410,8 @@ Renderer::IndexAllocation D3D12Renderer::indexData_reserveIndexMemory(uint32 siz
 		m_indexDecodeScratch.resize(size);
 	resource->size = size;
 	resource->id = RegisterResource(resource.get());
-	BackendPacket packet{};
-	packet.kind = BackendPacket::Kind::IndexCreate;
-	packet.resources[0] = resource->id;
-	packet.words[0] = size;
-	auto *result = resource.release();
-	ExecuteBackend(LattePipeline::Opcode::Create, packet);
-	return {m_indexDecodeScratch.data(), result};
+	// Native creation travels with the first upload, not as a separate packet.
+	return {m_indexDecodeScratch.data(), resource.release()};
 }
 
 void D3D12Renderer::indexData_releaseIndexMemory(IndexAllocation &allocation)
@@ -2452,11 +2449,12 @@ void D3D12Renderer::indexData_uploadIndexMemory(IndexAllocation &allocation)
 	{
 		const uint32 bytes = std::min<uint32>(resource->size - copied, static_cast<uint32>(m_operations.Staging().Capacity()));
 		BackendPacket packet{};
-		packet.kind = BackendPacket::Kind::IndexUpload;
+		packet.kind = copied == 0 ? BackendPacket::Kind::IndexCreate : BackendPacket::Kind::IndexUpload;
 		packet.resources[0] = resource->id;
 		packet.words[0] = copied;
+		packet.words[1] = resource->size;
 		packet.bytes = StageBytes(static_cast<const uint8 *>(allocation.mem) + copied, bytes);
-		ExecuteBackend(LattePipeline::Opcode::IndexUpload, packet);
+		ExecuteBackend(copied == 0 ? LattePipeline::Opcode::Create : LattePipeline::Opcode::IndexUpload, packet);
 		copied += bytes;
 	}
 	allocation.mem = nullptr;
@@ -2957,15 +2955,15 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		bufferCache_upload_record(bytes.data(), static_cast<uint32>(bytes.size()), packet.words[0]);
 		break;
 	}
-	case BackendPacket::Kind::IndexCreate: {
-		auto *index = m_resources.Get<IndexResource>(packet.resources[0]);
-		index->native = m_indexAllocator->Allocate(packet.words[0], 4);
-		if (!index->native)
-			throw std::runtime_error("Latte native index allocation failed");
-		break;
-	}
+	case BackendPacket::Kind::IndexCreate:
 	case BackendPacket::Kind::IndexUpload: {
 		auto *index = m_resources.Get<IndexResource>(packet.resources[0]);
+		if (packet.kind == BackendPacket::Kind::IndexCreate)
+		{
+			index->native = m_indexAllocator->Allocate(packet.words[1], 4);
+			if (!index->native)
+				throw std::runtime_error("Latte native index allocation failed");
+		}
 		const auto bytes = arena.Read(packet.bytes);
 		memcpy(index->native->cpuPtr + packet.words[0], bytes.data(), bytes.size());
 		LatteProfiler::Add(LatteProfiler::Counter::UploadBytes, bytes.size());

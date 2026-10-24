@@ -638,6 +638,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullRTV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullCBV{};
 	ComPtr<ID3D12Resource> m_zeroConstantBuffer;
+	D3D12_GPU_VIRTUAL_ADDRESS m_zeroConstantBufferAddress = 0;
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullUAV{};
 	D3D12_CPU_DESCRIPTOR_HANDLE m_nullSRV1D{}, m_nullSRV2D{}, m_nullSRV2DArray{}, m_nullSRVCubeArray{}, m_nullSRV3D{};
 
@@ -648,6 +649,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	D3D12DeferredReleaser m_deferredReleaser;
 
 	ComPtr<ID3D12Resource> m_bufferCache;
+	D3D12_GPU_VIRTUAL_ADDRESS m_bufferCacheAddress = 0;
 	D3D12_RESOURCE_STATES m_bufferCacheState = D3D12_RESOURCE_STATE_COMMON;
 	uint32 m_bufferCacheSize = 0;
 	ComPtr<ID3D12Resource> m_bufferCacheScratch; // used for overlapping copies and unaligned uniform buffers

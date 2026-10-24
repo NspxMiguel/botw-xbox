@@ -28,9 +28,10 @@ struct IndexRecorder
 			if (stream.ActiveHeader().reserved & 1)
 				stream.Result().words[0] = 1;
 		}
-		else if (work.action == 1)
+		else if (work.action == 1 || work.action == 4)
 		{
 			auto *index = registry.Get<Index>(work.id);
+			// Action 4 models native creation with its first immutable upload.
 			const auto bytes = arena.Read(work.bytes);
 			assert(bytes.size() == index->native.size());
 			memcpy(index->native.data(), bytes.data(), bytes.size());
@@ -56,6 +57,7 @@ struct IndexRecorder
 int main(int argc, char **argv)
 {
 	const bool synchronous = argc > 1 && std::strcmp(argv[1], "sync") == 0;
+	const bool split = synchronous || (argc > 1 && std::strcmp(argv[1], "split") == 0);
 	setenv("CEMU_LATTE_PIPELINE", "2", 1);
 	Context context;
 	Stream stream;
@@ -89,11 +91,12 @@ int main(int argc, char **argv)
 			auto *index = new IndexRecorder::Index;
 			const auto id = recorder.registry.Insert(index);
 			index->id = id;
-			execute(Opcode::Create, {id, {}, 0}, synchronous);
+			if (split)
+				execute(Opcode::Create, {id, {}, 0}, synchronous);
 			Span bytes;
 			while (!stream.Staging().Copy(input, bytes))
 				stream.WaitCapacity();
-			execute(Opcode::IndexUpload, {id, bytes, 1});
+			execute(split ? Opcode::IndexUpload : Opcode::Create, {id, bytes, split ? 1u : 4u});
 			execute(Opcode::Draw, {id, {}, 2});
 			execute(Opcode::Release, {id, {}, 3}, synchronous);
 		}
@@ -102,5 +105,7 @@ int main(int argc, char **argv)
 	stream.Stop(context, recorder);
 	const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / frames;
 	assert(recorder.draws == frames * draws && recorder.uploads == frames * misses);
-	std::cout << (synchronous ? "Synchronous" : "Asynchronous") << " worker index churn: " << ms << " ms/5000 draws; " << waits / frames << " replies/frame; reply wait " << stream.Metrics().replyWaitNs / (1e6 * frames) << " ms/frame; capacity wait " << stream.Metrics().backpressureNs / (1e6 * frames) << " ms/frame\n";
+	std::cout << (synchronous ? "Synchronous" : split ? "Split asynchronous"
+													  : "Fused asynchronous")
+			  << " worker index churn: " << ms << " ms/5000 draws; " << waits / frames << " replies/frame; reply wait " << stream.Metrics().replyWaitNs / (1e6 * frames) << " ms/frame; capacity wait " << stream.Metrics().backpressureNs / (1e6 * frames) << " ms/frame\n";
 }

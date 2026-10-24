@@ -265,17 +265,25 @@ class Registry
 		if (!id)
 			return;
 		Get<void>(id);
+		m_retiring.push_back(id.slot);
 		m_entries[id.slot].retiring = true;
 	}
 	void Retire(uint64_t consumed, uint64_t completed, std::vector<ResourceId> *ready = nullptr)
 	{
+		// Only the recorder owns this list. Do not scan every live scene resource
+		// or contend with front-side Insert when nothing is awaiting retirement.
+		if (m_retiring.empty())
+			return;
 		std::lock_guard lock(m_allocationMutex);
-		const auto count = m_count.load(std::memory_order_acquire);
-		for (uint32_t i = 0; i < count; ++i)
+		size_t pending = 0;
+		for (const auto i : m_retiring)
 		{
 			auto &e = m_entries[i];
-			if (!e.retiring || !e.object || e.lastSequence > consumed || e.lastFence > completed)
+			if (e.lastSequence > consumed || e.lastFence > completed)
+			{
+				m_retiring[pending++] = i;
 				continue;
+			}
 			e.object = nullptr;
 			e.retiring = false;
 			// Never wrap a generation into an old valid ID.
@@ -288,6 +296,7 @@ class Registry
 					m_free.push_back(i);
 			}
 		}
+		m_retiring.resize(pending);
 	}
 
 	// Threaded retirement transfers free generations through reverse messages.
@@ -313,6 +322,7 @@ class Registry
 	std::unique_ptr<Entry[]> m_entries;
 	std::atomic<uint32_t> m_count{0};
 	std::vector<uint32_t> m_free;
+	std::vector<uint32_t> m_retiring;
 	std::mutex m_allocationMutex;
 };
 
