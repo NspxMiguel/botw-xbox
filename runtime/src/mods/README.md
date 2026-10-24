@@ -56,6 +56,12 @@ The silver launcher store uses `store.h` / `store.cpp`. A source implements
 `search(query, category, page)` and `files(card)`, with an injected HTTP transport.
 GameBanana (game 5866), Cemu community graphic packs, HTTPS links and local/USB
 folders share cards, categories, version/date comparisons and installation receipts.
+The portable local adapter scans `botw-mods/`, legacy `mods/` and drive-root layouts.
+UWP uses its brokered adapter in `host/uwp/usb_mods.h` for discovery and streaming,
+then stages copies in LocalState/mods before enabling content replacements. It never
+passes a USB path to the overlay. Unplugging or cancelling during import rolls back;
+a completed install no longer needs the drive. Rules-only graphic packs retain the
+rebuild lock. See the host README for permissions and console acceptance checks.
 Both legacy `BreathOfTheWild_*` directories and modern
 `src/BreathOfTheWild/<pack>` identities are supported. Graphics rules and presets
 are pinned to the release tag; `rules.txt`'s `version` is a **format** version,

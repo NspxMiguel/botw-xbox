@@ -137,12 +137,14 @@ IAsyncAction store_refresh(uint64_t generation, int source, std::string query, b
                 } apartment;
                 Result out;
                 try {
-                    std::vector<std::filesystem::path> drives;
-                    if (id == 4)
-                        for (auto drive : KnownFolders::RemovableDevices().GetFoldersAsync().get())
-                            drives.emplace_back(drive.Path().c_str());
+                    if (id == 4) {
+                        for (auto &candidate : uwp::usb_mods::scan())
+                            if (mods::store::matches(candidate.card, query, mods::store::Category::all))
+                                out.page.cards.push_back(std::move(candidate.card));
+                        return out;
+                    }
                     auto adapter = mods::store::make_source(static_cast<mods::store::SourceId>(id), fetch,
-                                                            root, drives, force);
+                                                            root, {}, force);
                     for (unsigned page = 1; page <= 4; ++page) {
                         auto result = adapter->search(id == 2 ? "" : query, mods::store::Category::all, page);
                         out.error |= !result.error.empty();
@@ -218,7 +220,8 @@ IAsyncAction store_refresh(uint64_t generation, int source, std::string query, b
             home.store.busy = !pending.empty();
             home.store.offline |= result.page.offline;
             home.store.error |= result.error;
-            home.store.status = home.store.error ? home.store.label(uwp::Text::store_error) : L"";
+            if (!transfer_active)
+                home.store.status = home.store.error ? home.store.label(uwp::Text::store_error) : L"";
             store_filter();
         }
         co_await resume_background();
@@ -371,36 +374,102 @@ IAsyncAction store_install(mods::store::Card card, bool enable = false) {
             co_return;
         auto dispatcher = host_window.Dispatcher();
         auto root = store_root;
-        bool failed = false;
-        auto destination = co_await local.GetFolderAsync(L"mods");
+        bool failed = false, graphics = false;
+        transfer = {};
+        transfer_active = true;
+        view.progress = 0;
+        view.status = view.label(uwp::Text::usb_mod_copy);
         co_await resume_background();
         StorageFolder target{nullptr};
         try {
-            auto source = StorageFolder::GetFolderFromPathAsync(to_hstring(card.id)).get();
+            transfer.check();
+            auto candidates = uwp::usb_mods::scan(&transfer);
+            auto found = std::find_if(candidates.begin(), candidates.end(),
+                                      [&](auto &candidate) { return candidate.card.id == card.id; });
+            if (found == candidates.end() || !found->folder)
+                throw std::runtime_error("USB mod removed; rescan the source");
+            auto source = found->folder;
+            auto destination = local.GetFolderAsync(L"mods").get();
+            // Hidden staging is never discoverable by ModCatalog, including after an interrupted boot.
             target =
-                destination
-                    .CreateFolderAsync(to_hstring(card.title), CreationCollisionOption::GenerateUniqueName)
+                destination.CreateFolderAsync(L".usb-import", CreationCollisionOption::GenerateUniqueName)
                     .get();
-            if (!copy_mod_tree(source, target))
-                throw std::runtime_error("Empty mod");
             auto path = std::filesystem::path(target.Path().c_str());
-            if (std::filesystem::exists(path / "rules.txt")) {
+            std::vector<uwp::usb_mods::File> files;
+            uint64_t total = 0, done = 0;
+            uwp::usb_mods::enumerate(source, {}, files, total, transfer);
+            if (files.empty())
+                throw std::runtime_error("No accessible mod files");
+            if (std::filesystem::space(root).available < total)
+                throw std::runtime_error("Insufficient space for USB mod");
+            // Publish progress at most once per 1%, rather than queueing every small file on the UI.
+            int previous_percent = -1;
+            auto progress = [this, dispatcher, &previous_percent](uint64_t n, uint64_t size) {
+                int percent = size ? int(100.0 * double(n) / double(size)) : 100;
+                if (percent == previous_percent)
+                    return;
+                previous_percent = percent;
+                dispatcher.RunAsync(CoreDispatcherPriority::Normal, [this, percent] {
+                    if (home.store.active && transfer_active)
+                        home.store.progress = float(percent) / 100;
+                });
+            };
+            for (auto &file : files)
+                uwp::usb_mods::copy(file, path / file.relative, transfer, done, total, progress);
+            bool content = std::filesystem::is_directory(path / "content") ||
+                           std::filesystem::is_directory(path / "aoc");
+            graphics = !content && std::filesystem::is_regular_file(path / "rules.txt");
+            if (!content && !graphics)
+                throw std::runtime_error("No accessible mod content");
+            if (graphics) {
                 std::ofstream marker(path / ".imported-graphics");
                 marker << "Recompile to apply this graphic pack.\n";
+                marker.close();
+                if (!marker)
+                    throw std::runtime_error("Cannot write graphics marker");
             }
             mods::store::save_receipt(path, card);
-        } catch (...) {
+            transfer.check();
+            target.RenameAsync(source.Name(), NameCollisionOption::GenerateUniqueName).get();
+            path = std::filesystem::path(target.Path().c_str());
+            mods::store::finish_install(path, [&] {
+                mods::ModCatalog catalog;
+                catalog.load(root, packs::compiled_plan());
+                if (!graphics && !catalog.setEnabled("file:" + to_string(target.Name()), true))
+                    throw std::runtime_error("Cannot enable imported mod");
+                catalog.save();
+            });
+        } catch (hresult_error const &e) {
+            LOG("mods: USB import failed (0x%08lx %ls)", static_cast<unsigned long>(e.code().value),
+                e.message().c_str());
             failed = true;
-            if (target) {
-                try {
-                    target.DeleteAsync(StorageDeleteOption::PermanentDelete).get();
-                } catch (...) {
-                }
+        } catch (std::exception const &e) {
+            LOG("mods: USB import failed: %s", e.what());
+            failed = true;
+        } catch (...) {
+            LOG("mods: USB import failed");
+            failed = true;
+        }
+        if (failed && target) {
+            try {
+                target.DeleteAsync(StorageDeleteOption::PermanentDelete).get();
+            } catch (...) {
+                LOG("mods: could not clean incomplete USB import");
             }
         }
+        transfer.set_pending(nullptr);
         co_await resume_foreground(dispatcher);
-        view.status = view.label(failed ? uwp::Text::import_failed : uwp::Text::installed);
+        transfer_active = false;
+        view.progress = -1;
+        view.status = view.label(failed && transfer.cancelled ? uwp::Text::usb_mod_cancelled
+                                 : failed                     ? uwp::Text::usb_mod_failed
+                                 : graphics                   ? uwp::Text::usb_mod_rebuild
+                                                              : uwp::Text::store_installed_enabled);
         co_await store_load_installed();
+        if (!failed && view.detail)
+            for (auto &installed : store_installed)
+                if (installed.id == card.id && installed.source == card.source)
+                    view.detail = installed;
         co_return;
     }
     auto file = card.downloads[size_t(std::clamp(view.file, 0, int(card.downloads.size()) - 1))];
@@ -420,10 +489,23 @@ IAsyncAction store_install(mods::store::Card card, bool enable = false) {
     co_await resume_background();
     try {
         std::filesystem::create_directories(temporary.parent_path());
-        if (card.source == "USB")
-            std::filesystem::copy_file(std::filesystem::path(to_hstring(file.url).c_str()), temporary,
-                                       std::filesystem::copy_options::overwrite_existing);
-        else {
+        if (card.source == "USB") {
+            auto candidates = uwp::usb_mods::scan(&transfer);
+            auto found = std::find_if(candidates.begin(), candidates.end(),
+                                      [&](auto &candidate) { return candidate.card.id == card.id; });
+            if (found == candidates.end() || !found->archive)
+                throw std::runtime_error("USB archive removed; rescan the source");
+            uint64_t done = 0;
+            auto size = found->archive.GetBasicPropertiesAsync().get().Size();
+            uwp::usb_mods::copy({found->archive, {}, size}, temporary, transfer, done, size,
+                                [this, dispatcher](uint64_t n, uint64_t total) {
+                                    dispatcher.RunAsync(CoreDispatcherPriority::Normal, [this, n, total] {
+                                        if (home.store.active && transfer_active)
+                                            home.store.progress =
+                                                total ? float(double(n) / double(total)) : 0;
+                                    });
+                                });
+        } else {
             uwp::download_mod(file, temporary, transfer, [this, dispatcher](uint64_t n, uint64_t total) {
                 dispatcher.RunAsync(CoreDispatcherPriority::Normal, [this, n, total] {
                     if (home.store.active && transfer_active)

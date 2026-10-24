@@ -179,6 +179,10 @@ enum class Text {
     translation_offer,
     not_now,
     store_installed_enabled,
+    usb_mod_copy,
+    usb_mod_cancelled,
+    usb_mod_failed,
+    usb_mod_rebuild,
     count
 };
 inline std::wstring_view text(Text key, bool pt) {
@@ -401,8 +405,8 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Preview unavailable", L"Sem prévia"},
          {L"Y: enter a mod URL, GameBanana or GitHub release page",
           L"Y: digite um URL de mod, página do GameBanana ou release do GitHub"},
-         {L"Connect a USB drive with a mods/ folder. A: scan again",
-          L"Conecte um USB com uma pasta mods/. A: buscar novamente"},
+         {L"Put mod folders in USB:/botw-mods/. A: scan again",
+          L"Coloque as pastas dos mods em USB:/botw-mods/. A: buscar novamente"},
          {L"Loading catalog…", L"Carregando catálogo…"},
          {L"Installed", L"Instalado"},
          {L"Update", L"Atualizar"},
@@ -423,7 +427,15 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Install the Brazilian Portuguese translation (community mod, downloaded from GameBanana)?",
           L"Instalar a tradução em português do Brasil (mod da comunidade, baixado do GameBanana)?"},
          {L"Not now", L"Agora não"},
-         {L"Installed and enabled.", L"Instalado e ativado."}}};
+         {L"Installed and enabled.", L"Instalado e ativado."},
+         {L"Copying mod to internal storage… B: cancel · Keep the USB connected",
+          L"Copiando mod para o armazenamento interno… B: cancelar · Mantenha o USB conectado"},
+         {L"Import cancelled. The mod was not enabled.", L"Importação cancelada. O mod não foi ativado."},
+         {L"Could not import the mod. Reconnect the USB, check free space, then scan and try again.",
+          L"Não foi possível importar o mod. Reconecte o USB, confira o espaço livre, busque e tente "
+          L"novamente."},
+         {L"Graphic pack imported. Recompile to apply shaders and patches.",
+          L"Pacote gráfico importado. Recompile para aplicar shaders e patches."}}};
     return table.at(static_cast<size_t>(key))[pt ? 1 : 0];
 }
 } // namespace uwp

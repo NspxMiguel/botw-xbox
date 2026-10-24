@@ -180,16 +180,33 @@ network/audio/controller behavior still require an Xbox run.
 
 ## USB mod import
 
-Import scans each removable drive's `mods/` folder (or drive root) for immediate
-folders containing `content/` or `aoc/`. If no folder is copied, a folder picker
-accepts a mod folder or a parent containing mod folders. All copy operations use
-brokered StorageFolder/StorageFile APIs on a background thread, never a USB CRT
-path. Copies go to LocalState/mods with unique names; installed mods and enabled.txt
-are preserved. Incomplete copies are removed when an import fails. Imported mods
-start disabled so the player can review and enable them. Errors offer a retry path.
-The removable manifest permissions still filter accessible file types: use the
-picker fallback when direct enumeration cannot see all files. Validate complete
-translation/voice imports on Xbox with the real SDK and storage permissions.
+The pre-boot store's **USB / local** source lists immediate mod folders under
+`<USB>:/botw-mods/`. Legacy `mods/` and drive-root layouts remain supported.
+Discovery and reads use `KnownFolders.RemovableDevices` and brokered
+`StorageFolder` / `StorageFile` APIs on workers; USB paths are session identities,
+never CRT read paths. `content/`, `aoc/` and `rules.txt` are recognized without case
+sensitivity. ZIP files also use brokered reads before the normal archive installer.
+
+Install copies a folder to a hidden LocalState/mods staging directory, shows byte
+progress and accepts B/Escape to cancel. File reads are bounded to 1 MiB and pending
+reads can be cancelled. The manager checks free space before copying. It publishes
+a unique folder name and enables content replacements only after the copy and
+receipt succeed. Source `enabled.txt` and launcher metadata are ignored. Failure,
+cancellation or unplugging the drive removes the incomplete copy and preserves
+existing mods and selection. Installed copies continue working after USB removal;
+a stale source card reports a reconnect/rescan hint rather than enabling a USB path.
+Copies interrupted by process termination remain hidden and disabled.
+
+Rules-only graphic packs are listed and imported with the existing
+`.imported-graphics` rebuild lock: downloaded PPC patches and shaders cannot be
+activated by a static executable. Content wrappers follow the same behavior as
+archive installs. Changes apply on the next game boot.
+
+The live-game legacy Import action also recognizes `botw-mods/`, keeps imports
+disabled for review, and retains its desktop picker fallback. Removable access is
+still filtered by manifest file associations; validate complete translation/voice
+imports on Xbox with the actual storage permissions. No unrestricted filesystem
+capability is requested.
 
 The portable catalog tests exercise saved selection against the real VFS reader.
 The existing syntax script compiles the updated Direct2D screen through
