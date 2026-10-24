@@ -8,30 +8,36 @@ emulated: the game code is translated ahead of time into C++ and compiled.
 
 **Source only.** This repository contains no game files, keys, recompiled game code or Nintendo assets,
 and there is no download. A playable package can only be built locally from your own legally obtained
-copy of the game. Nothing will be published for players before the project reaches its release bar:
-60 fps locked, no shader-compilation stutter, 4K and the visual upgrades in place.
+copy of the game, with the **BotW Builder** ([BUILDING.md](BUILDING.md)): it recompiles your dump on your
+own PC or Mac and installs the result on your Xbox in Developer Mode.
+
+**v0.1.0 is a preview.** It is playable, but it does not run at 60 fps yet. See the status below.
 
 ## Status (measured on Xbox Series X, October 2026)
 
 | | |
 | --- | --- |
 | Performance | **40 fps** at a fixed spot on the Great Plateau with the Remaster preset (44 fps without graphic packs). Not 60 yet. |
-| Resolution | Native 1080p rendering. Upscaling is off by default; FSR 1 or FSR 3.1 can be chosen in the quick menu. |
+| Resolution | 4K output on 4K TVs (1440p internal), 1080p on 1080p TVs. Upscaling is off by default; FSR 1 or FSR 3.1 can be chosen in the quick menu. |
 | Bottleneck | The CPU thread that turns the game's GPU commands into Direct3D 12 work (~26 ms per frame, ~5,400 draws). The GPU is mostly idle. |
-| Series S | Not tested on real hardware. |
+| Series S | Detected automatically with lighter defaults (900p). Not tested on real hardware. |
 
 **Works:**
 - boot to gameplay, saves and gamepad input;
 - in-app settings and a mods store;
 - a custom dashboard cover, via the BotW Helper desktop companion;
 - an in-app video recorder;
-- a debug overlay showing fps, frame time and memory.
+- a debug overlay showing fps, frame time and memory;
+- the Wii U GamePad screen on the TV (quick menu: corner or swap; hold View to swap);
+- motion controls without a gyro: View + R3 turns the right stick into tilt for motion puzzles.
 
 **Known issues**
 - Below 60 fps in demanding areas.
 - The "Remaster" graphic-pack preset (FPS++, shadows, draw distance, reflections) is compiled in, but not every category is verified on the console yet.
 - Shaders are precompiled at boot; the first minutes after boot are not smooth.
-- The Wii U GamePad screen is not shown on the TV yet.
+- Motion mode is verified on the console, but not yet inside a tilt shrine.
+- 4K output is implemented but only verified on a 1080p TV so far.
+- New and not yet verified on the console: importing mods from a USB drive, and the setup offer for the Brazilian Portuguese translation (a community mod downloaded from GameBanana).
 
 **60 fps:** splitting that thread into two or more overlapping threads was built and measured
 ([docs/latte-pipeline-phase8.md](docs/latte-pipeline-phase8.md)) but is not faster yet, so the direct
@@ -78,31 +84,36 @@ CPU: o código do jogo é traduzido antes para C++ e compilado.
 
 **Só código-fonte.** Este repositório não tem arquivos do jogo, chaves, código do jogo recompilado nem
 material da Nintendo, e não há download. Um pacote jogável só pode ser montado no seu computador, a
-partir da sua própria cópia legal do jogo. Nada será publicado para jogar antes de o projeto chegar ao
-ponto de lançamento: 60 fps cravados, sem travadas de compilação de shader, 4K e as melhorias visuais.
+partir da sua própria cópia legal do jogo, com o **BotW Builder** ([BUILDING.md](BUILDING.md#português-brasileiro)):
+ele recompila a sua cópia no seu PC ou Mac e instala o resultado no seu Xbox em Modo Desenvolvedor.
+
+**A v0.1.0 é uma prévia.** Dá para jogar, mas ainda não roda a 60 fps. Veja a situação abaixo.
 
 ## Situação (medida no Xbox Series X, outubro de 2026)
 
 | | |
 | --- | --- |
 | Desempenho | **40 fps** num ponto fixo do Planalto Esquecido com o preset Remaster (44 fps sem packs gráficos). Ainda não é 60. |
-| Resolução | 1080p nativo. Upscaling desligado por padrão; FSR 1 ou FSR 3.1 podem ser escolhidos no menu rápido. |
+| Resolução | Saída 4K em TVs 4K (1440p por dentro), 1080p em TVs 1080p. Upscaling desligado por padrão; FSR 1 ou FSR 3.1 podem ser escolhidos no menu rápido. |
 | Gargalo | A thread da CPU que transforma os comandos de GPU do jogo em Direct3D 12 (~26 ms por quadro, ~5.400 desenhos). A GPU fica quase parada. |
-| Series S | Ainda não testado no aparelho. |
+| Series S | Reconhecido automaticamente, com padrões mais leves (900p). Ainda não testado no aparelho. |
 
 **Funciona:**
 - abrir até o gameplay, saves e controle;
 - configurações no app e loja de mods;
 - capa personalizada no painel do Xbox, pelo BotW Helper;
 - gravador de vídeo;
-- painel de debug com fps, tempo de quadro e memória.
+- painel de debug com fps, tempo de quadro e memória;
+- a tela do Wii U GamePad na TV (menu rápido: canto ou troca; segure View para trocar);
+- controle de movimento sem giroscópio: View + R3 faz o analógico direito inclinar nos quebra-cabeças.
 
 **Problemas conhecidos**
 - Abaixo de 60 fps em áreas pesadas.
 - O preset "Remaster" de packs gráficos (FPS++, sombras, distância de visão, reflexos) já é compilado junto, mas nem toda categoria foi conferida no console.
 - Os shaders são pré-compilados ao abrir; os primeiros minutos não são lisos.
-- Mods em pendrive ainda não são lidos.
-- A tela do Wii U GamePad ainda não aparece na TV.
+- O modo movimento foi conferido no console, mas ainda não dentro de um santuário de inclinar.
+- A saída 4K está pronta, mas só foi conferida numa TV 1080p até agora.
+- Novos e ainda não conferidos no console: importar mods do pendrive e a oferta da tradução em português do Brasil na configuração (mod da comunidade, baixado do GameBanana).
 
 **60 fps:** dividir essa thread em duas ou mais threads ao mesmo tempo foi feito e medido
 ([docs/latte-pipeline-phase8.md](docs/latte-pipeline-phase8.md)), mas ainda não ficou mais rápido, então
