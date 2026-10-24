@@ -35,3 +35,7 @@ PEDIDOS.md
 CONTRATO.md
 IDEIAS.md
 DESIGN.md
+
+# Local signed test packages and CMake runtime staging.
+/pkg/
+/stage-game/

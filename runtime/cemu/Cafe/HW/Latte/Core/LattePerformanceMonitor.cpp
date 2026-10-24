@@ -162,7 +162,7 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				"Latte profile: {:.2f}s, {} game frames, {:.1f} draws/frame; ms/frame: draw-total {:.3f} (inclusive), "
 				"draw-other {:.3f}, shader-pipeline {:.3f}, texture-bind {:.3f}, texture-load {:.3f}, buffer-sync {:.3f}, "
 				"indices {:.3f}, uniforms {:.3f}, descriptors {:.3f}, render-targets {:.3f}, submit {:.3f}, pm4 {:.3f}, "
-				"draw-state {:.3f}, pipeline-bind {:.3f}, vertex-buffers {:.3f}, root-signature {:.3f}, render-state {:.3f}, draw-call {:.3f}; "
+				"draw-state {:.3f}, pipeline-bind {:.3f}, vertex-buffers {:.3f}, root-signature {:.3f}, render-state {:.3f}, draw-call {:.3f}, root-cbv {:.3f}, barriers {:.3f}; "
 				"top: {} {:.3f}, {} {:.3f}, {} {:.3f}; covered {:.1f}%, unaccounted {:.1f}% ({:.3f} ms/frame); "
 				"pipeline-miss/frame {:.2f}, texture-new/frame {:.2f}, texture-upload {:.0f} B/frame, buffer-upload {:.0f} B/frame; "
 				"descriptor-hit/frame {:.1f}, descriptor-fast/frame {:.1f}, descriptor-miss/frame {:.1f}; root-cbv-set/frame {:.1f}, root-cbv-skip/frame {:.1f}; "
@@ -176,7 +176,7 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				seconds, frames, perFrame(Counter::Draws), s_state.drawTotalNs * msPerNsPerFrame,
 				ms(Slot::DrawOther), ms(Slot::ShaderPipeline), ms(Slot::TextureBinding), ms(Slot::TextureLoad), ms(Slot::BufferSync),
 				ms(Slot::Indices), ms(Slot::Uniforms), ms(Slot::Descriptors), ms(Slot::RenderTargets), ms(Slot::Submit), ms(Slot::Pm4),
-				ms(Slot::DrawStateDecode), ms(Slot::PipelineBind), ms(Slot::VertexBuffers), ms(Slot::RootSignature), ms(Slot::RenderState), ms(Slot::DrawCall),
+				ms(Slot::DrawStateDecode), ms(Slot::PipelineBind), ms(Slot::VertexBuffers), ms(Slot::RootSignature), ms(Slot::RenderState), ms(Slot::DrawCall), ms(Slot::RootCBV), ms(Slot::Barriers),
 				names[order[0]], s_state.timeNs[order[0]] * msPerNsPerFrame,
 				names[order[1]], s_state.timeNs[order[1]] * msPerNsPerFrame,
 				names[order[2]], s_state.timeNs[order[2]] * msPerNsPerFrame,
