@@ -190,6 +190,7 @@ static void LayoutBenchmark()
 	for (const bool cached : {false, true})
 	{
 		SequenceStageLayouts layouts;
+		StageBlock block{};
 		const auto start = Clock::now();
 		for (uint32_t frame = 0; frame < frames; ++frame)
 			for (uint32_t draw = 0; draw < draws; ++draw)
@@ -197,9 +198,16 @@ static void LayoutBenchmark()
 				if (draw % 4 == 0)
 					layouts.BeginSequence();
 				const uint32_t seed = draw / 4;
-				StageBlock block;
 				if (cached)
-					block = layouts.Get(D3D12Const::Stage::Vertex, 1, [&](StageBlock &out) { BuildLayout(out, seed); });
+				{
+					bool built = false;
+					const auto &layout = layouts.Get(D3D12Const::Stage::Vertex, 1, [&](StageBlock &out) {
+						built = true;
+						BuildLayout(out, seed);
+					});
+					if (built)
+						block = layout;
+				}
 				else
 					BuildLayout(block, seed);
 				block.uniforms[0] = {draw * 256, 512};

@@ -1025,7 +1025,7 @@ void D3D12Renderer::draw_prepareStage(LatteDecompilerShader *shader, LattePipeli
 	const auto &remap = native->GetBindingRemap();
 	auto &mapping = shader->resourceMapping;
 	bool built = false;
-	out = m_frontStageLayouts.Get(stage, native->GetUniqueId(), [&](LattePipeline::StageBlock &out) {
+	const auto &layout = m_frontStageLayouts.Get(stage, native->GetUniqueId(), [&](LattePipeline::StageBlock &out) {
 		built = true;
 		out.stage = stage;
 		out.samplerCount = std::max<uint32>(remap.srvCount, 1);
@@ -1068,6 +1068,10 @@ void D3D12Renderer::draw_prepareStage(LatteDecompilerShader *shader, LattePipeli
 		if (mapping.uniformVarsBufferBindingPoint >= 0)
 			out.uniformReg = remap.GetCBV(mapping.uniformVarsBufferBindingPoint);
 	});
+	// The persistent front block already contains this layout on a memo hit.
+	// Sequence/shader/view changes clear the memo before reusing a destination.
+	if (built)
+		out = layout;
 	LatteProfiler::Add(built ? LatteProfiler::Counter::TextureStageMisses : LatteProfiler::Counter::TextureStageHits);
 	// Buffer-cache offsets and per-draw uniforms can change inside a sequence.
 	for (uint32 i = 0; i < LATTE_NUM_MAX_UNIFORM_BUFFERS; ++i)
