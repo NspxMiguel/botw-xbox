@@ -244,7 +244,7 @@ void D3D12Renderer::occlusionQuery_updateState_record()
 bool D3D12Renderer::HasActiveOcclusionQuery() const
 {
 	return std::any_of(m_occlusionQueries.active.begin(), m_occlusionQueries.active.end(),
-		[](const auto *query) { return query->m_hasActiveQuery; });
+					   [](const auto *query) { return query->m_hasActiveQuery; });
 }
 
 void D3D12Renderer::occlusionQuery_notifyEndCommandList()

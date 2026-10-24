@@ -167,12 +167,17 @@ public:
 		void* rendererInternal; // for renderer use
 	};
 
-	// Optional immutable capture for unexpanded index streams. The caller still
-	// needs the raw maximum immediately to synchronize guest vertex ranges.
-	// On success, allocation.mem borrows captured input until the caller stores
-	// its exact CPU shadow; it must then clear that pointer before caching.
-	virtual bool indexData_captureIndexMemory(const void *, uint32, uint32, bool, IndexAllocation &, uint32 &) { return false; }
-	virtual IndexAllocation indexData_reserveIndexMemory(uint32 size) = 0;
+        // Optional immutable capture for unexpanded index streams. The caller
+        // still needs the raw maximum immediately to synchronize guest vertex
+        // ranges. On success, allocation.mem borrows captured input until the
+        // caller stores its exact CPU shadow; it must then clear that pointer
+        // before caching.
+        virtual bool indexData_captureIndexMemory(const void *, uint32, uint32,
+                                                  bool, IndexAllocation &,
+                                                  uint32 &) {
+          return false;
+        }
+        virtual IndexAllocation indexData_reserveIndexMemory(uint32 size) = 0;
 	virtual void indexData_releaseIndexMemory(IndexAllocation& allocation) = 0;
 	virtual void indexData_uploadIndexMemory(IndexAllocation& allocation) = 0;
 

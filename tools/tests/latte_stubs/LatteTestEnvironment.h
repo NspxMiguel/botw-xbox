@@ -1,6 +1,6 @@
 #pragma once
-#include <functional>
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteDeferredIndex.h"
+#include <functional>
 
 #include <algorithm>
 #include <cassert>
@@ -80,37 +80,42 @@ struct Renderer
 	struct Allocation
 	{
 		std::vector<uint8> bytes;
-		std::shared_ptr<LattePipeline::DeferredIndex> deferred;
-	};
+                std::shared_ptr<LattePipeline::DeferredIndex> deferred;
+        };
 	RendererAPI api = RendererAPI::D3D12;
-	bool deferIndexConversion = false;
-	std::function<void()> capturedIndexHook;
-	std::vector<std::byte> indexCaptureScratch;
-	uint32 uploads = 0;
+        bool deferIndexConversion = false;
+        std::function<void()> capturedIndexHook;
+        std::vector<std::byte> indexCaptureScratch;
+        uint32 uploads = 0;
 	uint32 releases = 0;
 	uint32 live = 0;
 	RendererAPI GetType() const
 	{
 		return api;
 	}
-	bool indexData_captureIndexMemory(const void *data, uint32 size, uint32 width, bool bigEndian, IndexAllocation &out, uint32 &maximum)
-	{
-		if (!deferIndexConversion || size > 64 * 1024)
-			return false;
-		const auto source = std::span{static_cast<const std::byte *>(data), size};
-		indexCaptureScratch.assign(source.begin(), source.end());
-		const auto bytes = std::span{indexCaptureScratch};
-		maximum = LattePipeline::DeferredIndex::Maximum(bytes, width, bigEndian);
-		out = indexData_reserveIndexMemory(size);
-		auto *allocation = static_cast<Allocation *>(out.rendererInternal);
-		allocation->deferred = std::make_shared<LattePipeline::DeferredIndex>(bytes, width, bigEndian, out.mem);
-		out.mem = indexCaptureScratch.data();
-		if (capturedIndexHook)
-			capturedIndexHook();
-		++uploads;
-		return true;
-	}
-	IndexAllocation indexData_reserveIndexMemory(uint32 size)
+        bool indexData_captureIndexMemory(const void *data, uint32 size,
+                                          uint32 width, bool bigEndian,
+                                          IndexAllocation &out,
+                                          uint32 &maximum) {
+          if (!deferIndexConversion || size > 64 * 1024)
+            return false;
+          const auto source =
+              std::span{static_cast<const std::byte *>(data), size};
+          indexCaptureScratch.assign(source.begin(), source.end());
+          const auto bytes = std::span{indexCaptureScratch};
+          maximum =
+              LattePipeline::DeferredIndex::Maximum(bytes, width, bigEndian);
+          out = indexData_reserveIndexMemory(size);
+          auto *allocation = static_cast<Allocation *>(out.rendererInternal);
+          allocation->deferred = std::make_shared<LattePipeline::DeferredIndex>(
+              bytes, width, bigEndian, out.mem);
+          out.mem = indexCaptureScratch.data();
+          if (capturedIndexHook)
+            capturedIndexHook();
+          ++uploads;
+          return true;
+        }
+        IndexAllocation indexData_reserveIndexMemory(uint32 size)
 	{
 		auto *allocation = new Allocation;
 		allocation->bytes.resize(size);

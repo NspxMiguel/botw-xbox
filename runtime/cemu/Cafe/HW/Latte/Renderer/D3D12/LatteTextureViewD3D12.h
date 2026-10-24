@@ -49,7 +49,10 @@ class LatteTextureViewD3D12 : public LatteTextureView
 	}
 
 	// staging (non shader-visible) SRV for the given GPU7 sampler swizzle (SQ_TEX_RESOURCE_WORD4)
-	bool RequiresSliceCopy() const { return m_usesSliceCopy; }
+	bool RequiresSliceCopy() const
+	{
+		return m_usesSliceCopy;
+	}
 	void RefreshForSampling()
 	{
 		if (m_usesSliceCopy)

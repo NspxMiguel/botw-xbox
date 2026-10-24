@@ -138,25 +138,27 @@ int main()
 	for (size_t i = 0; i < back.timeNs.size(); ++i)
 		back.timeNs[i] = 100 + i;
 	back.counters[size_t(Counter::RootCBVSets)] = 19;
-	back.chunkBusyNs = {101, 202, 303, 404};
-	back.chunkCriticalPathNs = 505;
-	back.chunkCount = 4;
-	back.chunkBatches = 1;
-	const auto frontSlots = s_state.timeNs;
+        back.chunkBusyNs = {101, 202, 303, 404};
+        back.chunkCriticalPathNs = 505;
+        back.chunkCount = 4;
+        back.chunkBatches = 1;
+        const auto frontSlots = s_state.timeNs;
 	AcceptBackProfile(back);
 	assert(s_state.timeNs == frontSlots);
 	assert(s_state.backTimeNs == back.timeNs);
-	assert(s_state.chunkBusyNs == back.chunkBusyNs);
-	assert(s_state.chunkCriticalPathNs == 505 && s_state.chunkCount == 4 && s_state.chunkBatches == 1);
-	assert(s_state.counters[size_t(Counter::RootCBVSets)] == 19);
+        assert(s_state.chunkBusyNs == back.chunkBusyNs);
+        assert(s_state.chunkCriticalPathNs == 505 && s_state.chunkCount == 4 &&
+               s_state.chunkBatches == 1);
+        assert(s_state.counters[size_t(Counter::RootCBVSets)] == 19);
 	Reset(Clock::now());
 	for (auto ns : s_state.backTimeNs)
 		assert(ns == 0);
-	for (auto ns : s_state.chunkBusyNs)
-		assert(ns == 0);
-	assert(s_state.chunkCriticalPathNs == 0 && s_state.chunkCount == 0 && s_state.chunkBatches == 0);
+        for (auto ns : s_state.chunkBusyNs)
+          assert(ns == 0);
+        assert(s_state.chunkCriticalPathNs == 0 && s_state.chunkCount == 0 &&
+               s_state.chunkBatches == 0);
 
-	s_state.enabled = false;
+        s_state.enabled = false;
 	Add(Counter::DescriptorHits);
 	assert(s_state.counters[static_cast<size_t>(Counter::DescriptorHits)] == 0);
 	const auto disabledTime = s_state.last;

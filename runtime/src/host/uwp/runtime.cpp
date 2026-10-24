@@ -145,7 +145,8 @@ bool prepare_runtime(const std::string &game, const std::string &user) {
         std::string mode((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
         const auto first = mode.find_first_not_of(" \t\r\n");
         const auto last = mode.find_last_not_of(" \t\r\n");
-        const auto selected = first == std::string::npos ? std::string{} : mode.substr(first, last - first + 1);
+        const auto selected =
+            first == std::string::npos ? std::string{} : mode.substr(first, last - first + 1);
         _putenv_s("CEMU_LATTE_PIPELINE", selected == "3" ? "3" : selected == "2" ? "2" : "1");
     }
     try {

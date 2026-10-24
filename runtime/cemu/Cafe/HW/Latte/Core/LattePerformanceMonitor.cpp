@@ -221,17 +221,35 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 	cemuLog_log(LogType::Force, "Latte replies (ms/frame): create {:.3f}, release {:.3f}, present {:.3f}, submit {:.3f}, readback {:.3f}, other {:.3f}; async-submit/frame {:.1f}; index-address-compared {:.0f} B/frame, index-relocated-compared {:.0f} B/frame, index-sample-reject/frame {:.1f}",
 				ms(Slot::ReplyCreate), ms(Slot::ReplyRelease), ms(Slot::ReplyPresent), ms(Slot::ReplySubmit), ms(Slot::ReplyReadback), ms(Slot::ReplyOther), perFrame(Counter::AsyncSubmissions),
 				perFrame(Counter::IndexAddressComparedBytes), perFrame(Counter::IndexRelocatedComparedBytes), perFrame(Counter::IndexSampleRejects));
-	if (s_state.chunkBatches)
-		cemuLog_log(LogType::Force, "Latte chunks: workers busy-wall ms/frame [{:.3f}, {:.3f}, {:.3f}, {:.3f}], critical-path {:.3f}; chunks/frame {:.1f}, batches/frame {:.1f}, parallel-draws/frame {:.1f}, serial-draws/frame {:.1f}, async-controls/frame {:.1f}, deferred-index {:.0f} B/frame",
-			s_state.chunkBusyNs[0] * msPerNsPerFrame, s_state.chunkBusyNs[1] * msPerNsPerFrame,
-			s_state.chunkBusyNs[2] * msPerNsPerFrame, s_state.chunkBusyNs[3] * msPerNsPerFrame,
-			s_state.chunkCriticalPathNs * msPerNsPerFrame, double(s_state.chunkCount) / frames, double(s_state.chunkBatches) / frames,
-			perFrame(Counter::ParallelDraws), perFrame(Counter::SerialDraws), perFrame(Counter::AsyncControls), perFrame(Counter::DeferredIndexBytes));
-	if (perFrame(Counter::ParallelDraws) || perFrame(Counter::SerialDraws))
-		cemuLog_log(LogType::Force, "Latte chunk serial reasons/draws per frame: query {:.1f}, streamout {:.1f}, alignment {:.1f}, slice-copy {:.1f}, simulation {:.1f}",
-			perFrame(Counter::ChunkFallbackQuery), perFrame(Counter::ChunkFallbackStreamout), perFrame(Counter::ChunkFallbackAlignment),
-			perFrame(Counter::ChunkFallbackSlice), perFrame(Counter::ChunkFallbackSimulation));
-	if (s_state.detailEnabled)
+        if (s_state.chunkBatches)
+          cemuLog_log(
+              LogType::Force,
+              "Latte chunks: workers busy-wall ms/frame [{:.3f}, {:.3f}, "
+              "{:.3f}, {:.3f}], critical-path {:.3f}; chunks/frame {:.1f}, "
+              "batches/frame {:.1f}, parallel-draws/frame {:.1f}, "
+              "serial-draws/frame {:.1f}, async-controls/frame {:.1f}, "
+              "deferred-index {:.0f} B/frame",
+              s_state.chunkBusyNs[0] * msPerNsPerFrame,
+              s_state.chunkBusyNs[1] * msPerNsPerFrame,
+              s_state.chunkBusyNs[2] * msPerNsPerFrame,
+              s_state.chunkBusyNs[3] * msPerNsPerFrame,
+              s_state.chunkCriticalPathNs * msPerNsPerFrame,
+              double(s_state.chunkCount) / frames,
+              double(s_state.chunkBatches) / frames,
+              perFrame(Counter::ParallelDraws), perFrame(Counter::SerialDraws),
+              perFrame(Counter::AsyncControls),
+              perFrame(Counter::DeferredIndexBytes));
+        if (perFrame(Counter::ParallelDraws) || perFrame(Counter::SerialDraws))
+          cemuLog_log(LogType::Force,
+                      "Latte chunk serial reasons/draws per frame: query "
+                      "{:.1f}, streamout {:.1f}, alignment {:.1f}, slice-copy "
+                      "{:.1f}, simulation {:.1f}",
+                      perFrame(Counter::ChunkFallbackQuery),
+                      perFrame(Counter::ChunkFallbackStreamout),
+                      perFrame(Counter::ChunkFallbackAlignment),
+                      perFrame(Counter::ChunkFallbackSlice),
+                      perFrame(Counter::ChunkFallbackSimulation));
+        if (s_state.detailEnabled)
 	{
 		const auto detail = [&](Detail slot) { return s_state.detailNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };
 		cemuLog_log(LogType::Force, "Latte detail (inclusive ms/frame): sequence {:.3f}, shader-resolve {:.3f}, packet-decode {:.3f}, streamout {:.3f}, bindings-prepare {:.3f}",
