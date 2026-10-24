@@ -23,6 +23,7 @@
 #include "runtime.h"
 #include "setup_storage.h"
 #include "strings.h"
+#include "usb_mods.h"
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1654,8 +1655,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         std::exception_ptr import_failure;
         try {
             for (auto const &drive : KnownFolders::RemovableDevices().GetFoldersAsync().get()) {
-                auto source = child(drive, L"mods");
-                copied |= import_candidates(source ? source : drive, destination);
+                for (auto name : mods::local::roots) {
+                    auto source = uwp::usb_mods::root(drive, name);
+                    if (source)
+                        copied |= import_candidates(source, destination);
+                }
             }
         } catch (hresult_error const &) {
             // Removable access can be filtered by the manifest; try the picker.

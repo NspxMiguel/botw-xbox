@@ -2,6 +2,7 @@
 #include "store.h"
 #include "../packs/sha256.h"
 #include "json_min.h"
+#include "local.h"
 #include <algorithm>
 #include <chrono>
 #include <fstream>
@@ -230,34 +231,52 @@ class Local : public Source {
         Page out;
         if (page > 1)
             return out;
-        for (auto root : roots_) {
-            // UWP denies direct file access to removable drives outside the StorageFolder broker; such a
-            // drive lists nothing here instead of failing the whole catalog.
-            std::error_code ec;
-            if (fs::is_directory(root / "mods", ec))
-                root /= "mods";
-            for (auto &e : fs::directory_iterator(root, ec)) {
-                if (e.is_symlink(ec))
+        for (const auto &drive : roots_) {
+            // Portable adapter only. UWP uses brokered discovery instead of USB CRT paths.
+            for (auto directory_name : local::roots) {
+                auto root = drive / directory_name;
+                std::error_code ec;
+                if (fs::is_symlink(root, ec))
                     continue;
-                bool directory = e.is_directory(ec) && (fs::is_directory(e.path() / "content", ec) ||
-                                                        fs::is_directory(e.path() / "aoc", ec) ||
-                                                        fs::is_regular_file(e.path() / "rules.txt", ec));
-                auto ext = lower(path_string(e.path().extension()));
-                if (!directory && ext != ".zip" && ext != ".7z" && ext != ".rar")
-                    continue;
-                Card c;
-                c.id = path_string(e.path());
-                c.title = path_string(e.path().filename());
-                c.source = "USB";
-                c.category = category(c.title);
-                if (!directory) {
-                    c.size = e.file_size(ec);
-                    c.downloads = {{c.title, c.id, "", c.size}};
+                for (auto &e : fs::directory_iterator(root, ec)) {
+                    auto name = path_string(e.path().filename());
+                    if (!local::component(name) || e.is_symlink(ec))
+                        continue;
+                    bool directory = false, graphics = false;
+                    if (e.is_directory(ec))
+                        for (auto &child : fs::directory_iterator(e.path(), ec)) {
+                            if (child.is_symlink(ec))
+                                continue;
+                            auto child_name = path_string(child.path().filename());
+                            directory |= child.is_directory(ec) && local::content_folder(child_name);
+                            graphics |=
+                                child.is_regular_file(ec) && local::equal_name(child_name, "rules.txt");
+                        }
+                    directory |= graphics;
+                    auto ext = lower(path_string(e.path().extension()));
+                    if (!directory &&
+                        (!e.is_regular_file(ec) || (ext != ".zip" && ext != ".7z" && ext != ".rar")))
+                        continue;
+                    Card c;
+                    c.id = path_string(e.path());
+                    if (std::any_of(out.cards.begin(), out.cards.end(),
+                                    [&](auto &seen) { return seen.id == c.id; }))
+                        continue;
+                    c.title = name;
+                    c.source = "USB";
+                    c.category = graphics ? Category::graphics : category(c.title);
+                    if (!directory) {
+                        c.size = e.file_size(ec);
+                        c.downloads = {{c.title, c.id, "", c.size}};
+                    }
+                    if (graphics)
+                        for (auto &child : fs::directory_iterator(e.path(), ec))
+                            if (!child.is_symlink(ec) &&
+                                local::equal_name(path_string(child.path().filename()), "rules.txt"))
+                                parse_rules(c, read(child.path()));
+                    if (matches(c, query, cat))
+                        out.cards.push_back(std::move(c));
                 }
-                if (directory && fs::is_regular_file(e.path() / "rules.txt"))
-                    parse_rules(c, read(e.path() / "rules.txt"));
-                if (matches(c, query, cat))
-                    out.cards.push_back(std::move(c));
             }
         }
         return out;

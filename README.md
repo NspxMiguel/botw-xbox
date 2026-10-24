@@ -31,12 +31,17 @@ copy of the game. Nothing will be published for players before the project reach
 - Below 60 fps in demanding areas.
 - The "Remaster" graphic-pack preset (FPS++, shadows, draw distance, reflections) is compiled in, but not every category is verified on the console yet.
 - Shaders are precompiled at boot; the first minutes after boot are not smooth.
-- Mods on USB storage cannot be read yet.
 - The Wii U GamePad screen is not shown on the TV yet.
 
 **60 fps:** splitting that thread into two or more overlapping threads was built and measured
 ([docs/latte-pipeline-phase8.md](docs/latte-pipeline-phase8.md)) but is not faster yet, so the direct
 path stays the default. The current work cuts the CPU cost of each draw. No date is promised.
+
+Mods: put extracted Cemu-style mod folders in `<USB>:/botw-mods/<folder>` and open
+Mods → USB / local. Install copies content replacements to internal storage with
+progress and B/Escape cancellation, then enables them for the next game boot.
+After import the USB is no longer needed. Rules-only graphic packs can be imported
+but require recompilation to apply shaders or PPC patches.
 
 ## Building
 
