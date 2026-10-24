@@ -134,7 +134,7 @@ Prepare the category manifests and inspect the complete dry run:
 
 ```sh
 python3 tools/remaster_check.py prepare \
-  --packs /Users/miguel/.local/share/nxbox/deps/cemu_graphic_packs/src/BreathOfTheWild \
+  --packs ~/.local/share/nxbox/deps/cemu_graphic_packs/src/BreathOfTheWild \
   --out build/remaster-check
 python3 tools/remaster_check.py run build/remaster-check/plan.json \
   --out build/remaster-results
@@ -153,7 +153,7 @@ entire pack cannot isolate its categories. For each `baseline.json`/variant JSON
 
 ```sh
 python3 -I tools/packs/recompile.py \
-  /Users/miguel/.local/share/nxbox/botw-wiiu-game/code/U-King.rpx generated \
+  ~/.local/share/nxbox/botw-wiiu-game/code/U-King.rpx generated \
   --packs "$selection" --llvm-mc /opt/homebrew/opt/llvm/bin/llvm-mc
 while pgrep -x ninja >/dev/null; do sleep 5; done
 nice ninja -C build/local-uwp-game -j4

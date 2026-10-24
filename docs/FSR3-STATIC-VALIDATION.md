@@ -16,7 +16,7 @@ warnings; no compilation or link errors remain.
 
 SDK: **FidelityFX SDK v1.1.4**, commit
 `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55`, native **FSR upscaler 3.1.4**, MIT.
-The external checkout is `/Users/miguel/.local/share/nxbox/deps/fidelityfx-1.1.4`
+The external checkout is `~/.local/share/nxbox/deps/fidelityfx-1.1.4`
 and remains unmodified. No SDK source was vendored and no frame-generation
 component was linked.
 

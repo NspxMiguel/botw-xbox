@@ -26,7 +26,8 @@ Only this directory and the marked W3 blocks in the root CMakeLists.txt are chan
   Publisher is a development placeholder: packaging must use the owner's package identity/certificate.
 
 Settings → Wallpaper selects From your game (the player's `meta/bootTvTex.tga`), Plateau,
-Shrine, or the original Light background. LocalSettings `wallpaper` stores 0=Light,
+Shrine, or the original Light background. The Plateau and Shrine images are original
+illustrations made for this project, not game art. LocalSettings `wallpaper` stores 0=Light,
 1=Plateau, 2=Shrine, 3=From your game. The default prefers dump art, otherwise Plateau;
 failed image loads use Light. Changes repaint immediately, with cover-fit images,
 a readability scrim and light ink. Only the two supplied landscape JPGs are packaged.

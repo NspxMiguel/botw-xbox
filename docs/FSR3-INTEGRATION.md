@@ -19,7 +19,7 @@ generation**, no swapchain replacement, and no manual generated-frame presents.
 ```sh
 git clone --depth 1 --branch v1.1.4 \
   https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git \
-  /Users/miguel/.local/share/nxbox/deps/fidelityfx-1.1.4
+  ~/.local/share/nxbox/deps/fidelityfx-1.1.4
 ```
 
 Neither the tag checkout nor AMD's `FidelityFX-SDK-v1.1.4.zip` release archive
@@ -42,7 +42,7 @@ export CX_BOTTLE_PATH="$PWD/build/ffx-bottles"
 /Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/cxbottle \
   --bottle ffx --create --template win10_64
 cmake -S . -B build/local-uwp-game \
-  -DBOTW_FFX_SOURCE=/Users/miguel/.local/share/nxbox/deps/fidelityfx-1.1.4 \
+  -DBOTW_FFX_SOURCE=~/.local/share/nxbox/deps/fidelityfx-1.1.4 \
   -DBOTW_FFX_SDK= \
   -DBOTW_FFX_WINE=/Applications/CrossOver.app/Contents/SharedSupport/CrossOver/bin/wine \
   -DBOTW_FFX_BOTTLE_PATH="$CX_BOTTLE_PATH"

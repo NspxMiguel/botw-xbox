@@ -117,7 +117,7 @@ commit before the implementation commit. No project CLAUDE.md was created.
 
 ## Commands and results
 
-All commands ran from `/Users/miguel/.local/share/nxbox/botw-wiiu/builder-wt` on
+All commands ran from `~/.local/share/nxbox/botw-wiiu/builder-wt` on
 macOS arm64. The entry point used uv's Python 3.12.14 unless specified otherwise.
 
 ```sh
@@ -146,19 +146,19 @@ Doctor passed. Next: setup (toolchain data is checked separately).
 
 ```sh
 uv run tools/builder/botw_builder.py setup \
-  --data-dir /Users/miguel/.local/share/nxbox/builder-test-data \
-  --xwin-dir /Users/miguel/.local/share/nxbox/xwin/sdk \
-  --vcpkg-dir /Users/miguel/.local/share/nxbox/vcpkg-uwp \
-  --ffx-source /Users/miguel/.local/share/nxbox/deps/fidelityfx-1.1.4 \
-  --ffx-shaders /Users/miguel/.local/share/nxbox/deps/ffx-shaders-1.1.4 \
-  --graphic-packs /Users/miguel/.local/share/nxbox/deps/cemu_graphic_packs/src/BreathOfTheWild
+  --data-dir ~/.local/share/nxbox/builder-test-data \
+  --xwin-dir ~/.local/share/nxbox/xwin/sdk \
+  --vcpkg-dir ~/.local/share/nxbox/vcpkg-uwp \
+  --ffx-source ~/.local/share/nxbox/deps/fidelityfx-1.1.4 \
+  --ffx-shaders ~/.local/share/nxbox/deps/ffx-shaders-1.1.4 \
+  --graphic-packs ~/.local/share/nxbox/deps/cemu_graphic_packs/src/BreathOfTheWild
 ```
 
 Exit 0; total **0.00 s** at displayed precision. Microsoft CRT/SDK, vcpkg,
 FidelityFX shader headers, FidelityFX source and graphic packs each took **0.00 s**
 when reusing the specified local directories. Dependency markers and the FidelityFX
 backend source hash passed. The only persistent test data is
-`/Users/miguel/.local/share/nxbox/builder-test-data/setup.json` (toolchain paths).
+`~/.local/share/nxbox/builder-test-data/setup.json` (toolchain paths).
 No Microsoft license flag was passed and no consent was given on the player's behalf.
 
 The published vcpkg ZIP was streamed through Python's `urllib.request.urlopen` and
@@ -186,7 +186,7 @@ and the official Cemu packs checkout at commit
 uv run --no-project python - <<'PY'
 from tools.builder.botw_builder import verify_dump, step
 with step('Verify actual player dump (read only)'):
-    verify_dump('/Users/miguel/.local/share/nxbox/botw-wiiu-game')
+    verify_dump('~/.local/share/nxbox/botw-wiiu-game')
 PY
 ```
 
@@ -195,14 +195,14 @@ Exit 0; **0.01 s**. Output: `Verified Wii U v208:` followed by the supplied
 
 ```sh
 uv run tools/builder/botw_builder.py build \
-  --game /Users/miguel/.local/share/nxbox/botw-wiiu-game \
-  --data-dir /Users/miguel/.local/share/nxbox/builder-test-data \
-  --out /Users/miguel/.local/share/nxbox/builder-test \
-  --xwin-dir /Users/miguel/.local/share/nxbox/xwin/sdk \
-  --vcpkg-dir /Users/miguel/.local/share/nxbox/vcpkg-uwp \
-  --ffx-source /Users/miguel/.local/share/nxbox/deps/fidelityfx-1.1.4 \
-  --ffx-shaders /Users/miguel/.local/share/nxbox/deps/ffx-shaders-1.1.4 \
-  --graphic-packs /Users/miguel/.local/share/nxbox/deps/cemu_graphic_packs/src/BreathOfTheWild
+  --game ~/.local/share/nxbox/botw-wiiu-game \
+  --data-dir ~/.local/share/nxbox/builder-test-data \
+  --out ~/.local/share/nxbox/builder-test \
+  --xwin-dir ~/.local/share/nxbox/xwin/sdk \
+  --vcpkg-dir ~/.local/share/nxbox/vcpkg-uwp \
+  --ffx-source ~/.local/share/nxbox/deps/fidelityfx-1.1.4 \
+  --ffx-shaders ~/.local/share/nxbox/deps/ffx-shaders-1.1.4 \
+  --graphic-packs ~/.local/share/nxbox/deps/cemu_graphic_packs/src/BreathOfTheWild
 ```
 
 Exit **1**, as required by the task's disk limit. Preflight and total: **0.00 s**

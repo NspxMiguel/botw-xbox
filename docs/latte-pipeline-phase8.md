@@ -95,8 +95,8 @@ Profiler transport/reset tests cover the added state.
 
 I opened and compared both supplied PNGs, found under the sibling artifact root:
 
-- `/Users/miguel/.local/share/nxbox/artifacts/botw-p66m2p0/end.png`
-- `/Users/miguel/.local/share/nxbox/artifacts/botw-p68m3p0/end.png`
+- `~/.local/share/nxbox/artifacts/botw-p66m2p0/end.png`
+- `~/.local/share/nxbox/artifacts/botw-p68m3p0/end.png`
 
 The mode-3 cliff looks darker/flatter. Sky color, grass positions, and stair
 lighting also differ. These are not a controlled pixel comparison, and those
