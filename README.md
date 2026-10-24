@@ -15,9 +15,9 @@ copy of the game. Nothing will be published for players before the project reach
 
 | | |
 | --- | --- |
-| Performance | **45 fps** at a fixed spot on the Great Plateau with the Remaster preset; 33–56 fps while walking. Not 60 yet. |
+| Performance | **40 fps** at a fixed spot on the Great Plateau with the Remaster preset (44 fps without graphic packs). Not 60 yet. |
 | Resolution | Native 1080p rendering. Upscaling is off by default; FSR 1 or FSR 3.1 can be chosen in the quick menu. |
-| Bottleneck | The CPU thread that turns the game's GPU commands into Direct3D 12 work (~21.7 ms per frame). The GPU is mostly idle. |
+| Bottleneck | The CPU thread that turns the game's GPU commands into Direct3D 12 work (~26 ms per frame, ~5,400 draws). The GPU is mostly idle. |
 | Series S | Not tested on real hardware. |
 
 **Works:**
@@ -34,9 +34,9 @@ copy of the game. Nothing will be published for players before the project reach
 - Mods on USB storage cannot be read yet.
 - The Wii U GamePad screen is not shown on the TV yet.
 
-**60 fps:** the remaining work is splitting the GPU-command thread into two overlapping threads
-([docs/latte-pipelining.md](docs/latte-pipelining.md)). Rough estimate: 4–8 weeks. This is an
-estimate, not a promise.
+**60 fps:** splitting that thread into two or more overlapping threads was built and measured
+([docs/latte-pipeline-phase8.md](docs/latte-pipeline-phase8.md)) but is not faster yet, so the direct
+path stays the default. The current work cuts the CPU cost of each draw. No date is promised.
 
 ## Building
 
@@ -80,9 +80,9 @@ ponto de lançamento: 60 fps cravados, sem travadas de compilação de shader, 4
 
 | | |
 | --- | --- |
-| Desempenho | **45 fps** num ponto fixo do Planalto Esquecido com o preset Remaster; 33–56 fps andando. Ainda não é 60. |
+| Desempenho | **40 fps** num ponto fixo do Planalto Esquecido com o preset Remaster (44 fps sem packs gráficos). Ainda não é 60. |
 | Resolução | 1080p nativo. Upscaling desligado por padrão; FSR 1 ou FSR 3.1 podem ser escolhidos no menu rápido. |
-| Gargalo | A thread da CPU que transforma os comandos de GPU do jogo em Direct3D 12 (~21,7 ms por quadro). A GPU fica quase parada. |
+| Gargalo | A thread da CPU que transforma os comandos de GPU do jogo em Direct3D 12 (~26 ms por quadro, ~5.400 desenhos). A GPU fica quase parada. |
 | Series S | Ainda não testado no aparelho. |
 
 **Funciona:**
@@ -99,9 +99,9 @@ ponto de lançamento: 60 fps cravados, sem travadas de compilação de shader, 4
 - Mods em pendrive ainda não são lidos.
 - A tela do Wii U GamePad ainda não aparece na TV.
 
-**60 fps:** falta dividir a thread de comandos de GPU em duas threads trabalhando ao mesmo tempo
-([docs/latte-pipelining.md](docs/latte-pipelining.md)). Estimativa: 4–8 semanas. É estimativa, não
-promessa.
+**60 fps:** dividir essa thread em duas ou mais threads ao mesmo tempo foi feito e medido
+([docs/latte-pipeline-phase8.md](docs/latte-pipeline-phase8.md)), mas ainda não ficou mais rápido, então
+o caminho direto continua o padrão. O trabalho atual corta o custo de CPU de cada desenho. Sem data prometida.
 
 ## Como montar o pacote
 
