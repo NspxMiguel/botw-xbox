@@ -9,7 +9,7 @@ void present_quick_menu(void *device, void *queue, void *swapchain);
 void present_overlays(void *device, void *queue, void *swapchain); // every frame: debug HUD, recorder
 // Renderer thread, before backbuffer references are released or ResizeBuffers is called.
 void release_presentation_resources(void *swapchain);
-bool gamepad_screen_requested(); // W2: choose DRC scanout instead of TV when true.
+bool gamepad_screen_requested(); // True in full-screen DRC mode; compositor also supports Corner.
 bool presentation_allowed();     // W2: skip presentation while suspended/invisible.
 // W1/W2 may install a nonblocking lifecycle callback before CoreApplication::Run.
 // Called on UI thread; must not synchronously wait for UI work from another thread.

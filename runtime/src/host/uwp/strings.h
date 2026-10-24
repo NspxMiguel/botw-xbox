@@ -129,6 +129,11 @@ enum class Text {
     screenshot_failed,
     quit_game,
     quick_hints,
+    gamepad_screen,
+    gamepad_off,
+    gamepad_corner,
+    gamepad_swap,
+    motion_hint,
     store_all_sources,
     store_search_placeholder,
     store_explore,
@@ -217,9 +222,11 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Xbox · A is the bottom button", L"Xbox · A é o botão de baixo"},
          {L"Place mods in this folder. Changes take effect next launch.",
           L"Coloque os mods nesta pasta. As mudanças valem na próxima abertura."},
-         {L"Hold View + Menu for 0.5 s: quick menu. View + Y: GamePad screen. Xbox has no touch or gyro.",
-          L"Segure View + Menu por 0,5 s: menu rápido. View + Y: tela do GamePad. Xbox não tem toque nem "
-          L"giroscópio."},
+         {L"Hold View: swap screens. View + Menu: quick menu. View + X: tap GamePad. "
+          L"View + R3: motion mode; right stick tilts, LT/RT rotate, L3 centers. Repeat View + R3 to leave.",
+          L"Segure View: trocar telas. View + Menu: menu rápido. View + X: tocar no GamePad. "
+          L"View + R3: modo movimento; analógico direito inclina, LT/RT giram, L3 centraliza. View + R3 "
+          L"sai."},
          {L"Check your updated game folder, then close and reopen the app to try again.",
           L"Confira a pasta do jogo atualizado, feche e abra o app para tentar novamente."},
          {L"Loading your game…", L"Carregando seu jogo…"},
@@ -369,7 +376,15 @@ inline std::wstring_view text(Text key, bool pt) {
          {L"Screenshot saved in LocalState/screenshots", L"Captura salva em LocalState/screenshots"},
          {L"Unable to save screenshot", L"Não foi possível salvar a captura"},
          {L"Quit game", L"Sair do jogo"},
-         {L"Ⓐ Select · Ⓑ / Start: resume", L"Ⓐ Selecionar · Ⓑ / Start: continuar"},
+         {L"Ⓐ Select · Ⓑ / Start: resume · View + R3: motion mode",
+          L"Ⓐ Selecionar · Ⓑ / Start: continuar · View + R3: modo movimento"},
+         {L"GamePad screen", L"Tela do GamePad"},
+         {L"Off", L"Desligada"},
+         {L"Corner", L"No canto"},
+         {L"Swap", L"Tela cheia"},
+         {L"Motion mode · right stick: tilt · LT/RT: turn\nL3: center · View + R3: return to camera",
+          L"Modo movimento · analógico direito: inclinar · LT/RT: girar\nL3: centralizar · View + R3: voltar "
+          L"à câmera"},
          {L"All sources", L"Todas as fontes"},
          {L"Search mods, packs and fixes", L"Buscar mods, packs e correções"},
          {L"Explore", L"Explorar"},

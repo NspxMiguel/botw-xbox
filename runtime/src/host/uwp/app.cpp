@@ -19,6 +19,7 @@
 #include "mod_network.h"
 #include "output_policy.h"
 #include "quick_view.h"
+#include "gamepad_screen.h"
 #include "recorder.h"
 #include "runtime.h"
 #include "setup_storage.h"
@@ -76,7 +77,7 @@ fire_and_forget finish_recording(SuspendingDeferral deferral) {
 }
 CoreWindow host_window{nullptr};
 std::atomic<int> pixel_width{1280}, pixel_height{720}, layout{0};
-std::atomic<bool> visible{false}, drc{false}, rumble_enabled{true}, quit{false}, menu_visible{false};
+std::atomic<bool> visible{false}, rumble_enabled{true}, quit{false}, menu_visible{false};
 std::atomic<uwp::VisibilityCallback> visibility_callback{nullptr};
 void active(bool value) {
     visible = value;
@@ -202,6 +203,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
     uwp::Preferences preferences;
     uwp::Controller controller;
     uwp::HoldChord quick_chord;
+    bool tilt_active = false;
+    double touch_until = -1;
     uwp::setup::Repeat quick_repeat;
     bool quick_was_open = false;
     float render_scale_choice = 0;
@@ -517,6 +520,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         host_window = nullptr;
     }
     void neutral() {
+        quick_chord.reset();
+        tilt_active = false;
+        touch_until = -1;
+        input::set_tilt_mode(false);
+        input::motion_reset();
+        {
+            std::lock_guard lock(uwp::quick_menu.mutex);
+            uwp::quick_menu.motion_hint.clear();
+        }
         input::set_gamepad({});
         input::clear_rumble();
         controller.reset();
@@ -2319,13 +2331,19 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                       std::to_wstring(render_scale_choice).substr(0, 3) + L"× — " +
                       setup_label(uwp::Text::scale_restart),
                   setup_label(uwp::Text::upscaler) + L": " +
-                      (preferences.upscaler == int(fsr::Upscaler::Spatial)    ? std::wstring(L"FSR 1")
-                       : preferences.upscaler == int(fsr::Upscaler::Temporal) ? std::wstring(L"FSR 3.1")
-                                                                              : setup_label(uwp::Text::upscaler_off)) +
+                      (preferences.upscaler == int(fsr::Upscaler::Spatial) ? std::wstring(L"FSR 1")
+                       : preferences.upscaler == int(fsr::Upscaler::Temporal)
+                           ? std::wstring(L"FSR 3.1")
+                           : setup_label(uwp::Text::upscaler_off)) +
                       L" — " + setup_label(uwp::Text::scale_restart),
                   setup_label(uwp::Text::fps) + L": " + std::to_wstring(preferences.fps),
                   setup_label(uwp::Text::mods),
                   setup_label(uwp::Text::volume) + L": " + std::to_wstring(preferences.volume) + L"%",
+                  setup_label(uwp::Text::gamepad_screen) + L": " +
+                      setup_label(
+                          uwp::gamepad_screen.load() == uwp::GamepadScreen::Corner ? uwp::Text::gamepad_corner
+                          : uwp::gamepad_screen.load() == uwp::GamepadScreen::Swap ? uwp::Text::gamepad_swap
+                                                                                   : uwp::Text::gamepad_off),
                   setup_label(uwp::Text::screenshot),
                   setup_label(uwp::Text::quit_game)};
     }
@@ -2385,10 +2403,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         {
             std::lock_guard lock(uwp::quick_menu.mutex);
             auto &q = uwp::quick_menu;
-            if (pressed & uwp::up)
-                q.focus = (q.focus + 8) % 9;
-            if (pressed & uwp::down)
-                q.focus = (q.focus + 1) % 9;
+            const int count = static_cast<int>(q.rows.size());
+            if (count && (pressed & uwp::up))
+                q.focus = (q.focus + count - 1) % count;
+            if (count && (pressed & uwp::down))
+                q.focus = (q.focus + 1) % count;
             focus = q.focus;
         }
         if (!(pressed & (uwp::a | uwp::left | uwp::right)))
@@ -2416,9 +2435,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         else if (focus == 6) {
             preferences.volume = std::clamp(preferences.volume + (pressed & uwp::left ? -10 : 10), 0, 100);
             save_preferences();
-        } else if (focus == 7 && activate) {
-            capture_screenshot();
+        } else if (focus == 7) {
+            uwp::gamepad_screen =
+                uwp::next_gamepad_screen(uwp::gamepad_screen.load(), pressed & uwp::left ? -1 : 1);
         } else if (focus == 8 && activate) {
+            capture_screenshot();
+        } else if (focus == 9 && activate) {
             quit = true;
             uwp::quick_menu.requested = false;
             CoreApplication::Exit();
@@ -2850,7 +2872,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             r.LeftTrigger = 1;
         if (virtual_held & virtual_rt)
             r.RightTrigger = 1;
-        if (quick_chord.update(uint32_t(r.Buttons), seconds)) {
+        if (quick_chord.update(uint32_t(r.Buttons), seconds, true)) {
             neutral();
             menu_visible = true;
             quick_was_open = true;
@@ -2869,6 +2891,16 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             uwp::quick_menu.requested = true;
             return;
         }
+        if (quick_chord.toggle_screen)
+            uwp::swap_gamepad_screen();
+        if (quick_chord.toggle_tilt) {
+            tilt_active = !tilt_active;
+            input::set_tilt_mode(tilt_active);
+            std::lock_guard lock(uwp::quick_menu.mutex);
+            uwp::quick_menu.motion_hint = tilt_active ? setup_label(uwp::Text::motion_hint) : L"";
+        }
+        if (quick_chord.touch)
+            touch_until = seconds + .1; // At least three 30 Hz guest samples, even for a quick chord.
         auto guest_buttons = quick_chord.guest_buttons;
         bool replay_pair = (guest_buttons & (uwp::view | uwp::menu)) == (uwp::view | uwp::menu);
         // This host already arbitrates the chord. Replay an aborted pair without
@@ -2879,9 +2911,15 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             layout);
         if (replay_pair)
             mapped.pad.buttons |= input::BTN_PLUS | input::BTN_MINUS;
+        mapped.pad.touch = seconds < touch_until;
+        uwp::apply_motion_controls(mapped.pad,
+                                   {guest_buttons, r.LeftThumbstickX, r.LeftThumbstickY, r.RightThumbstickX,
+                                    r.RightThumbstickY, quick_chord.latched ? 0 : r.LeftTrigger,
+                                    quick_chord.latched ? 0 : r.RightTrigger},
+                                   tilt_active);
         input::set_gamepad(mapped.pad);
         if (mapped.toggle_gamepad_screen)
-            drc = !drc.load();
+            uwp::swap_gamepad_screen();
         auto now = std::chrono::steady_clock::now();
         if (now >= next_rumble) {
             next_rumble = now + std::chrono::microseconds(16667);
@@ -2934,7 +2972,7 @@ static_assert(static_cast<uint32_t>(GamepadButtons::RightThumbstick) == uwp::rs)
 } // namespace
 namespace uwp {
 void *core_window() { return host_window ? get_abi(host_window) : nullptr; }
-bool gamepad_screen_requested() { return drc; }
+bool gamepad_screen_requested() { return gamepad_screen.load() == GamepadScreen::Swap; }
 bool presentation_allowed() { return visible; }
 void present_overlays(void *device, void *queue, void *chain) {
     // Presents per second, next to the game's flip count ("frame N"): they can differ.
@@ -2946,10 +2984,15 @@ void present_overlays(void *device, void *queue, void *chain) {
         window = now;
     }
     try {
+        draw_gamepad_hint(device, queue, chain);
         draw_debug_hud(device, queue, chain);
     } catch (...) {
         debug_hud.enabled = false;
-        LOG("debug HUD: drawing failed; disabled for this session");
+        {
+            std::lock_guard lock(quick_menu.mutex);
+            quick_menu.motion_hint.clear();
+        }
+        LOG("overlay: drawing failed; hidden until reactivated");
     }
     try {
         record_frame(device, queue, chain);

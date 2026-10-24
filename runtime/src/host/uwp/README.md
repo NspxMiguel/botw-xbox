@@ -40,13 +40,17 @@ a readability scrim and light ink. Only the two supplied landscape JPGs are pack
 | LB / RB | L / R |
 | LT / RT above 50% | ZL / ZR |
 | View / Menu | Minus / Plus |
-| View + Menu (Select + Start) | Return to launcher; Resume preserves the existing guest |
-| View + Y | Toggle TV / DRC GamePad scanout request |
+| Hold View + Menu for 0.5 s | Quick menu; Resume preserves the existing guest |
+| Hold View for 0.5 s / View + Y | Toggle TV / DRC GamePad full screen |
+| View + X | Tap the GamePad screen center |
+| View + R3 | Toggle motion mode: right stick tilts, LT/RT turn, L3 recenters |
 
 The labels layout maps A/B/X/Y by letter instead. Xbox's system/Home button is not intercepted.
-There is no gyro or touchscreen emulation. DRC display selection is an explicit renderer handoff,
-not synthetic screen taps. `pro_buttons()` also converts every physical button to the Wii U Pro
-Controller ABI, independently tested. The existing shared padscore HLE still reports no controller;
+The quick menu selects GamePad screen Off (default), Corner or Swap. Screen selection and
+synthetic touch are separate actions. Motion mode supplies three-axis virtual GamePad motion and
+shows an EN/PT controller reminder; normal stick aiming remains available outside it. See
+[the display/input path and console acceptance checklist](../../../../docs/gamepad-screen.md).
+`pro_buttons()` also converts every physical button to the Wii U Pro Controller ABI, independently tested. The existing shared padscore HLE still reports no controller;
 announcing a Pro Controller needs a change to `runtime/src/input/pad_hle.cpp`, outside W3 ownership.
 
 ## Integration boundaries (required before a playable Xbox package)
@@ -62,8 +66,8 @@ announcing a Pro Controller needs a change to `runtime/src/input/pad_hle.cpp`, o
    TargetConditionals.h include directory is UWP-only.
 2. **W2 renderer:** `latte::create_renderer(void*, width, height)` receives a borrowed **CoreWindow
    IUnknown**, suitable for CreateSwapChainForCoreWindow, never an HWND/NSView/SDL_Window. Consult
-   `host.h`: poll `gamepad_screen_requested()` to select DRC scanout, and `presentation_allowed()`
-   before presenting. This directory does not implement a D3D12 renderer or modify Metal.
+   `gamepad_screen.h`: D3D12 composes the retained TV/DRC images according to the atomic screen mode.
+   `host.h` exposes lifecycle/presentation callbacks. Metal uses its existing display path.
 3. **W1 filesystem:** LocalState paths work without a broker. A FutureAccessList picker token is
    persisted, but its Path string alone does **not** guarantee CRT/Win32 filesystem access. External
    game content needs W1's brokered StorageFolder/FromApp access or a complete import to LocalState.
@@ -120,7 +124,7 @@ full Apple/game build was performed. Full builds need generated guest code, abse
   token, denied storage and hot-plug. Prove complete external content reads through W1, not just RPX
   detection. Confirm folder picker availability on the target Xbox OS; LocalState remains the fallback.
 - Both face-button layouts, trigger thresholds, disconnect with held buttons, reconnect, View+Menu
-  while holding inputs, Resume, View+Y DRC display and any game screens that need actual touch.
+  while holding inputs, Resume, all GamePad display modes, View+X touch and View+R3 motion puzzles.
 - Audio stereo/5.1 channel order, clipping/volume, starvation/queue pacing, HDMI/headset routing and
   device loss. Voice errors safely mute output; automatic XAudio2 device recreation is not implemented.
 - Suspend/guide/dashboard/visibility transitions and resize/DPI with W1/W2 quiescing installed;

@@ -1023,6 +1023,20 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 		return;
 	}
 
+#if defined(BOTW_PLATFORM_UWP) && defined(ENABLE_D3D12)
+	// Both scan targets share the Xbox CoreWindow. D3D12 composes them at
+	// swap, after all copies, so guest TV/DRC copy order cannot erase the
+	// corner image.
+	if (g_renderer->GetType() == RendererAPI::D3D12)
+	{
+		if (renderTarget & RENDER_TARGET_TV)
+			LatteRenderTarget_copyToBackbuffer(texView, false);
+		if (renderTarget & RENDER_TARGET_DRC)
+			LatteRenderTarget_copyToBackbuffer(texView, true);
+		return;
+	}
+#endif
+
 	auto getVPADScreenActive = [](size_t n) -> std::pair<bool, bool> {
 		auto controller = InputManager::instance().get_vpad_controller(n);
 		if (!controller)

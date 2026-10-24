@@ -9,14 +9,38 @@ namespace uwp {
 struct HoldChord {
     double since = -1, pending_since = -1, replay_until = -1;
     bool latched = false, passthrough = false;
+    bool toggle_screen = false, toggle_tilt = false, touch = false;
     uint32_t pending = 0, guest_buttons = 0, replay = 0;
-    bool update(uint32_t buttons, double now) {
+    void reset() {
+        *this = {};
+        latched = true; // Focus regain/Resume must observe a full release before any shortcut.
+    }
+    bool update(uint32_t buttons, double now, bool gamepad_shortcuts = false) {
+        toggle_screen = toggle_tilt = touch = false;
+        // View+Menu wins over every other shortcut. These chords are recognized on
+        // raw host input, before delayed View/Minus delivery can hide the modifier.
+        if (gamepad_shortcuts && !(buttons & menu) && (buttons & view) && (buttons & (x | y | rs))) {
+            touch = !latched && (buttons & x) != 0;
+            if (!latched) {
+                toggle_screen = (buttons & y) != 0;
+                toggle_tilt = (buttons & rs) != 0 && !toggle_screen && !touch;
+            }
+            latched = true;
+            pending = guest_buttons = 0;
+            pending_since = since = -1;
+            replay_until = -1;
+            return false;
+        }
         constexpr auto mask = view | menu;
         auto held = buttons & mask;
         guest_buttons = (buttons & ~mask) | (now < replay_until ? replay : 0);
         if (latched) {
             since = -1;
-            if (!held)
+            if (gamepad_shortcuts) {
+                guest_buttons = 0;
+                if (!buttons)
+                    latched = false;
+            } else if (!held)
                 latched = false;
             return false;
         }
@@ -41,7 +65,14 @@ struct HoldChord {
         } else {
             since = -1;
             // A released tap lasts long enough for a 30 Hz guest sample.
-            // A lone long hold passes through after 0.5 s.
+            // Menu holds pass through; View holds can become a host screen shortcut.
+            if (gamepad_shortcuts && held == view && pending == view && now - pending_since >= .5) {
+                toggle_screen = true;
+                latched = true;
+                pending = guest_buttons = 0;
+                pending_since = -1;
+                return false;
+            }
             if (pending && (!held || now - pending_since >= .5)) {
                 replay = pending & ~held;
                 replay_until = now + .05;
@@ -68,7 +99,7 @@ struct QuickMenu {
     int focus = 0;
     bool reduced_motion = false;
     std::vector<std::wstring> rows;
-    std::wstring title, hints, screenshot_path;
+    std::wstring title, hints, screenshot_path, motion_hint;
 };
 inline QuickMenu quick_menu;
 inline void wait_for_guest_resume() {

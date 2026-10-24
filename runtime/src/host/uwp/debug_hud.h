@@ -2,6 +2,7 @@
 #pragma once
 #include "host.h"
 #include "quick_menu.h"
+#include "ui_style.h"
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -151,6 +152,34 @@ struct DebugHud {
     }
 };
 inline DebugHud debug_hud;
+
+// Apparatus controls remain visible until the player returns to normal camera controls.
+inline void draw_gamepad_hint(void *device, void *queue, void *chain) {
+    using namespace capture_detail;
+    if (quick_menu.requested)
+        return;
+    std::wstring hint;
+    {
+        std::lock_guard lock(quick_menu.mutex);
+        hint = quick_menu.motion_hint;
+    }
+    if (hint.empty())
+        return;
+    auto &g = get_graphics(device, queue, chain);
+    WrappedGuard acquired(g, g.chain->GetCurrentBackBufferIndex());
+    g.canvas->SetTarget(g.targets[g.chain->GetCurrentBackBufferIndex()].Get());
+    g.canvas->BeginDraw();
+    const float scale = g.desc.Height / 1080.f;
+    const float x = (g.desc.Width / scale - 1040.f) / 2;
+    g.canvas->SetTransform(D2D1::Matrix3x2F::Scale(scale, scale));
+    g.brush->SetColor(art_style::black(art_style::quick_dim));
+    g.canvas->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, 32, x + 1040, 104), 16, 16),
+                                   g.brush.Get());
+    g.brush->SetColor(art_style::white());
+    g.canvas->DrawText(hint.c_str(), UINT32(hint.size()), g.font.Get(),
+                       D2D1::RectF(x + 20, 44, x + 1020, 100), g.brush.Get());
+    check(g.canvas->EndDraw());
+}
 
 inline void draw_debug_hud(void *device, void *queue, void *chain) {
     using namespace capture_detail;

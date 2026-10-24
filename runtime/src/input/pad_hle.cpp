@@ -2,6 +2,7 @@
 // no Wii Remotes / Pro Controllers are reported (WPADProbe -> no controller).
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 
 #include "../hle.h"
 #include "input.h"
@@ -43,8 +44,11 @@ HLE_EXPORT(vpad, VPADRead) {
     wf(buf + 0x14, s.rx);
     wf(buf + 0x18, s.ry);
     wf(buf + 0x30, 1.0f);  // accXY
-    input::virtual_tilt(s.rx, s.ry, (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                         std::chrono::steady_clock::now().time_since_epoch()).count());
+    input::virtual_tilt(s.virtual_motion ? s.tilt_y : s.rx, s.virtual_motion ? s.tilt_x : s.ry,
+                        (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count(),
+                        s.tilt_z, s.recenter_motion);
     input::Motion m;
     if (input::motion(&m)) {  // controller gyro / accelerometer
         for (int k = 0; k < 3; k++) {
@@ -52,6 +56,7 @@ HLE_EXPORT(vpad, VPADRead) {
             wf(buf + 0x38 + 4 * k, m.gyro_change[k]);
             wf(buf + 0x44 + 4 * k, m.orientation[k]);
         }
+        wf(buf + 0x30, std::hypot(m.acc[0], m.acc[1]));
         wf(buf + 0x28, m.acc_magnitude);
         wf(buf + 0x2C, m.acc_acceleration);
         for (int k = 0; k < 9; k++) wf(buf + 0x6C + 4 * k, m.dir[k]);
@@ -62,6 +67,13 @@ HLE_EXPORT(vpad, VPADRead) {
         wf(buf + 0x6C, 1.0f);
         wf(buf + 0x7C, 1.0f);
         wf(buf + 0x8C, 1.0f);
+    }
+    // VPADTPData: raw 12-bit x/y, touch and validity (0 = both axes valid).
+    for (uint32_t offset : {0x52u, 0x5Au, 0x62u}) {
+        mem::w16(buf + offset, 2048);
+        mem::w16(buf + offset + 2, 2048);
+        mem::w16(buf + offset + 4, s.touch ? 1 : 0);
+        mem::w16(buf + offset + 6, 0);
     }
     mem::w8(buf + 0xA0, 0x40);  // slide volume
     mem::w8(buf + 0xA1, 6);     // battery full
@@ -90,7 +102,13 @@ HLE_EXPORT(vpad, VPADSetSamplingCallback) {
     RET(prev);
 }
 // void VPADGetTPCalibratedPoint(chan, VPADTPData* out, const VPADTPData* in)
-HLE_EXPORT(vpad, VPADGetTPCalibratedPoint) { memmove(mem::host(ARG(1)), mem::host(ARG(2)), 8); }
+HLE_EXPORT(vpad, VPADGetTPCalibratedPoint) {
+    const uint32_t out = ARG(1), in = ARG(2);
+    const uint16_t x = mem::r16(in), y = mem::r16(in + 2);
+    memmove(mem::host(out), mem::host(in), 8);
+    mem::w16(out, std::min<uint32_t>(x, 4095) * 1280 / 4096);
+    mem::w16(out + 2, std::min<uint32_t>(y, 4095) * 720 / 4096);
+}
 HLE_EXPORT(vpadbase, VPADBASEGetHeadphoneStatus) { RET(0); }
 
 // ---- padscore: no remotes connected ---------------------------------------------------------------

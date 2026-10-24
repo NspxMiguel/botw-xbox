@@ -13,6 +13,9 @@ enum : uint32_t {
 struct PadState {
     uint32_t buttons = 0;
     float lx = 0, ly = 0, rx = 0, ry = 0;  // -1..1, +y = up
+    bool touch = false;                    // center-screen contact, including all VPAD filtered samples
+    bool virtual_motion = false, recenter_motion = false;
+    float tilt_x = 0, tilt_y = 0, tilt_z = 0; // pitch, roll, yaw rate controls
 };
 PadState gamepad();               // current state (thread-safe snapshot)
 void set_gamepad(const PadState&);  // from the host event loop / test script
@@ -31,9 +34,12 @@ struct Motion {
 };
 void motion_sensor(bool gyro, const float data[3], uint64_t timestamp_ns);  // SDL units: rad/s, m/s^2
 void motion_reset();
-bool motion(Motion* out);  // false until a controller with motion sensors reports
-// Controllers without a gyro (every Xbox pad): while tilt mode is on, the right stick tilts a virtual GamePad.
-// Tilt mode follows the game's motion-puzzle state (set_tilt_mode); BOTW_VIRTUAL_TILT=1 forces it on for tests.
+bool motion(Motion *out); // real sensors or the virtual GamePad
+// Controllers without a gyro (every Xbox pad): while tilt mode is on, the right
+// stick tilts a virtual GamePad. Hosts explicitly enable apparatus controls;
+// BOTW_VIRTUAL_TILT=1 forces them on for tests.
 void set_tilt_mode(bool on);
-bool virtual_tilt(float sx, float sy, uint64_t timestamp_ns);  // false when a real sensor drives motion
+bool virtual_tilt(float sx, float sy, uint64_t timestamp_ns, float twist = 0, bool recenter = false);
+// Controls integrate angular velocity: release holds the pose; all three axes
+// can rotate through 360 degrees.
 }  // namespace input
