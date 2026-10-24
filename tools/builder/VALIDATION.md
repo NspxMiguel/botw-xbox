@@ -1,8 +1,11 @@
 # Builder validation — 2026-10-23
 
-Implementation is complete; the requested real gameplay package acceptance test is
-**blocked by disk space**. No gameplay APPX was produced. No game-derived source or
-binary was copied into this worktree, and nothing was uploaded or pushed.
+A real end-to-end macOS arm64 build from an actual v208 dump succeeded on
+2026-10-23: recompile, CMake, Ninja, staging and signing in **1196.90 s** total
+(about 20 min, `-j2`), producing a signed **452,217,106-byte** APPX whose signature
+verified with osslsigncode. Intermediates were removed afterwards. The sections
+below record the earlier checks, including the first attempt that stopped at the
+disk-space guard. Installing that package on an Xbox is still to be verified.
 
 ## Files
 
