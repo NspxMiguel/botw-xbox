@@ -1,5 +1,11 @@
 # Host and renderer installation
 
+UWP's launch-time Visuals preference filters renderer resources after the Mods
+selection, even when static PPC patches lock individual packs. Original clears
+shader replacements and texture rules; it preserves all compiled memory writes
+and FPS++ timing. The installed plan stays immutable until process restart. See
+[Visuals toggle](../../../docs/visuals-toggle.md) for the remaining PPC limits.
+
 Both hosts load through `load_rpx` before OS initialization and call
 `install_loaded` after relocation and renderer initialization, before `start_main`.
 An empty compiled plan loads the original RPX directly and installs nothing.

@@ -4,6 +4,7 @@
 #include <TargetConditionals.h>
 
 #include "fsr.h"
+#include "packs/visuals.h"
 #include <string>
 
 struct Settings {
@@ -29,6 +30,7 @@ struct Settings {
     int touch = 0;         // on-screen controls: 0 auto (while no controller), 1 on, 2 off
 #endif
     bool touch_hidden = false;  // collapsed to the show/hide button (that button toggles it)
+    packs::Visuals visuals = packs::Visuals::Remaster; // renderer packs; applies at next launch
 };
 
 namespace settings {

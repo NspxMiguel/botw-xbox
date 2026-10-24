@@ -1,5 +1,6 @@
-#include "sha256.h"
 #include "packs.h"
+#include "sha256.h"
+#include "visuals.h"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,18 @@ const BuildPlan &compiled_plan() {
 #endif
 
 namespace packs {
+BuildPlan select_visuals(BuildPlan plan, Visuals visuals) {
+  if (visuals == Visuals::Original) {
+    for (auto &pack : plan.packs) {
+      pack.shaders.clear();
+      pack.textures.clear();
+    }
+  }
+  // Record the mode in the launch identity, including builds with no packs.
+  plan.fingerprint +=
+      visuals == Visuals::Original ? ":visuals:original" : ":visuals:remaster";
+  return plan;
+}
 namespace {
 bool includes(const Field &field, double value) {
   return std::find(field.values.begin(), field.values.end(), value) !=

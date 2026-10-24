@@ -4,23 +4,30 @@
 #include "../mem.h"
 #include "../mods/catalog.h"
 #include "../os.h"
-#include <cstdlib>
+#include "../settings.h"
 #include "loaded_rpx.h"
+#include "visuals.h"
+#include <cstdlib>
 
 namespace packs {
-// The compiled plan minus the packs switched off in the launcher's Mods screen (mods/enabled.txt).
+// Immutable launch snapshot: Mods selection followed by the Visuals renderer
+// policy.
 inline const BuildPlan &selected_plan() {
   static const BuildPlan plan = [] {
+    const auto visuals = settings::get().visuals;
     if (compiled_plan().packs.empty())
-      return compiled_plan();
+      return select_visuals(compiled_plan(), visuals);
     try {
       const char *root = std::getenv("BOTW_MODS_ROOT");
       mods::ModCatalog catalog;
       catalog.load(root ? root : g_user_root + "/mods", compiled_plan());
-      return mods::filtered_plan(compiled_plan(), catalog);
+      return select_visuals(mods::filtered_plan(compiled_plan(), catalog),
+                            visuals);
     } catch (const std::exception &e) {
-      LOG("Mods selection unreadable, using every pack: %s", e.what());
-      return compiled_plan();
+      LOG("Mods selection unreadable, using compiled packs with selected "
+          "visuals: %s",
+          e.what());
+      return select_visuals(compiled_plan(), visuals);
     }
   }();
   return plan;

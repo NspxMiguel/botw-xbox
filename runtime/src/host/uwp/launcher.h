@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #pragma once
+#include "../../packs/visuals.h"
 #include <optional>
 #include <string>
 #include <vector>
@@ -20,6 +21,7 @@ struct Preferences {
     int upscaler = 0, fsr_quality = 0, frame_generation = 0;
     int volume = 100;
     int layout = 0;
+    packs::Visuals visuals = packs::Visuals::Remaster;
 };
 struct LaunchDecision {
     std::optional<Candidate> game;
