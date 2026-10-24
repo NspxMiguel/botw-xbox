@@ -73,7 +73,7 @@ D3D12SimSeriesS::D3D12SimSeriesS(D3D12Renderer &renderer_, ID3D12CommandQueue *q
 	desc.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
 	desc.Count = kSlots * kQueries;
 	D3D12_ThrowIfFailed(device->CreateQueryHeap(&desc, IID_PPV_ARGS(&heap)), "simulation queries");
-	if (sim_series_s::settings().gpu_factor > 1)
+	if (sim_series_s::settings().enabled && sim_series_s::settings().gpu_factor > 1)
 	{
 		D3D12_ROOT_PARAMETER params[3]{};
 		params[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
@@ -127,7 +127,9 @@ void D3D12SimSeriesS::Poll()
 			if (pair[1] >= pair[0])
 				ticks += pair[1] - pair[0];
 		}
-		gpuMs += double(ticks) * 1000 / frequency;
+		const double frameMs = double(ticks) * 1000 / frequency;
+		gpuMs += frameMs;
+		maxGpuMs = std::max(maxGpuMs, frameMs);
 		if (slot.ballast)
 		{
 			uint64_t pair[2];
@@ -197,7 +199,7 @@ void D3D12SimSeriesS::EndFrame()
 		auto *cmd = renderer.GetCommandList();
 		const uint32_t first = current * kQueries;
 		cmd->ResolveQueryData(heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, first, slot.segments * 2, slot.readback.Get(), 0);
-		slot.ballast = sim_series_s::settings().gpu_factor > 1;
+		slot.ballast = sim_series_s::settings().enabled && sim_series_s::settings().gpu_factor > 1;
 		if (slot.ballast)
 		{
 			renderer.TransitionResource(slot.timestamps.Get(), slot.timestampState, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -228,7 +230,7 @@ void D3D12SimSeriesS::EndFrame()
 		}
 		if (slot.segments == kSegments)
 		{
-			LOG("Series S simulation timestamp segment limit reached; frame is underweighted");
+			LOG("GPU timestamp segment limit reached; frame is underweighted");
 			++capped;
 		}
 		slot.fence = renderer.GetRecordingSubmissionId();
@@ -242,13 +244,19 @@ void D3D12SimSeriesS::EndFrame()
 	const double seconds = std::chrono::duration<double>(now - lastLog).count();
 	if (seconds >= 1)
 	{
-		const auto cpu = sim_series_s::take_cpu_stats();
-		LOG("Series S simulation: fps %.1f, cpu %.3f ms, gpu %.3f -> %.3f ms (samples %llu, capped %llu, skipped %llu)",
-			frames / seconds, cpu.frames ? cpu.work_ms / cpu.frames : 0,
-			samples ? gpuMs / samples : 0, samples ? (gpuMs + ballastMs) / samples : 0,
+		LOG("GPU timing: mean %.3f ms, max %.3f ms, samples %llu, capped %llu, skipped %llu",
+			samples ? gpuMs / samples : 0, maxGpuMs,
 			static_cast<unsigned long long>(samples), static_cast<unsigned long long>(capped), static_cast<unsigned long long>(skipped));
+		if (sim_series_s::settings().enabled)
+		{
+			const auto cpu = sim_series_s::take_cpu_stats();
+			LOG("Series S simulation: fps %.1f, cpu %.3f ms, gpu %.3f -> %.3f ms (samples %llu, capped %llu, skipped %llu)",
+				frames / seconds, cpu.frames ? cpu.work_ms / cpu.frames : 0,
+				samples ? gpuMs / samples : 0, samples ? (gpuMs + ballastMs) / samples : 0,
+				static_cast<unsigned long long>(samples), static_cast<unsigned long long>(capped), static_cast<unsigned long long>(skipped));
+		}
 		lastLog = now;
-		gpuMs = ballastMs = 0;
+		gpuMs = ballastMs = maxGpuMs = 0;
 		samples = frames = capped = skipped = 0;
 	}
 }

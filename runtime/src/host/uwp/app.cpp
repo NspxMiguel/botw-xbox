@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: MIT
 #if defined(BOTW_PLATFORM_UWP)
-#include <csignal>
 #include "../../host/window.h"
 #include "../../latte/latte.h"
 #include "../../log.h"
@@ -18,6 +17,7 @@
 #include "host.h"
 #include "launcher.h"
 #include "mod_network.h"
+#include "output_policy.h"
 #include "quick_view.h"
 #include "recorder.h"
 #include "runtime.h"
@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <exception>
 #include <future>
 #include <memory>
@@ -596,8 +597,13 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 co_return;
             }
             auto values = ApplicationData::Current().LocalSettings().Values();
-            for (auto const &[key, value] : pending)
+            for (auto const &[key, value] : pending) {
                 values.Insert(key, value);
+                // An imported scale (including Auto=0) supersedes the legacy
+                // quick-menu override, otherwise benchmark settings are ignored.
+                if (key == L"renderScalePercent" && values.HasKey(L"renderScale"))
+                    values.Remove(L"renderScale");
+            }
             co_await file.RenameAsync(L"helper.applied.json", NameCollisionOption::ReplaceExisting);
             LOG("helper: applied %d settings", int(pending.size()));
         } catch (...) {
@@ -2285,6 +2291,8 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 co_await resume_foreground(dispatcher);
             }
             home.close(); // Release the CoreWindow swapchain before the game renderer takes ownership.
+            co_await uwp::configure_output_mode();
+            co_await resume_foreground(dispatcher);
             LOG("launch: start_runtime %dx%d", int(pixel_width), int(pixel_height));
             // Cleared on suspend. Still set at the next start means the game took the process down,
             // so that start shows home instead of auto-launching into the same crash again.
@@ -2884,6 +2892,11 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         winrt::Windows::UI::ViewManagement::UISettings ui_settings;
         while (!quit) {
             host_window.Dispatcher().ProcessEvents(CoreProcessEventsOption::ProcessAllIfPresent);
+            if (running && uwp::take_output_mode_change()) {
+                int output_width = pixel_width.load(), output_height = pixel_height.load();
+                uwp::refresh_output_mode(output_width, output_height);
+                latte::resize_window(output_width, output_height);
+            }
             if (failed && local && !opening && visible)
                 open_menu(false);
             try {
@@ -2977,7 +2990,10 @@ void on_frame(uint64_t frame) {
 bool quit_requested() { return quit; }
 SDL_Window *g_win_ptr() { return nullptr; }
 } // namespace window
-void botw_window_phys_size(int &w, int &h) { window::drawable_size(&w, &h); }
+void botw_window_phys_size(int &w, int &h) {
+    window::drawable_size(&w, &h);
+    uwp::game_output_extent.read(w, h);
+}
 int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // Multi-threaded like the C++/WinRT CoreApplication template: Run() sets up the view's own
     // ASTA, and a single-threaded apartment here kills the process before activation on Xbox.

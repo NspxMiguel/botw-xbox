@@ -42,7 +42,7 @@ class D3D12SimSeriesS
 	bool segmentOpen = false;
 	bool skippedFrame = false;
 	uint64_t frequency = 0;
-	double rate = 0, gpuMs = 0, ballastMs = 0;
+	double rate = 0, gpuMs = 0, ballastMs = 0, maxGpuMs = 0;
 	uint64_t samples = 0, frames = 0, capped = 0, skipped = 0;
 	std::chrono::steady_clock::time_point lastLog = std::chrono::steady_clock::now();
 };

@@ -12,6 +12,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12SwapChain.h"
 #ifdef BOTW_PLATFORM_UWP
 #include "../../../../../../src/host/uwp/host.h"
+#include "../../../../../../src/host/uwp/output_policy.h"
 #endif
 
 #include <dxgi1_5.h>
@@ -184,6 +185,17 @@ bool D3D12SwapChain::ReplaceNative(IDXGISwapChain1 *chain) noexcept
 		CloseHandle(m_frameLatencyWaitable);
 	m_frameLatencyWaitable = nullptr;
 	m_swapChain = std::move(replacement);
+	DXGI_SWAP_CHAIN_DESC1 actual{};
+	if (SUCCEEDED(m_swapChain->GetDesc1(&actual)))
+	{
+		m_width = actual.Width;
+		m_height = actual.Height;
+#ifdef BOTW_PLATFORM_UWP
+		if (m_type == TargetType::CoreWindow)
+			uwp::game_output_extent.publish(m_width, m_height);
+#endif
+		cemuLog_log(LogType::Force, "D3D12: actual swap chain {}x{}, {} buffers, format {}", m_width, m_height, actual.BufferCount, unsigned(actual.Format));
+	}
 	// Recreate and SDK replacement share this guard. Never configure latency
 	// on HWND/composition chains, or on the non-waitable CoreWindow fallback.
 	DXGI_SWAP_CHAIN_DESC1 desc{};
@@ -222,11 +234,19 @@ void D3D12SwapChain::Resize(uint32 width, uint32 height)
 	if (FAILED(hr))
 	{
 		cemuLog_log(LogType::Force, "D3D12: ResizeBuffers failed: {}", D3D12_HResultToString(hr));
+		// DXGI retains the old buffers after a rejected size. Restore their RTVs
+		// so a rejected HDMI change cannot leave presentation without resources.
+		CreateBufferViews();
 		return;
 	}
 	m_width = width;
 	m_height = height;
 	CreateBufferViews();
+#ifdef BOTW_PLATFORM_UWP
+	if (m_type == TargetType::CoreWindow)
+		uwp::game_output_extent.publish(m_width, m_height);
+#endif
+	cemuLog_log(LogType::Force, "D3D12: resized swap chain {}x{}", m_width, m_height);
 }
 
 bool D3D12SwapChain::Present(uint32 syncInterval, uint32 maxWaitMs)

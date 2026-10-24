@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 #include <string>
+#if defined(_WIN32)
+#include <winrt/Windows.Foundation.h>
+#endif
 namespace uwp {
+#if defined(_WIN32)
+winrt::Windows::Foundation::IAsyncAction configure_output_mode();
+#endif
+bool take_output_mode_change();
 void refresh_output_mode(int &width, int &height);
 float runtime_max_render_scale();
 float runtime_render_scale();

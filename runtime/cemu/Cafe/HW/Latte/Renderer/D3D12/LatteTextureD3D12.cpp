@@ -11,6 +11,10 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureViewD3D12.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Renderer.h"
 #include "Cafe/HW/Latte/Core/Latte.h"
+#include "Cafe/HW/Latte/Core/LatteProfiler.h"
+#ifdef BOTWRECOMP
+extern float g_render_scale;
+#endif
 
 #include "D3D12PackHooks.h"
 #include <mutex>
@@ -133,6 +137,32 @@ LatteTextureD3D12::LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, 
 	{
 		D3D12_SetDebugName(m_resource.Get(), fmt::format("tex_{:08x}_fmt{:04x}_tm{:x}", physAddress, (uint32)format, (uint32)tileMode));
 	}
+#ifdef BOTWRECOMP
+	if (m_resource && LatteProfiler::IsConfigured() &&
+		(m_desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)))
+	{
+		// Driver allocation sizes include alignment/format expansion. Forecast only
+		// uniformly scaled targets, leaving pack-sized shadow maps fixed.
+		const bool scaled = g_render_scale > 0 && overwriteInfo.hasResolutionOverwrite &&
+							std::abs(double(m_desc.Width) - width * g_render_scale) <= 1 &&
+							std::abs(double(m_desc.Height) - height * g_render_scale) <= 1;
+		uint64 bytes[3]{};
+		constexpr double scales[]{1.5, 2.0, 3.0};
+		for (int i = 0; i < 3; ++i)
+		{
+			auto desc = m_desc;
+			if (scaled)
+			{
+				const double scale = scales[i] / g_render_scale;
+				desc.Width = std::max<UINT64>(1, UINT64(desc.Width * scale));
+				desc.Height = std::max<UINT>(1, UINT(desc.Height * scale));
+			}
+			bytes[i] = renderer->GetDevice()->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
+		}
+		cemuLog_log(LogType::Force, "RT allocation: id={} 1080={} 1440={} 2160={} scaled={}",
+					static_cast<const void *>(this), bytes[0], bytes[1], bytes[2], scaled);
+	}
+#endif
 	m_lastTransition.Clear();
 	++m_stateVersion;
 	m_states.resize(GetSubresourceCount(), initialState);
@@ -140,6 +170,10 @@ LatteTextureD3D12::LatteTextureD3D12(D3D12Renderer *renderer, Latte::E_DIM dim, 
 
 LatteTextureD3D12::~LatteTextureD3D12()
 {
+#ifdef BOTWRECOMP
+	if (LatteProfiler::IsConfigured())
+		cemuLog_log(LogType::Force, "RT release: id={}", static_cast<const void *>(this));
+#endif
 	cemu_assert_debug(views.empty());
 	m_renderer->NotifyTextureRelease(this);
 	m_renderer->ReleaseResourceDeferred(std::move(m_resource));

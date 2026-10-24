@@ -107,7 +107,7 @@ D3D12Renderer::D3D12Renderer()
 		throw std::runtime_error(err);
 	RendererShaderD3D12::Init();
 
-	if (sim_series_s::settings().enabled)
+	if (sim_series_s::settings().enabled || LatteProfiler::IsConfigured())
 	{
 		try
 		{
@@ -116,7 +116,7 @@ D3D12Renderer::D3D12Renderer()
 		catch (const std::exception &e)
 		{
 			// Diagnostic mode only: never keep the game from starting.
-			cemuLog_log(LogType::Force, "Series S simulation unavailable: {}", e.what());
+			cemuLog_log(LogType::Force, "GPU timestamps unavailable: {}", e.what());
 		}
 	}
 

@@ -11,7 +11,9 @@
 #include "../../settings.h"
 #include "../../sim_series_s.h"
 #include "first_frame.h"
+#include "output_policy.h"
 #if defined(_WIN32)
+#include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Graphics.Display.Core.h>
 #include <winrt/Windows.Graphics.Display.h>
@@ -41,17 +43,18 @@ extern "C" PPC_NORETURN void rt_fatal_exit() { std::_Exit(3); }
 namespace uwp {
 namespace {
 packs::LoadedRpx loaded_rpx;
+std::atomic<bool> mode_changed{false};
 void output_pixels([[maybe_unused]] int &width, [[maybe_unused]] int &height) {
 #if defined(_WIN32)
     try {
         const auto hdmi =
             winrt::Windows::Graphics::Display::Core::HdmiDisplayInformation::GetForCurrentView();
         if (hdmi) {
-#ifdef BOTW_HAS_FFX
             static winrt::Windows::Graphics::Display::Core::HdmiDisplayInformation monitored{nullptr};
             if (!monitored) {
                 monitored = hdmi;
                 monitored.DisplayModesChanged([](auto const &sender, auto const &) {
+                    mode_changed.store(true);
                     try {
                         const auto current = sender.GetCurrentDisplayMode();
                         fsr3::display_hz.store(current ? current.RefreshRate() : 0);
@@ -60,7 +63,6 @@ void output_pixels([[maybe_unused]] int &width, [[maybe_unused]] int &height) {
                     }
                 });
             }
-#endif
             const auto mode = hdmi.GetCurrentDisplayMode();
             if (mode && mode.ResolutionWidthInRawPixels() && mode.ResolutionHeightInRawPixels()) {
                 width = static_cast<int>(mode.ResolutionWidthInRawPixels());
@@ -105,8 +107,46 @@ float hardware_max_render_scale() { return console_profile() == fsr3::Console::S
 namespace {
 float requested_scale = 0;
 }
+bool take_output_mode_change() { return mode_changed.exchange(false); }
+#if defined(_WIN32)
+winrt::Windows::Foundation::IAsyncAction configure_output_mode() {
+    using namespace winrt::Windows::Graphics::Display::Core;
+    if (console_profile() != fsr3::Console::SeriesX)
+        co_return;
+    try {
+        const auto hdmi = HdmiDisplayInformation::GetForCurrentView();
+        if (!hdmi) {
+            LOG("HDMI information unavailable; retaining CoreWindow output size");
+            co_return;
+        }
+        const auto current = hdmi.GetCurrentDisplayMode();
+        if (!current) {
+            LOG("HDMI current mode unavailable; retaining CoreWindow output size");
+            co_return;
+        }
+        auto describe = [](const HdmiDisplayMode &mode) {
+            return OutputMode{int(mode.ResolutionWidthInRawPixels()), int(mode.ResolutionHeightInRawPixels()),
+                              mode.RefreshRate(), mode.IsSdrLuminanceSupported(), mode.StereoEnabled()};
+        };
+        auto selected = current;
+        for (const auto &mode : hdmi.GetSupportedDisplayModes())
+            if (better_game_mode(describe(mode), describe(selected)))
+                selected = mode;
+        LOG("HDMI current %ux%u %.2f Hz; selected %ux%u %.2f Hz", current.ResolutionWidthInRawPixels(),
+            current.ResolutionHeightInRawPixels(), current.RefreshRate(),
+            selected.ResolutionWidthInRawPixels(), selected.ResolutionHeightInRawPixels(),
+            selected.RefreshRate());
+        if (selected != current) {
+            const bool accepted =
+                co_await hdmi.RequestSetCurrentDisplayModeAsync(selected, HdmiDisplayHdrOption::None);
+            LOG("HDMI mode request %s", accepted ? "accepted" : "rejected; retaining current mode");
+        }
+    } catch (const winrt::hresult_error &e) {
+        LOG("HDMI mode selection unavailable (0x%08x); retaining current display", unsigned(e.code().value));
+    }
+}
+#endif
 void refresh_output_mode(int &width, int &height) {
-#ifdef BOTW_HAS_FFX
     fsr3::display_hz.store(0);
     output_pixels(width, height);
     fsr3::console.store(console_profile());
@@ -116,10 +156,6 @@ void refresh_output_mode(int &width, int &height) {
         width = std::max(1, width * policy.output_height / height);
         height = policy.output_height;
     }
-#else
-    (void)width;
-    (void)height;
-#endif
 }
 float runtime_max_render_scale() { return hardware_max_render_scale(); }
 float runtime_render_scale() { return g_render_scale; }
@@ -162,8 +198,7 @@ void start_runtime(void *window, int width, int height) {
     LOG("start_runtime: window size %dx%d", width, height);
     try {
         first_frame_presented.store(false, std::memory_order_release);
-        output_pixels(width, height);
-        fsr3::console.store(console_profile());
+        refresh_output_mode(width, height);
         // The quick menu's video scale wins; otherwise FSR picks the scale for this console and output.
         const auto preferences = settings::get();
         const auto quality =
@@ -189,10 +224,14 @@ void start_runtime(void *window, int width, int height) {
             g_render_scale = std::clamp(display_scale / (upscale_output ? automatic.ratio : 1.f), 0.5f,
                                         hardware_max_render_scale());
 #endif
+        if (requested_scale <= 0 && !(std::isfinite(preferences.scale) && preferences.scale > 0) &&
+            fsr::effective_upscaler(preferences.upscaler) == fsr::Upscaler::Off)
+            g_render_scale = native_render_scale(width, height, console_profile());
         LOG("output %dx%d, render scale %.2f", width, height, g_render_scale);
         latte::create_renderer(window, width, height); // W2: IUnknown CoreWindow, not NSView.
         settings::apply();
         packs::install_loaded(loaded_rpx, d3d12_packs::hooks());
+        LOG("Graphic pack plan: %s", packs::selected_plan().fingerprint.c_str());
         auto argv = os::build_argv("U-King.rpx");
         const auto &module = loader::main_module();
         LOG("start_runtime: starting guest main thread entry=0x%08x", module.entry);
