@@ -269,6 +269,29 @@ static void LifetimeTests()
 	assert(fresh.slot == old.slot && fresh.generation != old.generation);
 	assert(*registry.Get<int>(fresh) == 43);
 	Throws([&] { registry.Get<int>(old); });
+	// Sparse retirement compacts pending entries without losing a later-ready
+	// resource behind a long-lived one, and reverse reuse still requires Recycle.
+	Registry sparse(8);
+	std::array<int, 3> scene{1, 2, 3};
+	std::array<ResourceId, 3> released{};
+	for (size_t i = 0; i < released.size(); ++i)
+	{
+		released[i] = sparse.Insert(&scene[i]);
+		sparse.Use(released[i], i + 1, i == 0 ? 100 : i + 1);
+		sparse.Release(released[i]);
+	}
+	std::vector<ResourceId> ready;
+	sparse.Retire(3, 3, &ready);
+	assert(ready.size() == 2 && ready[0].slot == released[1].slot && ready[1].slot == released[2].slot);
+	assert(sparse.Insert(&object).slot == 3);
+	sparse.Recycle(ready);
+	const auto reused = sparse.Insert(&replacement);
+	assert(reused.slot == released[2].slot && reused.generation != released[2].generation);
+	ready.clear();
+	sparse.Retire(3, 100, &ready);
+	assert(ready.size() == 1 && ready[0].slot == released[0].slot);
+	sparse.Retire(3, 100, &ready);
+	assert(ready.size() == 1);
 	Tickets tickets;
 	tickets.Record(5);
 	tickets.Submit(5);

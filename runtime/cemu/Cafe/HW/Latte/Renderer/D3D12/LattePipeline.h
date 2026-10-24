@@ -840,9 +840,10 @@ class Stream
 						continue;
 					{
 						NativeScope scope(*this, context);
-						const auto start = Clock::now();
+						const auto start = m_measureRecording ? Clock::now() : Clock::time_point{};
 						idle();
-						m_backPipelineTiming.backBusyNs += Ns(start);
+						if (m_measureRecording)
+							m_backPipelineTiming.backBusyNs += Ns(start);
 						PublishProgress();
 					}
 					if (m_ring.Empty() && !m_exit.load())
@@ -1210,7 +1211,7 @@ class Stream
 	template <class Record>
 	void ConsumeOperation(Context &context, const Header &header, uint64_t arenaEnd, Record record)
 	{
-		const auto start = m_threaded ? Clock::now() : Clock::time_point{};
+		const auto start = m_threaded && m_measureRecording ? Clock::now() : Clock::time_point{};
 		NativeScope scope(*this, context);
 		m_activeHeader = header;
 		const bool resultNeeded = m_threaded || m_handler || (header.reserved & 1);
@@ -1226,7 +1227,7 @@ class Stream
 			m_result.sequence = header.sequence;
 			m_result.completedFence = m_backCompletedFence;
 			m_result.tickets = m_backTickets;
-			if (m_threaded)
+			if (m_threaded && m_measureRecording)
 				m_backPipelineTiming.backBusyNs += Ns(start);
 			m_result.backBusyNs = m_backPipelineTiming.backBusyNs;
 			m_result.backIdleNs = m_backPipelineTiming.backIdleNs;
@@ -1255,6 +1256,9 @@ class Stream
 	uint64_t m_pauseTarget = 0;
 	unsigned m_unreported = 0;
 	uint64_t m_lastPublished = 0;
+	// Per-operation clock reads are diagnostics too. Keep the release worker's
+	// normal path free of them when the Latte profiler is disabled.
+	const bool m_measureRecording = EnvironmentFlag("CEMU_LATTE_PROFILE");
 	bool m_stopped = false, m_threaded = false;
 };
 } // namespace LattePipeline

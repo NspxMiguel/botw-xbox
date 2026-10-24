@@ -1,4 +1,4 @@
-// Exercise the production transport with the console's index-churn workload.
+// Exercise production transport under an index-churn stress workload.
 // Native allocations/fences are modeled; these are not Xbox frame predictions.
 #include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
 #include <iostream>
@@ -105,7 +105,8 @@ int main(int argc, char **argv)
 	stream.Stop(context, recorder);
 	const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / frames;
 	assert(recorder.draws == frames * draws && recorder.uploads == frames * misses);
+	assert((stream.Metrics().backBusyNs != 0) == EnvironmentFlag("CEMU_LATTE_PROFILE"));
 	std::cout << (synchronous ? "Synchronous" : split ? "Split asynchronous"
 													  : "Fused asynchronous")
-			  << " worker index churn: " << ms << " ms/5000 draws; " << waits / frames << " replies/frame; reply wait " << stream.Metrics().replyWaitNs / (1e6 * frames) << " ms/frame; capacity wait " << stream.Metrics().backpressureNs / (1e6 * frames) << " ms/frame\n";
+			  << " worker index churn: " << ms << " ms/5000 draws; " << context.Sequence() / frames << " operations/frame; " << waits / frames << " replies/frame; reply wait " << stream.Metrics().replyWaitNs / (1e6 * frames) << " ms/frame; capacity wait " << stream.Metrics().backpressureNs / (1e6 * frames) << " ms/frame\n";
 }
