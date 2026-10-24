@@ -10,7 +10,7 @@ namespace uwp {
 inline const char *ReadLattePipelineMode(const std::filesystem::path &file) {
     std::ifstream input(file);
     if (!input)
-        return "2";
+        return "0";
     const std::string mode((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
     const auto first = mode.find_first_not_of(" \t\r\n");
     const auto last = mode.find_last_not_of(" \t\r\n");

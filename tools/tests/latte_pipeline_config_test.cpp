@@ -14,7 +14,7 @@ int main() {
   auto mode = [&] {
     return std::string_view(uwp::ReadLattePipelineMode(file));
   };
-  assert(mode() == "2");
+  assert(mode() == "0");
   for (const auto *selected : {"0", "1", "2", "3"}) {
     {
       std::ofstream output(file);
