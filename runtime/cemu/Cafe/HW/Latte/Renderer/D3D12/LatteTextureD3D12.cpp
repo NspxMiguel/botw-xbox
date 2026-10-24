@@ -163,7 +163,7 @@ void LatteTextureD3D12::CreateNative()
 				desc.Width = std::max<UINT64>(1, UINT64(desc.Width * scale));
 				desc.Height = std::max<UINT>(1, UINT(desc.Height * scale));
 			}
-			bytes[i] = renderer->GetDevice()->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
+			bytes[i] = m_renderer->GetDevice()->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes;
 		}
 		cemuLog_log(LogType::Force, "RT allocation: id={} 1080={} 1440={} 2160={} scaled={}",
 					static_cast<const void *>(this), bytes[0], bytes[1], bytes[2], scaled);
