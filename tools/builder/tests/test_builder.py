@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -284,7 +285,7 @@ def test_portal_does_not_follow_auth_redirects(monkeypatch, status, match):
 @pytest.mark.parametrize("preset", ["remaster", "vanilla"])
 def test_build_pipeline_keeps_private_work_outside_repo_and_cleans(tmp_path, monkeypatch, preset):
     """Exercise orchestration without compiling game code or allocating a real build."""
-    data, out = tmp_path / "data", tmp_path / "out"
+    data, out = tmp_path / "private data", tmp_path / "private output"
     data.mkdir()
     (data / "setup.json").write_text(
         json.dumps({name: "/reuse/" + name for name in builder.REUSE_FLAGS})
@@ -341,19 +342,22 @@ def test_build_pipeline_keeps_private_work_outside_repo_and_cleans(tmp_path, mon
         out / "BotWRecomp.appx"
     )
     recompile = commands[0]
-    assert "tools/packs/recompile.py" in " ".join(recompile)
+    assert str(builder.ROOT / "tools/packs/recompile.py") in recompile
+    assert recompile[1:4] == ["-X", "utf8", "-I"]
     if preset == "remaster":
         assert recompile[recompile.index("--console") + 1] == "series_x"
     configure = next(c for c in commands if "-G" in c)
     assert "-DBOTW_BUILD_GAME=ON" in configure
-    assert any(c.startswith("-DBOTW_GENERATED_DIR=" + str(out)) for c in configure)
+    assert any(c.startswith("-DBOTW_GENERATED_DIR=" + out.as_posix()) for c in configure)
+    for variable, tool in builder.CMAKE_TOOLS.items():
+        assert f"-D{variable}={tool}" in configure
     assert not list(out.glob("builder-work-*"))
 
 
 def test_real_synthetic_appx_signing_and_certificate_reuse(tmp_path):
     """Verify the packer/signer together, using only our own synthetic payload."""
-    if not all(builder.find_tool(name) for name in ("openssl", "osslsigncode")):
-        pytest.skip("OpenSSL and osslsigncode required")
+    if not builder.find_tool("openssl") or not builder.find_signer():
+        pytest.skip("OpenSSL and an APPX signer required")
     stage = tmp_path / "stage"
     stage.mkdir()
     shutil.copyfile(
@@ -425,18 +429,19 @@ def test_cmake_toolchain_discovery_and_cache_overrides(tmp_path, override):
             "CMAKE_MT",
         ):
             command += [f"-D{name}={Path(cmake).as_posix()}"]
-        command += [
-            "-DXWIN_ROOT=/custom/xwin",
-            "-DVCPKG_UWP_ROOT=/custom/vcpkg",
-            "-DXWIN_SDK_INCLUDE_DIR=/custom/include",
-        ]
+        for name, folder in (
+            ("XWIN_ROOT", "custom xwin"),
+            ("VCPKG_UWP_ROOT", "custom vcpkg"),
+            ("XWIN_SDK_INCLUDE_DIR", "custom include"),
+        ):
+            command += [f"-D{name}={(tmp_path / folder).as_posix()}"]
     result = subprocess.run(
         [*command, "-P", str(script)], check=True, capture_output=True, text=True
     )
     if override:
-        assert "XWIN_ROOT=/custom/xwin" in result.stdout
-        assert "VCPKG_UWP_ROOT=/custom/vcpkg" in result.stdout
-        assert "XWIN_SDK_INCLUDE_DIR=/custom/include" in result.stdout
+        assert "XWIN_ROOT=" + (tmp_path / "custom xwin").as_posix() in result.stdout
+        assert "VCPKG_UWP_ROOT=" + (tmp_path / "custom vcpkg").as_posix() in result.stdout
+        assert "XWIN_SDK_INCLUDE_DIR=" + (tmp_path / "custom include").as_posix() in result.stdout
         assert "CMAKE_C_COMPILER=" + Path(cmake).as_posix() in result.stdout
     else:
         assert "clang-cl" in result.stdout
@@ -486,6 +491,208 @@ def test_ninja_waits_for_existing_process(tmp_path, monkeypatch):
     with builder.ninja_slot(tmp_path):
         assert sleep.call_count == 2
     assert all(call.args == (5,) for call in sleep.call_args_list)
+
+
+def host_os(monkeypatch, name):
+    # Replace only the builder's OS view; pathlib/pytest retain the real host OS.
+    monkeypatch.setattr(builder, "os", SimpleNamespace(**{**vars(os), "name": name}))
+
+
+@pytest.mark.parametrize("name", ["clang-cl", "lld-link", "llvm-mc"])
+def test_version_suffixed_llvm_tools(tmp_path, monkeypatch, name):
+    monkeypatch.setattr(builder.shutil, "which", lambda _: None)
+    monkeypatch.setattr(builder, "tool_dirs", list)
+    monkeypatch.setattr(builder.os, "get_exec_path", lambda: [str(tmp_path)])
+    for suffix in ("9", "18", "20", "oops"):
+        tool = tmp_path / f"{name}-{suffix}"
+        tool.write_bytes(b"fixture")
+        tool.chmod(0o755)
+    assert builder.find_tool(name) == str(tmp_path / f"{name}-20")
+
+
+def test_native_windows_executable_discovery(tmp_path, monkeypatch):
+    host_os(monkeypatch, "nt")
+    monkeypatch.setattr(builder.shutil, "which", lambda _: None)
+    monkeypatch.setattr(builder, "tool_dirs", lambda: [tmp_path / "LLVM tools"])
+    executable = tmp_path / "LLVM tools/clang-cl.exe"
+    executable.parent.mkdir()
+    executable.write_bytes(b"fixture")
+    executable.chmod(0o755)
+    assert builder.find_tool("clang-cl") == str(executable)
+
+
+def test_windows_prefers_native_signtool(monkeypatch):
+    host_os(monkeypatch, "nt")
+    monkeypatch.setattr(builder, "find_tool", lambda name: f"C:/Program Files/tools/{name}.exe")
+    check = Mock(side_effect=AssertionError("must not probe osslsigncode"))
+    monkeypatch.setattr(builder.subprocess, "check_output", check)
+    assert builder.find_signer() == "C:/Program Files/tools/signtool.exe"
+
+
+def test_broken_signer_is_reported_as_missing(monkeypatch):
+    monkeypatch.setattr(
+        builder, "find_tool", lambda n: "osslsigncode" if n == "osslsigncode" else None
+    )
+    monkeypatch.setattr(
+        builder.subprocess, "check_output", Mock(side_effect=OSError("missing DLL"))
+    )
+    assert builder.find_signer() is None
+
+
+def test_signtool_keeps_spaces_and_empty_password_in_separate_arguments(tmp_path, monkeypatch):
+    signer = "C:/Program Files/Windows Kits/10/bin/x64/signtool.exe"
+    monkeypatch.setattr(builder, "find_signer", lambda: signer)
+    unsigned, signed = tmp_path / "unsigned file.appx", tmp_path / "signed file.appx"
+    pfx, cer = tmp_path / "private key.pfx", tmp_path / "public key.cer"
+    with zipfile.ZipFile(unsigned, "w") as package:
+        package.writestr("AppxSignature.p7x", b"PKCXmock signature")
+    command = Mock()
+    monkeypatch.setattr(builder, "run", command)
+    builder.sign_package(unsigned, signed, pfx, cer)
+    command.assert_called_once_with([signer, "sign", "/fd", "SHA256", "/f", pfx, "/p", "", signed])
+    assert signed.read_bytes() == unsigned.read_bytes()
+
+
+@pytest.mark.parametrize(
+    "system,machine,os_name,triple",
+    [
+        ("Windows", "AMD64", "nt", "x86_64-pc-windows-msvc"),
+        ("Linux", "x86_64", "posix", "x86_64-unknown-linux-musl"),
+        ("Linux", "aarch64", "posix", "aarch64-unknown-linux-musl"),
+    ],
+)
+def test_xwin_platform_download_and_store_crt(
+    tmp_path, monkeypatch, system, machine, os_name, triple
+):
+    host_os(monkeypatch, os_name)
+    monkeypatch.setattr(builder.platform, "system", lambda: system)
+    monkeypatch.setattr(builder.platform, "machine", lambda: machine)
+    fetched, commands = [], []
+
+    def fetch(data, name, url, digest, destination):
+        fetched.append((name, url, digest))
+        destination.mkdir()
+        (destination / ("xwin.exe" if os_name == "nt" else "xwin")).write_bytes(b"fixture")
+
+    def run(command, **kwargs):
+        commands.append(command)
+        if "unpack" in command:
+            store = Path(command[command.index("--cache-dir") + 1]) / "unpack/crt/lib/x64/store"
+            store.mkdir(parents=True)
+            (store / "msvcprt.lib").write_bytes(b"synthetic store CRT")
+        else:
+            sdk = Path(command[command.index("--output") + 1])
+            # Match real xwin: prep_splat clears the output CRT, and splat
+            # moves files out of the unpack cache. Neither location is safe.
+            if sdk.exists():
+                shutil.rmtree(sdk)
+            sdk.mkdir()
+            shutil.rmtree(Path(command[command.index("--cache-dir") + 1]) / "unpack")
+
+    monkeypatch.setattr(builder, "fetch_archive", fetch)
+    monkeypatch.setattr(builder, "run", run)
+    sdk = builder.fetch_xwin(tmp_path, SimpleNamespace(accept_microsoft_license=True))
+    name, url, digest = fetched[0]
+    assert name == f"xwin-{builder.XWIN_VERSION}-{triple}.tar.gz"
+    assert url.endswith("/" + name) and digest == builder.XWIN_HASHES[triple]
+    assert (sdk / "crt/lib/x86_64/store/msvcprt.lib").read_bytes() == b"synthetic store CRT"
+    assert ("--disable-symlinks" in commands[-1]) == (os_name == "nt")
+    assert all("--accept-license" in command for command in commands)
+
+
+def test_dependency_checkout_preserves_lf_despite_git_defaults(tmp_path):
+    git = builder.find_tool("git")
+    if not git:
+        pytest.skip("Git required")
+    repository = tmp_path / "source repository"
+    checkout = tmp_path / "dependency with spaces"
+    builder.run([git, "init", repository])
+    source = repository / "source.txt"
+    payload = "pinned UTF-8 bytes: \u00e9\nsecond line\n".encode()
+    source.write_bytes(payload)
+    builder.run([git, "-C", repository, "add", "source.txt"])
+    builder.run(
+        [
+            git,
+            "-C",
+            repository,
+            "-c",
+            "user.name=Miguel",
+            "-c",
+            "user.email=miguel@nspx.dev",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-m",
+            "Add synthetic fixture",
+        ]
+    )
+    builder.run([git, "clone", "--no-checkout", repository, checkout])
+    builder.run([git, "-C", checkout, "config", "core.autocrlf", "true"])
+    builder.checkout_without_personal_instructions(checkout, "HEAD")
+    assert (checkout / "source.txt").read_bytes() == payload
+    assert b"\r" not in (checkout / ".git/info/sparse-checkout").read_bytes()
+
+
+@pytest.mark.parametrize(
+    "distro,manager", [("ubuntu", "apt"), ("arch", "pacman"), ("fedora", "dnf")]
+)
+def test_linux_install_guidance(monkeypatch, distro, manager):
+    monkeypatch.setattr(builder.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(builder.platform, "freedesktop_os_release", lambda: {"ID": distro})
+    monkeypatch.setattr(builder, "find_tool", lambda _: None)
+    assert any(manager in command for command in builder.install_commands())
+
+
+def test_posix_command_display_quotes_shell_metacharacters(monkeypatch):
+    host_os(monkeypatch, "posix")
+    command = ["/path with spaces/python", "/output/it's $(literal);file"]
+    assert shlex.split(builder.command_line(command)) == command
+
+
+@pytest.mark.parametrize(
+    "output,running",
+    [('"ninja.exe","1234","Console"\r\n', True), ("INFO: No tasks match.\r\n", False)],
+)
+def test_windows_ninja_process_detection(monkeypatch, output, running):
+    host_os(monkeypatch, "nt")
+    check = Mock(return_value=output)
+    monkeypatch.setattr(builder.subprocess, "check_output", check)
+    assert builder.ninja_running() == running
+    assert check.call_args.args[0] == [
+        "tasklist",
+        "/FI",
+        "IMAGENAME eq ninja.exe",
+        "/FO",
+        "CSV",
+        "/NH",
+    ]
+
+
+@pytest.mark.parametrize("powerpc", [True, False])
+def test_doctor_requires_working_powerpc_assembler(monkeypatch, powerpc):
+    monkeypatch.setattr(builder, "find_tool", lambda name: name)
+    monkeypatch.setattr(builder, "find_signer", lambda: "signer")
+    monkeypatch.setattr(builder, "install_commands", list)
+    monkeypatch.setattr(builder.subprocess, "check_output", lambda *a, **k: "cmake version 3.31")
+    probe = Mock(
+        return_value=SimpleNamespace(
+            returncode=0 if powerpc else 1,
+            stdout="encoding: [0x4e,0x80,0x00,0x20]\r\n" if powerpc else "",
+        )
+    )
+    monkeypatch.setattr(builder.subprocess, "run", probe)
+    if powerpc:
+        builder.doctor()
+    else:
+        with pytest.raises(builder.BuilderError, match="llvm-mc PowerPC backend"):
+            builder.doctor()
+    assert probe.call_args.args[0] == [
+        "llvm-mc",
+        "--triple=powerpc-unknown-linux-gnu",
+        "--show-encoding",
+    ]
+    assert probe.call_args.kwargs["input"] == "blr\n"
 
 
 def test_default_package_version_increases():

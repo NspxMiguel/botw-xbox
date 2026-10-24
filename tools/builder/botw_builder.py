@@ -18,6 +18,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import ssl
 import subprocess
@@ -66,6 +67,14 @@ TOOLS = (
     "uv",
     "openssl",
 )
+CMAKE_TOOLS = {
+    "CMAKE_C_COMPILER": "clang-cl",
+    "CMAKE_CXX_COMPILER": "clang-cl",
+    "CMAKE_LINKER": "lld-link",
+    "CMAKE_AR": "llvm-lib",
+    "CMAKE_RC_COMPILER": "llvm-rc",
+    "CMAKE_MT": "llvm-mt",
+}
 MIN_FREE = 6 * 1024**3
 
 
@@ -83,9 +92,14 @@ def step(label):
         print(f"{label}: {time.monotonic() - started:.2f} s", flush=True)
 
 
+def command_line(command):
+    command = [str(part) for part in command]
+    return subprocess.list2cmdline(command) if os.name == "nt" else shlex.join(command)
+
+
 def run(command, **kwargs):
     command = [str(part) for part in command]
-    print("+ " + subprocess.list2cmdline(command), flush=True)
+    print("+ " + command_line(command), flush=True)
     subprocess.run(command, check=True, **kwargs)
 
 
@@ -142,11 +156,21 @@ def tool_dirs():
         Path("/usr/lib/llvm/bin"),
         Path("/usr/bin"),
     ]
-    directories += sorted(Path("/usr/lib").glob("llvm-*/bin"), reverse=True)
+    directories += sorted(
+        Path("/usr/lib").glob("llvm-*/bin"),
+        key=lambda path: tuple(int(n) for n in re.findall(r"\d+", str(path))),
+        reverse=True,
+    )
     for variable in ("ProgramFiles", "ProgramFiles(x86)"):
-        base = Path(os.environ.get(variable, "C:/Program Files"))
+        default = "C:/Program Files (x86)" if variable.endswith("(x86)") else "C:/Program Files"
+        base = Path(os.environ.get(variable, default))
         directories += [base / "LLVM/bin", base / "CMake/bin", base / "OpenSSL-Win64/bin"]
         directories += sorted((base / "Windows Kits/10/bin").glob("*/x64"), reverse=True)
+        # Git for Windows bundles OpenSSL, without adding usr/bin to PATH.
+        directories += [base / "Git/usr/bin"]
+    if os.name == "nt":
+        msys = Path(os.environ.get("SystemDrive", "C:") + "/") / "msys64"
+        directories += [msys / variant / "bin" for variant in ("ucrt64", "clang64", "mingw64")]
     return directories
 
 
@@ -159,18 +183,37 @@ def find_tool(name):
             path = directory / (name + suffix)
             if path.is_file() and os.access(path, os.X_OK):
                 return str(path)
+    # Debian/Ubuntu can expose only version-suffixed LLVM tools on PATH.
+    if name.startswith(("clang-", "lld-", "llvm-")):
+        candidates = []
+        for directory in os.get_exec_path():
+            for path in Path(directory).glob(name + "-*"):
+                match = re.fullmatch(re.escape(name) + r"-(\d+)(?:\.exe)?", path.name)
+                if match and path.is_file() and os.access(path, os.X_OK):
+                    candidates.append((int(match[1]), str(path)))
+        if candidates:
+            return max(candidates)[1]
     return None
 
 
 def find_signer():
+    # Prefer the native SDK tool on Windows, even when an older/broken
+    # osslsigncode is also installed (e.g. by MSYS2).
+    if os.name == "nt" and (signtool := find_tool("signtool")):
+        return signtool
     osslsigncode = find_tool("osslsigncode")
     if osslsigncode:
-        version = subprocess.check_output([osslsigncode, "--version"], text=True)
+        try:
+            version = subprocess.check_output(
+                [osslsigncode, "--version"], text=True, stderr=subprocess.STDOUT
+            )
+        except (OSError, subprocess.CalledProcessError):
+            return None
         match = re.search(r"osslsigncode (\d+)\.(\d+)", version)
         # 2.7 added APPX; 2.9 corrected its central-directory ordering.
         if match and tuple(map(int, match.groups())) >= (2, 9):
             return osslsigncode
-    return find_tool("signtool") if os.name == "nt" else None
+    return None
 
 
 def install_commands():
@@ -189,23 +232,28 @@ def install_commands():
                 "ShiningLight.OpenSSL.Dev",
             )
         ] + [
-            "Install osslsigncode with APPX support, or install SignTool: winget install --exact --id Microsoft.WindowsSDK.10.0.26100"
+            "Install osslsigncode with APPX support, or install SignTool: winget install --exact --id Microsoft.WindowsSDK.10.0.26100",
+            "The LLVM Windows installer omits PowerPC tools. Install MSYS2 (winget install --exact --id MSYS2.MSYS2), then in its UCRT64 shell: pacman -S --needed mingw-w64-ucrt-x86_64-llvm-tools",
+            "Put C:\\msys64\\ucrt64\\bin before other LLVM directories on PATH so llvm-mc has the PowerPC backend. Run the builder from PowerShell or cmd.exe.",
         ]
     if system == "Linux":
-        distro = platform.freedesktop_os_release()
+        try:
+            distro = platform.freedesktop_os_release()
+        except OSError:
+            distro = {}
         identifiers = (distro.get("ID", "") + " " + distro.get("ID_LIKE", "")).split()
         if "arch" in identifiers:
             commands = [
-                "sudo pacman -S --needed clang llvm lld cmake ninja osslsigncode openssl git python uv"
+                "sudo pacman -S --needed clang llvm lld cmake ninja osslsigncode openssl git python uv procps-ng"
             ]
         elif any(value in identifiers for value in ("fedora", "rhel", "centos")):
             commands = [
-                "sudo dnf install clang clang-tools-extra llvm lld cmake ninja-build osslsigncode openssl git python3"
+                "sudo dnf install clang clang-tools-extra llvm lld cmake ninja-build osslsigncode openssl git python3 procps-ng"
             ]
         else:
             commands = [
                 "sudo apt update",
-                "sudo apt install clang llvm lld cmake ninja-build osslsigncode openssl git python3",
+                "sudo apt install clang clang-tools llvm lld cmake ninja-build osslsigncode openssl git python3 procps",
             ]
         if not find_tool("uv") and "arch" not in identifiers:
             commands += ["curl -LsSf https://astral.sh/uv/install.sh | sh"]
@@ -235,11 +283,26 @@ def doctor(_args=None):
         if not match or tuple(map(int, match.groups())) < (3, 24):
             missing.append("CMake >= 3.24")
             print("MISSING CMake >= 3.24")
+    if llvm_mc := find_tool("llvm-mc"):
+        probe = subprocess.run(
+            [llvm_mc, "--triple=powerpc-unknown-linux-gnu", "--show-encoding"],
+            input="blr\n",
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if probe.returncode or not re.search(
+            r"encoding:\s*\[0x4e,\s*0x80,\s*0x00,\s*0x20\]", probe.stdout, re.IGNORECASE
+        ):
+            missing.append("llvm-mc PowerPC backend")
+            print(
+                "MISSING llvm-mc PowerPC backend: install full LLVM tools, then check PATH order."
+            )
     print("Install prerequisites:\n" + "\n".join(install_commands()))
     if not signer and platform.system() == "Linux":
         print(
             "If your distribution ships osslsigncode < 2.9, install its C/C++ compiler, "
-            "pkg-config and OpenSSL development headers, then run:\n"
+            "pkg-config, zlib and OpenSSL development headers, then run:\n"
             "git clone --depth 1 --branch 2.14 https://github.com/mtrojnar/osslsigncode.git /tmp/botw-osslsigncode\n"
             "cmake -S /tmp/botw-osslsigncode -B /tmp/botw-osslsigncode/build -DCMAKE_BUILD_TYPE=Release\n"
             "cmake --build /tmp/botw-osslsigncode/build\n"
@@ -396,9 +459,13 @@ def fetch_xwin(data, args):
             raise BuilderError(
                 "xwin did not unpack one x64 store CRT; supply --xwin-dir with crt/lib/x86_64/store."
             )
-        shutil.copytree(stores[0], sdk / "crt/lib/x86_64/store")
+        # splat deletes its output CRT tree and can move files out of cache.
+        # Save outside both trees, then restore after splat has finished.
+        saved_store = directory / "store-crt"
+        shutil.copytree(stores[0], saved_store)
         symlink_options = ["--disable-symlinks"] if os.name == "nt" else []
         run([*command, "splat", "--output", sdk, *symlink_options], cwd=data)
+        shutil.copytree(saved_store, sdk / "crt/lib/x86_64/store", dirs_exist_ok=True)
         sdk.replace(destination)
     return destination
 
@@ -528,9 +595,14 @@ def setup(args):
 
 def checkout_without_personal_instructions(checkout, revision):
     git = find_tool("git") or "git"
+    # Hash validation must see the pinned bytes on Windows too. Override user
+    # defaults locally before the first checkout, without changing global Git.
+    run([git, "-C", checkout, "config", "core.autocrlf", "false"])
+    run([git, "-C", checkout, "config", "core.eol", "lf"])
+    run([git, "-C", checkout, "config", "core.longpaths", "true"])
     run([git, "-C", checkout, "config", "core.sparseCheckout", "true"])
     (checkout / ".git/info/sparse-checkout").write_text(
-        "/*\n!CLAUDE.md\n!**/CLAUDE.md\n", encoding="utf-8"
+        "/*\n!CLAUDE.md\n!**/CLAUDE.md\n", encoding="utf-8", newline="\n"
     )
     run([git, "-C", checkout, "checkout", "--detach", revision])
 
@@ -751,7 +823,15 @@ def build(args):
         work = Path(directory)
         generated, compiled, stage = work / "generated", work / "build", work / "stage"
         with step(f"Recompile ({args.preset}, Series X)"):
-            command = [sys.executable, "-I", ROOT / "tools/packs/recompile.py", rpx, generated]
+            command = [
+                sys.executable,
+                "-X",
+                "utf8",
+                "-I",
+                ROOT / "tools/packs/recompile.py",
+                rpx,
+                generated,
+            ]
             if args.preset == "remaster":
                 command += [
                     "--preset",
@@ -780,18 +860,22 @@ def build(args):
                         compiled,
                         "-G",
                         "Ninja",
-                        f"-DCMAKE_MAKE_PROGRAM={find_tool('ninja')}",
-                        f"-DCMAKE_TOOLCHAIN_FILE={ROOT / 'cmake/toolchains/uwp-clang-cl.cmake'}",
+                        f"-DCMAKE_MAKE_PROGRAM={Path(find_tool('ninja')).as_posix()}",
+                        f"-DCMAKE_TOOLCHAIN_FILE={(ROOT / 'cmake/toolchains/uwp-clang-cl.cmake').as_posix()}",
+                        *[
+                            f"-D{variable}={Path(find_tool(tool)).as_posix()}"
+                            for variable, tool in CMAKE_TOOLS.items()
+                        ],
                         "-DCMAKE_BUILD_TYPE=Release",
                         "-DBOTW_PLATFORM=uwp",
                         "-DBOTW_RENDERER=d3d12",
                         "-DBOTW_BUILD_GAME=ON",
-                        f"-DBOTW_GENERATED_DIR={generated}",
-                        f"-DXWIN_ROOT={paths['xwin_dir']}",
-                        f"-DVCPKG_UWP_ROOT={paths['vcpkg_dir']}",
-                        f"-DBOTW_FFX_SOURCE={paths['ffx_source']}",
-                        f"-DBOTW_FFX_SHADERS_DIR={paths['ffx_shaders']}",
-                        f"-DPython3_EXECUTABLE={sys.executable}",
+                        f"-DBOTW_GENERATED_DIR={generated.as_posix()}",
+                        f"-DXWIN_ROOT={Path(paths['xwin_dir']).as_posix()}",
+                        f"-DVCPKG_UWP_ROOT={Path(paths['vcpkg_dir']).as_posix()}",
+                        f"-DBOTW_FFX_SOURCE={Path(paths['ffx_source']).as_posix()}",
+                        f"-DBOTW_FFX_SHADERS_DIR={Path(paths['ffx_shaders']).as_posix()}",
+                        f"-DPython3_EXECUTABLE={Path(sys.executable).as_posix()}",
                     ]
                 )
             with step("Ninja compile and link"):
@@ -834,7 +918,7 @@ def build(args):
         json.dumps({"appx": str(output), "cer": str(public)}) + "\n", encoding="utf-8"
     )
     print(
-        f"\nSigned package: {output}\nPublic certificate: {public}\nAPPX size: {output.stat().st_size} bytes\nBuild intermediates removed.\nNext: uv run tools/builder/botw_builder.py install --xbox YOUR_XBOX_IP --out {subprocess.list2cmdline([str(out)])}\nIn the Xbox launcher, select your own game data from USB. Do not share the APPX."
+        f"\nSigned package: {output}\nPublic certificate: {public}\nAPPX size: {output.stat().st_size} bytes\nBuild intermediates removed.\nNext: uv run tools/builder/botw_builder.py install --xbox YOUR_XBOX_IP --out {command_line([out])}\nIn the Xbox launcher, select your own game data from USB. Do not share the APPX."
     )
 
 
