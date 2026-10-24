@@ -285,7 +285,8 @@ void D3D12Renderer::query_record(const QueryPacket &packet, const LattePipeline:
 {
 	LatteProfiler::Scope recordScope(LatteProfiler::Slot::BackendQuery);
 	m_pipeline.CheckBack();
-	draw_drainParallel();
+	if (packet.action != 0)
+		draw_drainParallel();
 	auto *query = m_resources.Get<LatteQueryObjectD3D12>(packet.query);
 	switch (packet.action)
 	{

@@ -1313,18 +1313,9 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 				out.tableDesc.cbvAddress[reg] = GetAlignedUniformBufferAddress(range.offset, range.size);
 				out.tableDesc.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
 			}
-			for (uint32 j = 0; j < source.textureCount; ++j)
-			{
-				const auto &binding = source.textures[j];
-				if (binding.reg == -1)
-					continue;
-				if (binding.reg < -1)
-				{
-					out.tableDesc.srv[-2 - binding.reg] = GetNullSRV(binding.nullDimension);
-					continue;
-				}
-				out.tableDesc.srv[binding.reg] = binding.view ? m_resources.Get<LatteTextureViewD3D12>(binding.view)->GetSRV(binding.swizzle) : GetNullSRV(binding.nullDimension);
-			}
+			LattePipeline::ResolveTextureDescriptors(source, out.tableDesc,
+				[&](LattePipeline::ResourceId id, uint32 swizzle) { return m_resources.Get<LatteTextureViewD3D12>(id)->GetSRV(swizzle); },
+				[&](Latte::E_DIM dimension) { return GetNullSRV(dimension); });
 			if (source.streamout)
 			{
 				out.tableDesc.uavResource = m_xfbRingBuffer.Get();
@@ -1616,20 +1607,14 @@ bool D3D12Renderer::draw_captureParallel(const LattePipeline::DrawPacket &packet
 				native.cbvAddress[reg] = m_bufferCacheAddress + range.offset;
 				native.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
 			}
+		LattePipeline::ResolveTextureDescriptors(stage, native,
+			[&](LattePipeline::ResourceId id, uint32 swizzle) { return m_resources.Get<LatteTextureViewD3D12>(id)->GetSRV(swizzle); },
+			[&](Latte::E_DIM dimension) { return GetNullSRV(dimension); });
 		for (uint32 j = 0; j < stage.textureCount; ++j)
 		{
 			const auto &binding = stage.textures[j];
 			auto *view = binding.view ? m_resources.Get<LatteTextureViewD3D12>(binding.view) : nullptr;
 			pinView(view);
-			if (binding.reg >= 0)
-			{
-				if (view)
-					draw.textures[i][binding.reg] = {view, binding.swizzle};
-				else
-					native.srv[binding.reg] = GetNullSRV(binding.nullDimension);
-			}
-			else if (binding.reg < -1)
-				native.srv[-2 - binding.reg] = GetNullSRV(binding.nullDimension);
 			// Preserve the reference's input-before-target transition order even
 			// for a dimensional mismatch selecting a null descriptor.
 			if (view)
@@ -1664,7 +1649,7 @@ void D3D12Renderer::draw_drainParallel()
 	if (!m_parallelRecorder)
 		m_parallelRecorder = std::make_unique<D3D12ParallelRecorder>(m_device.Get(), m_fence.Get(), m_rootSignature.Get(),
 																	 m_nullCBV, m_nullSRV2D, m_nullUAV, m_zeroConstantBufferAddress);
-	const auto timing = m_parallelRecorder->Record(m_parallelDraws, GetRecordingSubmissionId(), m_requestedChunks, LatteProfiler::s_state.enabled);
+	const auto timing = m_parallelRecorder->Record(m_parallelDraws, GetRecordingSubmissionId(), m_requestedChunks, LatteProfiler::s_state.enabled, m_stagingViewHeap->GetGeneration());
 	if (LatteProfiler::s_state.enabled)
 	{
 		auto &profile = LatteProfiler::s_state;

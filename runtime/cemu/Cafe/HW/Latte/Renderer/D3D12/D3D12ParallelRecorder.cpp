@@ -1,6 +1,5 @@
 #ifdef ENABLE_D3D12
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12ParallelRecorder.h"
-#include "Cafe/HW/Latte/Renderer/D3D12/LatteTextureViewD3D12.h"
 
 struct D3D12ParallelRecorder::Worker final : D3D12SubmissionTracker
 {
@@ -10,7 +9,7 @@ struct D3D12ParallelRecorder::Worker final : D3D12SubmissionTracker
 	D3D12_CPU_DESCRIPTOR_HANDLE nullCBV, nullSRV, nullUAV;
 	D3D12_GPU_VIRTUAL_ADDRESS zero;
 	HANDLE event = nullptr;
-	uint64 recording = 0;
+	uint64 recording = 0, sourceGeneration = 0;
 	D3D12UploadRing uploads;
 	D3D12GpuViewHeap views;
 	D3D12StagingDescriptorHeap stagingViews, stagingSamplers;
@@ -123,7 +122,7 @@ struct D3D12ParallelRecorder::Worker final : D3D12SubmissionTracker
 		using namespace D3D12Const;
 		const auto key = desc.TableKey(stage);
 		auto &cache = tables[static_cast<uint32>(stage)];
-		if (const auto *cached = cache.Find(key, views.GetGeneration(), 1))
+		if (const auto *cached = cache.Find(key, views.GetGeneration(), sourceGeneration))
 			return *cached;
 		const auto table = views.AllocateTable(StageTableSize(stage));
 		D3D12_CPU_DESCRIPTOR_HANDLE sources[kStageTableSize]{};
@@ -144,7 +143,7 @@ struct D3D12ParallelRecorder::Worker final : D3D12SubmissionTracker
 		sources[StageTableOffsetUAV(stage)] = nullUAV;
 		const UINT size = StageTableSize(stage);
 		device->CopyDescriptors(1, &table.cpu, &size, size, sources, nullptr, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		cache.Store(key, table.gpu, views.GetGeneration(), 1);
+		cache.Store(key, table.gpu, views.GetGeneration(), sourceGeneration);
 		return table.gpu;
 	}
 	void Draw(const D3D12ResolvedDraw &draw)
@@ -212,9 +211,6 @@ struct D3D12ParallelRecorder::Worker final : D3D12SubmissionTracker
 		{
 			const auto &source = draw.source.block.stages[i];
 			auto desc = draw.stages[i];
-			for (uint32 reg = 0; reg < kMaxSRVsPerStage; ++reg)
-				if (const auto &texture = draw.textures[i][reg]; texture.view)
-					desc.srv[reg] = texture.view->GetRecordingSRV(texture.swizzle);
 			if (source.uniformReg >= 0)
 			{
 				const auto &bytes = draw.source.uniforms[i];
@@ -257,12 +253,13 @@ D3D12ParallelRecorder::D3D12ParallelRecorder(ID3D12Device *device, ID3D12Fence *
 }
 D3D12ParallelRecorder::~D3D12ParallelRecorder() = default;
 
-LattePipeline::ChunkTiming D3D12ParallelRecorder::Record(std::span<const D3D12ResolvedDraw> draws, uint64 fence, unsigned requested, bool profile)
+LattePipeline::ChunkTiming D3D12ParallelRecorder::Record(std::span<const D3D12ResolvedDraw> draws, uint64 fence, unsigned requested, bool profile, uint64 sourceGeneration)
 {
 	auto timing = m_pool.Run(draws.size(), requested, [&](unsigned worker, LattePipeline::ChunkRange range) {
 		if (range.end - range.begin > LattePipeline::ChunkWorkers::DrawsPerChunk)
 			throw std::logic_error("Latte chunk draw bound exceeded");
 		auto &native = *m_workers[worker];
+		native.sourceGeneration = sourceGeneration;
 		native.Begin(fence);
 		for (size_t i = range.begin; i < range.end; ++i)
 			native.Draw(draws[i]);

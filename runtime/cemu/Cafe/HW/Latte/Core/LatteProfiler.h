@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Cafe/HW/Latte/Renderer/D3D12/LatteBatchPolicy.h"
+
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -167,6 +169,8 @@ struct State
         std::array<uint64_t, 4> chunkBusyNs{};
         uint64_t chunkCriticalPathNs = 0, chunkCount = 0, chunkBatches = 0;
         bool threaded = false;
+	static constexpr size_t backendKinds = static_cast<size_t>(LattePipeline::BackendKind::Count);
+	std::array<uint64_t, backendKinds> replyCalls{}, replyWaitNs{}, chunkDrains{};
 	bool enabled = false;
 	bool detailEnabled = false;
 	std::array<int64_t, static_cast<size_t>(Detail::Count)> detailNs{};
@@ -334,6 +338,7 @@ inline void CheckpointDetails(Clock::time_point now)
 inline void AcceptBackProfile(const State &back)
 {
 	s_state.backTimeNs = back.timeNs;
+	s_state.chunkDrains = back.chunkDrains;
         s_state.chunkBusyNs = back.chunkBusyNs;
         s_state.chunkCriticalPathNs = back.chunkCriticalPathNs;
         s_state.chunkCount = back.chunkCount;
@@ -352,6 +357,9 @@ inline void Reset(Clock::time_point now)
 	s_state.detailNs.fill(0);
 	s_state.detailStart.fill(now);
 	s_state.counters.fill(0);
+	s_state.replyCalls.fill(0);
+	s_state.replyWaitNs.fill(0);
+	s_state.chunkDrains.fill(0);
         s_state.chunkBusyNs.fill(0);
         s_state.chunkCriticalPathNs = s_state.chunkCount =
             s_state.chunkBatches = 0;

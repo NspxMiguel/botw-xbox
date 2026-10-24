@@ -5,6 +5,8 @@
 
 #pragma once
 
+#include "Cafe/HW/Latte/Renderer/D3D12/LatteBatchPolicy.h"
+
 #include "Cafe/HW/Latte/Renderer/Renderer.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12StageTable.h"
@@ -432,58 +434,7 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	void output_record(const OutputPacket &packet, const LattePipeline::Arena &arena);
 	struct BackendPacket
 	{
-		enum class Kind : uint32
-		{
-			texture_clearColorSlice,
-			texture_clearDepthSlice,
-			texture_copyImageSubData,
-			bufferCache_copy,
-			bufferCache_copyStreamoutToMainBuffer,
-			streamout_rendererFinishDrawcall,
-			SubmitCommandList,
-			Flush,
-			NotifyLatteCommandProcessorIdle,
-			SwapBuffers,
-			ClearColorbuffer,
-			DrawEmptyFrame,
-			occlusionQuery_flush,
-			occlusionQuery_updateState,
-			RegistryRetire,
-			UICreate,
-			UIUpload,
-			UIRelease,
-			UIRender,
-			UIRenderOwned,
-			NativeReleaseOwned,
-			UIAcquire,
-			Screenshot,
-			EndSequence,
-			ServicePresent,
-			BeginFrame,
-			ShutdownDrain,
-			RecordingDrain,
-			QueryHeap,
-			BindVertices,
-			BindUniform,
-			BindFramebuffer,
-			Viewport,
-			Scissor,
-			TextureCreate,
-			FramebufferCreate,
-			TextureRelease,
-			ViewRelease,
-			FramebufferRelease,
-			SurfaceCopy,
-			BufferUpload,
-			IndexCreate,
-			IndexDeferredCreate,
-			IndexUpload,
-			IndexRelease,
-			TexturePlane,
-			BufferInit,
-			DebugSnapshot,
-			NativeRelease,
-		};
+		using Kind = LattePipeline::BackendKind;
 		Kind kind{};
 		LattePipeline::ResourceId resources[2]{};
 		uint32 words[24]{};

@@ -2936,9 +2936,16 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 				return Slot::ReplyOther;
 			}
 		}();
+		const auto replyStart = LatteProfiler::s_state.enabled ? LatteProfiler::Clock::now() : LatteProfiler::Clock::time_point{};
 		LatteProfiler::Scope replyScope(replySlot);
 		m_operations.Wait(sequence);
 		reply = m_operations.TakeReply(sequence);
+		if (LatteProfiler::s_state.enabled)
+		{
+			const auto kind = static_cast<size_t>(packet.kind);
+			LatteProfiler::s_state.replyCalls[kind]++;
+			LatteProfiler::s_state.replyWaitNs[kind] += std::chrono::duration_cast<std::chrono::nanoseconds>(LatteProfiler::Clock::now() - replyStart).count();
+		}
 	}
 	if (!needsReply && opcode == LattePipeline::Opcode::Submit)
 		LatteProfiler::Add(LatteProfiler::Counter::AsyncSubmissions);
@@ -3004,29 +3011,11 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 	}();
 	LatteProfiler::Scope recordScope(category);
 	m_pipeline.CheckBack();
-	switch (packet.kind)
+	if (LattePipeline::DrainsDrawBatch(packet.kind, packet.words[0] != 0, m_pendingPresentSwapChain != nullptr))
 	{
-	case Kind::BindVertices:
-	case Kind::BindUniform:
-	case Kind::BindFramebuffer:
-	case Kind::Viewport:
-	case Kind::Scissor:
-		break;
-	case Kind::ServicePresent:
-		if (m_pendingPresentSwapChain)
-			draw_drainParallel();
-		break;
-	case Kind::IndexCreate:
-	case Kind::IndexDeferredCreate:
-		// Fresh native storage cannot be referenced by earlier captured draws.
-		break;
-	case Kind::EndSequence:
-		if (packet.words[0])
-			draw_drainParallel();
-		break;
-	default:
+		if (LatteProfiler::s_state.enabled && !m_parallelDraws.empty())
+			LatteProfiler::s_state.chunkDrains[static_cast<size_t>(packet.kind)]++;
 		draw_drainParallel();
-		break;
 	}
 	UpdatePipelineProfile();
 	switch (packet.kind)
@@ -3126,14 +3115,10 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		break;
 	case BackendPacket::Kind::BindVertices: {
 		const auto bytes = arena.Read(packet.bytes);
-		if (m_pipeline.Parallel())
-			draw_drainParallel();
 		buffer_bindVertexBuffers_record({reinterpret_cast<const BindBufferParam *>(bytes.data()), bytes.size() / sizeof(BindBufferParam)});
 		break;
 	}
 	case BackendPacket::Kind::BindUniform:
-		if (m_pipeline.Parallel())
-			draw_drainParallel();
 		buffer_bindUniformBuffer_record(packet.words[0], packet.words[1], packet.words[2], packet.words[3]);
 		break;
 	case BackendPacket::Kind::BindFramebuffer: {
@@ -3223,6 +3208,8 @@ void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeli
 		InvalidateDrawState();
 		break;
 	}
+	case BackendPacket::Kind::Count:
+		throw std::logic_error("Invalid Latte backend operation");
 	case BackendPacket::Kind::NativeRelease:
 		ReleaseObjectDeferred(std::move(*m_resources.Get<ComPtr<IUnknown>>(packet.resources[0])));
 		InvalidateDrawState();

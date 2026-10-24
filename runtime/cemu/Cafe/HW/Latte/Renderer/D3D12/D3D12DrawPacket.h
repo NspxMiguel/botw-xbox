@@ -3,6 +3,7 @@
 #include "Cafe/HW/Latte/Renderer/D3D12/LattePipeline.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12Common.h"
 #include "Cafe/HW/Latte/Renderer/D3D12/D3D12BindingModel.h"
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12StageTable.h"
 
 namespace LattePipeline
 {
@@ -30,6 +31,23 @@ struct StageBlock
 	uint32_t samplerCount = 1, textureCount = 0;
 	bool streamout = false;
 };
+// Both recorders resolve the same immutable texture/register mapping at capture.
+// Workers receive native handles, never a second interpretation of the bindings.
+template <class ResolveView, class ResolveNull>
+void ResolveTextureDescriptors(const StageBlock &source, D3D12StageTableDesc &table,
+                               ResolveView resolveView, ResolveNull resolveNull)
+{
+  for (uint32_t i = 0; i < source.textureCount; ++i)
+  {
+    const auto &binding = source.textures[i];
+    if (binding.reg == -1)
+      continue;
+    const auto reg = binding.reg < -1 ? -2 - binding.reg : binding.reg;
+    table.srv[reg] = binding.reg < -1 || !binding.view
+        ? resolveNull(binding.nullDimension)
+        : resolveView(binding.view, binding.swizzle);
+  }
+}
 // The PM4 processor ends a sequence on texture/sampler/context changes. Only
 // stable translation lives here; uniform ranges and bytes are refreshed per draw.
 class SequenceStageLayouts

@@ -143,7 +143,12 @@ int main()
         back.chunkCount = 4;
         back.chunkBatches = 1;
         const auto frontSlots = s_state.timeNs;
+	back.chunkDrains[size_t(LattePipeline::BackendKind::BufferUpload)] = 23;
+	s_state.replyCalls[0] = 7;
+	s_state.replyWaitNs[0] = 99;
 	AcceptBackProfile(back);
+	assert(s_state.chunkDrains == back.chunkDrains);
+	assert(s_state.replyCalls[0] == 7 && s_state.replyWaitNs[0] == 99);
 	assert(s_state.timeNs == frontSlots);
 	assert(s_state.backTimeNs == back.timeNs);
         assert(s_state.chunkBusyNs == back.chunkBusyNs);
@@ -151,6 +156,8 @@ int main()
                s_state.chunkBatches == 1);
         assert(s_state.counters[size_t(Counter::RootCBVSets)] == 19);
 	Reset(Clock::now());
+	for (size_t i = 0; i < State::backendKinds; ++i)
+		assert(!s_state.replyCalls[i] && !s_state.replyWaitNs[i] && !s_state.chunkDrains[i]);
 	for (auto ns : s_state.backTimeNs)
 		assert(ns == 0);
         for (auto ns : s_state.chunkBusyNs)

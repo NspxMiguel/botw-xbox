@@ -4,6 +4,7 @@
 
 static std::vector<D3D12ResolvedDraw> Capture(size_t count) {
   static ID3D12PipelineState pipeline{42};
+  static LatteTextureViewD3D12 texture;
   LattePipeline::Arena arena(4096);
   std::vector<D3D12ResolvedDraw> draws;
   for (uint32 i = 0; i < count; ++i) {
@@ -22,8 +23,17 @@ static std::vector<D3D12ResolvedDraw> Capture(size_t count) {
     block.stageCount = 3;
     for (uint32 j = 0; j < 3; ++j) {
       auto &stage = block.stages[j];
-      stage.stage = static_cast<D3D12Const::Stage>(j);
+      stage.stage = static_cast<D3D12Const::Stage>((j + 1) % 3);
       stage.uniformReg = 0;
+      stage.textureCount = D3D12Const::kMaxSRVsPerStage;
+      for (uint32 reg = 0; reg < stage.textureCount; ++reg) {
+        auto &binding = stage.textures[reg];
+        binding.reg = stage.textureCount - reg - 1;
+        binding.view = reg % 5 ? LattePipeline::ResourceId{1, 1} : LattePipeline::ResourceId{};
+        binding.swizzle = (i + j + reg) % 17;
+        if (reg % 7 == 0)
+          binding.reg = -2 - binding.reg; // dimensional mismatch selects null
+      }
       stage.samplerCount = 18;
       for (auto &sampler : stage.samplers)
         sampler.words[0] = 1 + (i > 0 && i % 17 == 0 ? i - 1 : i) * 3 + j;
@@ -49,6 +59,9 @@ static std::vector<D3D12ResolvedDraw> Capture(size_t count) {
     for (uint32 j = 0; j < 3; ++j) {
       draw.stages[j].cbvAddress[4] = 0x10000 + i * 256 + j * 0x100000;
       draw.stages[j].cbvSize[4] = 256;
+      LattePipeline::ResolveTextureDescriptors(block.stages[j], draw.stages[j],
+          [&](LattePipeline::ResourceId, uint32 swizzle) { return texture.GetSRV(swizzle); },
+          [](Latte::E_DIM) { return D3D12_CPU_DESCRIPTOR_HANDLE{2}; });
     }
     draws.push_back(std::move(draw));
     arena.Retire(arena.End());
@@ -91,18 +104,34 @@ static void Check(ID3D12Device &device,
       for (auto value : recorded.blend)
         assert(value == float(i));
       for (uint32 j = 0; j < 3; ++j) {
-        const auto address = recorded.cbvs[j * 4];
+        const auto stageIndex = static_cast<uint32>(expected.source.block.stages[j].stage);
+        const auto address = recorded.cbvs[stageIndex * 4];
         assert(address != 0);
         assert(memcmp(reinterpret_cast<const void *>(address),
                       expected.source.uniforms[j].data(), 64) == 0);
         for (uint32 reg = 1; reg < 4; ++reg)
-          assert(recorded.cbvs[j * 4 + reg] == 0x8000);
-        const auto table = recorded.tables[j * 2] - 0x100000000;
+          assert(recorded.cbvs[stageIndex * 4 + reg] == 0x8000);
+        const auto table = recorded.tables[stageIndex * 2] - 0x100000000;
         assert(device.descriptors.at(table) ==
                expected.stages[j].cbvAddress[4]);
-        const auto sampler = recorded.tables[j * 2 + 1] - 0x100000000;
-        assert(device.descriptors.at(sampler) ==
-               expected.source.block.stages[j].samplers[0].words[0]);
+        for (uint32 reg = 0; reg < D3D12Const::kMaxSRVsPerStage; ++reg) {
+          // Mode 2 resolves GetSRV at the draw; compare descriptor contents,
+          // not addresses (a reused CPU handle is not a texture identity).
+          const auto &stage = expected.source.block.stages[j];
+          // Independent mode-2 rule: reverse register mapping, absent views,
+          // dimensional nulls, and the original captured swizzle.
+          const auto &binding = stage.textures[stage.textureCount - reg - 1];
+          const auto srv = binding.reg < -1 || !binding.view
+              ? D3D12_CPU_DESCRIPTOR_HANDLE{2}
+              : D3D12_CPU_DESCRIPTOR_HANDLE{0x400 + binding.swizzle * 32};
+          assert(device.descriptors.at(table +
+                     (D3D12Const::StageTableOffsetSRV(expected.source.block.stages[j].stage) + reg) * 32) ==
+                 device.descriptors.at(srv.ptr));
+        }
+        const auto sampler = recorded.tables[stageIndex * 2 + 1] - 0x100000000;
+        for (uint32 reg = 0; reg < expected.source.block.stages[j].samplerCount; ++reg)
+          assert(device.descriptors.at(sampler + reg * 32) ==
+                 expected.source.block.stages[j].samplers[reg].words[0]);
       }
       ++i;
     }
@@ -111,6 +140,11 @@ static void Check(ID3D12Device &device,
   // Unique full-width sampler tables force rollover even with K=4.
   assert(rollovers > 0);
 }
+static void RewriteTextureSources(ID3D12Device &device, uint64 generation) {
+  device.descriptors[2] = 0;
+  for (uint32 swizzle = 0; swizzle < 17; ++swizzle)
+    device.descriptors[0x400 + swizzle * 32] = generation * 1000 + swizzle;
+}
 int main() {
   ID3D12Device device;
   ID3D12Fence fence;
@@ -118,7 +152,8 @@ int main() {
   D3D12ParallelRecorder recorder(&device, &fence, &root, {1}, {2}, {3}, 0x8000);
   auto draws = Capture(385);
   for (unsigned k = 1; k <= 4; ++k) {
-    const auto timing = recorder.Record(draws, k, k, true);
+    RewriteTextureSources(device, k);
+    const auto timing = recorder.Record(draws, k, k, true, k);
     assert(timing.count == k);
     std::vector<ID3D12CommandList *> lists;
     recorder.AppendLists(lists);
@@ -127,7 +162,8 @@ int main() {
     recorder.Submitted(k);
   }
   // No GPU completion yet: first list's upload/descriptor storage remains live.
-  const auto timing = recorder.Record(draws, 5, 4, false);
+  RewriteTextureSources(device, 5);
+  const auto timing = recorder.Record(draws, 5, 4, false, 5);
   assert(timing.count == 4 && timing.criticalPathNs == 0);
   std::vector<ID3D12CommandList *> lists;
   recorder.AppendLists(lists);
@@ -135,7 +171,8 @@ int main() {
   recorder.Submitted(5);
   fence.completed = 5;
   for (unsigned submission = 6; submission < 12; ++submission) {
-    recorder.Record(draws, submission, 4, false);
+    RewriteTextureSources(device, submission);
+    recorder.Record(draws, submission, 4, false, submission);
     lists.clear();
     recorder.AppendLists(lists);
     Check(device, lists, draws);

@@ -221,6 +221,21 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 	cemuLog_log(LogType::Force, "Latte replies (ms/frame): create {:.3f}, release {:.3f}, present {:.3f}, submit {:.3f}, readback {:.3f}, other {:.3f}; async-submit/frame {:.1f}; index-address-compared {:.0f} B/frame, index-relocated-compared {:.0f} B/frame, index-sample-reject/frame {:.1f}",
 				ms(Slot::ReplyCreate), ms(Slot::ReplyRelease), ms(Slot::ReplyPresent), ms(Slot::ReplySubmit), ms(Slot::ReplyReadback), ms(Slot::ReplyOther), perFrame(Counter::AsyncSubmissions),
 				perFrame(Counter::IndexAddressComparedBytes), perFrame(Counter::IndexRelocatedComparedBytes), perFrame(Counter::IndexSampleRejects));
+	std::string replyKinds, drainKinds;
+	for (size_t i = 0; i < State::backendKinds; ++i)
+	{
+		const auto *name = LattePipeline::BackendKindName(static_cast<LattePipeline::BackendKind>(i));
+		if (s_state.replyCalls[i])
+			replyKinds += fmt::format("{}{} {:.1f} calls/{:.3f} ms", replyKinds.empty() ? "" : ", ", name,
+				static_cast<double>(s_state.replyCalls[i]) / frames, s_state.replyWaitNs[i] * msPerNsPerFrame);
+		if (s_state.chunkDrains[i])
+			drainKinds += fmt::format("{}{} {:.1f}", drainKinds.empty() ? "" : ", ", name,
+				static_cast<double>(s_state.chunkDrains[i]) / frames);
+	}
+	if (!replyKinds.empty())
+		cemuLog_log(LogType::Force, "Latte reply operations/frame: {}", replyKinds);
+	if (!drainKinds.empty())
+		cemuLog_log(LogType::Force, "Latte backend chunk drains/frame: {}", drainKinds);
         if (s_state.chunkBatches)
           cemuLog_log(
               LogType::Force,
