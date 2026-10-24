@@ -43,6 +43,7 @@ class Generator:
         self.probes: set[int] = set()
         self.hooks: set[int] = set()  # host hook_0xADDR(c) runs after the (non-branch) instruction at ADDR
         self.check_returns = True
+        self.optimizations = {"packed_cr_reads": 0, "cr_extract_pairs": 0}
 
     # ---- branch conditions --------------------------------------------------------------
     def cond(self, i: ppc.Insn, pre: list[str]) -> str | None:
@@ -71,6 +72,45 @@ class Generator:
     def ret(self) -> str:
         return "RETURN();"
 
+    def cr_extracts(self, fn: Function) -> dict[int, list[str]]:
+        """Fold adjacent mfcr/rlwinm only when the full temporary is unobservable."""
+        replacements = {}
+        if not any(i.op == "mfcr" for i in fn.insns.values()):
+            return replacements
+        targets = set(fn.labels) | {fn.entry}
+        targets.update(i.target for i in fn.insns.values() if i.op in ("b", "bc"))
+        for switch in fn.switches.values():
+            targets.update(switch.targets)
+        for address, instruction in fn.insns.items():
+            if instruction.op != "mfcr" or address in self.hooks:
+                continue
+            following = fn.insns.get(address + 4)
+            if (
+                following is None
+                or following.op != "rlwinm"
+                or following.rD != instruction.rD
+                or following.rA != instruction.rD
+                or address + 4 in targets
+                or address + 4 in self.entries
+                or address + 4 in self.probes
+            ):
+                continue
+            mask = self.mask(following.mb, following.me)
+            if mask.bit_count() > 8:
+                continue
+            terms = []
+            for bit in range(32):
+                position = (31 - bit + following.imm) & 31
+                if mask & (1 << position):
+                    terms.append(f"((uint32_t)c->cr[{bit}] << {position})")
+            register = R(instruction.rD)
+            code = [f"{register} = {' | '.join(terms)};"]
+            if following.Rc:
+                code.append(f"CR0({register});")
+            replacements[address] = []
+            replacements[address + 4] = code
+        return replacements
+
     # ---- function ---------------------------------------------------------------------------
     def gen_function(self, fn: Function) -> tuple[str, set[str]]:
         callees: set[str] = set()
@@ -85,9 +125,15 @@ class Generator:
             labels.add(fn.entry)
             out.append(f"  goto L_{fn.entry:08x};")
         body: list[tuple[int, list[str]]] = []
+        cr_extracts = self.cr_extracts(fn)
+        self.optimizations["cr_extract_pairs"] += len(cr_extracts) // 2
+        self.optimizations["packed_cr_reads"] += sum(
+            i.op == "mfcr" and a not in cr_extracts for a, i in fn.insns.items()
+        )
         for idx, a in enumerate(addrs):
             i = fn.insns[a]
             code, falls = self.insn(fn, i, callees, labels)
+            code = cr_extracts.get(a, code)
             nxt = addrs[idx + 1] if idx + 1 < len(addrs) else None
             if falls and nxt != a + 4:
                 if a + 4 in fn.insns:
@@ -535,8 +581,16 @@ class Generator:
             L.append(f"{R(d)} = (uint32_t)(rt_timebase() >> {32 if imm == 269 else 0});")
             return L
         if op == "mfcr":
-            parts = " | ".join(f"((uint32_t)c->cr[{b}] << {31 - b})" for b in range(32))
-            L.append(f"{R(d)} = {parts};")
+            # Supported hosts are little-endian; CR bytes are canonical 0/1.
+            # Gather eight bits per multiply instead of 32 independent shifts.
+            # memcpy preserves unaligned/alias-safe access to the byte array.
+            L.append("{ uint32_t cr_ = 0; uint64_t bits_;")
+            for offset in range(0, 32, 8):
+                L.append(f"memcpy(&bits_, c->cr + {offset}, 8);")
+                L.append(
+                    "cr_ = (cr_ << 8) | (uint32_t)((bits_ * 0x8040201008040201ULL) >> 56);"
+                )
+            L.append(f"{R(d)} = cr_; }}")
             return L
         if op == "mtcrf":
             crm = imm
