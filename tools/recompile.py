@@ -140,8 +140,12 @@ def main() -> None:
            f"unsupported: {sorted(gen.unsupported.items(), key=lambda x: -x[1])}",
            f"undefined callees: {sorted(undefined)[:50]}",
            f"analysis problems: {len(an.problems)}"] + ["  " + p for p in an.problems[:100]]
+    rep.insert(
+        4,
+        f"codegen optimizations (static sites, not execution counts): {gen.optimizations}",
+    )
     write_if_changed(os.path.join(out, "report.txt"), "\n".join(rep) + "\n")
-    print("\n".join(rep[:4]))
+    print("\n".join(rep[:5]))
 
 
 if __name__ == "__main__":
