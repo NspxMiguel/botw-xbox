@@ -480,3 +480,17 @@ def test_ninja_waits_for_existing_process(tmp_path, monkeypatch):
     with builder.ninja_slot(tmp_path):
         assert sleep.call_count == 2
     assert all(call.args == (5,) for call in sleep.call_args_list)
+
+
+def test_default_package_version_increases():
+    import time
+
+    from tools.builder.botw_builder import default_package_version, package_version
+
+    a = default_package_version(time.strptime("2026-10-23 09:59", "%Y-%m-%d %H:%M"))
+    b = default_package_version(time.strptime("2026-10-23 10:00", "%Y-%m-%d %H:%M"))
+    c = default_package_version(time.strptime("2026-10-24 00:00", "%Y-%m-%d %H:%M"))
+    assert a == "1.1.295.599" and b == "1.1.295.600" and c == "1.1.296.0"
+    assert package_version(
+        default_package_version(time.strptime("2200-12-31 23:59", "%Y-%m-%d %H:%M"))
+    )

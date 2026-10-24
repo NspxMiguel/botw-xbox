@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 import contextlib
 import getpass
 import hashlib
@@ -995,6 +996,14 @@ def package_version(value):
     return value
 
 
+def default_package_version(now=None):
+    # The Xbox refuses to install an older or equal version over an existing one, so every
+    # rebuild gets a newer one: days since 2026-01-01 and minute of the day (UTC).
+    now = now or time.gmtime()
+    days = (calendar.timegm(now) - calendar.timegm((2026, 1, 1, 0, 0, 0))) // 86400
+    return f"1.1.{int(days)}.{now.tm_hour * 60 + now.tm_min}"
+
+
 def positive_int(value):
     number = int(value)
     if number < 1:
@@ -1034,9 +1043,7 @@ def parser():
             sub.add_argument("--game", required=True, type=Path)
             sub.add_argument("--preset", choices=("remaster", "vanilla"), default="remaster")
             sub.add_argument("--out", type=Path)
-            sub.add_argument(
-                "--version", type=package_version, default=manifest_identity()["Version"]
-            )
+            sub.add_argument("--version", type=package_version, default=default_package_version())
             sub.add_argument("--jobs", type=positive_int, default=2)
     sub = commands.add_parser("install", parents=[common])
     sub.set_defaults(action=install)
