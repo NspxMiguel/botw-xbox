@@ -94,6 +94,11 @@ static double ThreadMilliseconds()
 		std::abort();
 	return static_cast<double>(time.tv_sec) * 1000.0 + static_cast<double>(time.tv_nsec) / 1e6;
 }
+static uint32_t MeasuredFrames()
+{
+	static const auto frames = static_cast<uint32_t>(CapacityFromEnvironment("LATTE_PIPELINE_BENCH_FRAMES", 20, 20, 2000));
+	return frames;
+}
 static Timing Run(bool queued, bool churn, uint64_t &commands)
 {
 	setenv("CEMU_LATTE_PIPELINE", queued ? "1" : "0", 1);
@@ -117,7 +122,8 @@ static Timing Run(bool queued, bool churn, uint64_t &commands)
 	packet.pipeline = recorder.ids[0];
 	packet.framebuffer = recorder.ids[1];
 	packet.indices = recorder.ids[2];
-	constexpr uint32_t warmupFrames = 5, frames = 20, draws = 5000;
+	constexpr uint32_t warmupFrames = 5, draws = 5000;
+	const uint32_t frames = MeasuredFrames();
 	Clock::time_point start;
 	double cpuStart = 0;
 	for (uint32_t frame = 0; frame < warmupFrames + frames; ++frame)
@@ -254,7 +260,7 @@ int main()
 		std::sort(cpuOverhead.begin(), cpuOverhead.end());
 		std::cout << std::fixed << std::setprecision(4)
 				  << (churn ? "Changing binding blocks: " : "Repeated binding blocks: ") << "Packet " << sizeof(Packet) << " B; draw payload " << sizeof(DrawPacket) << " B; state block " << sizeof(DrawBlock) << " B\n"
-				  << "5000 draws/frame, 1024 uniform bytes/draw, 5 warmup + 9 x 20 measured frames/path\n"
+				  << "5000 draws/frame, 1024 uniform bytes/draw, 5 warmup + 9 x " << MeasuredFrames() << " measured frames/path\n"
 				  << "Direct median " << direct[4] << " ms/frame; queued median " << queued[4] << " ms/frame\n"
 				  << "Paired wall overhead median " << overhead[4] << " ms/frame; maximum " << overhead.back() << " ms/frame\n"
 				  << "Paired thread-CPU overhead median " << cpuOverhead[4] << " ms/frame; maximum " << cpuOverhead.back() << " ms/frame\n";
