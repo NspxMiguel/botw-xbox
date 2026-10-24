@@ -128,6 +128,20 @@ int main()
 		assert(s_state.detailDepth[i] == 0);
 	}
 
+	// Worker categories and counters survive transport independently of front coverage.
+	State back{};
+	for (size_t i = 0; i < back.timeNs.size(); ++i)
+		back.timeNs[i] = 100 + i;
+	back.counters[size_t(Counter::RootCBVSets)] = 19;
+	const auto frontSlots = s_state.timeNs;
+	AcceptBackProfile(back);
+	assert(s_state.timeNs == frontSlots);
+	assert(s_state.backTimeNs == back.timeNs);
+	assert(s_state.counters[size_t(Counter::RootCBVSets)] == 19);
+	Reset(Clock::now());
+	for (auto ns : s_state.backTimeNs)
+		assert(ns == 0);
+
 	s_state.enabled = false;
 	Add(Counter::DescriptorHits);
 	assert(s_state.counters[static_cast<size_t>(Counter::DescriptorHits)] == 0);

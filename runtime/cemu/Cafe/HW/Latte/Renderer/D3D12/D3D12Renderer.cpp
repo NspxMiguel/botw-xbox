@@ -832,6 +832,7 @@ void D3D12Renderer::UAVBarrier(ID3D12Resource *resource)
 
 void D3D12Renderer::FlushBarriers()
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::Barriers);
 	m_pipeline.CheckBack();
 	if (m_pendingBarriers.empty())
 		return;
@@ -2815,6 +2816,7 @@ LattePipeline::Completion D3D12Renderer::ExecuteBackend(LattePipeline::Opcode op
 
 void D3D12Renderer::RecordBackend(const BackendPacket &packet, const LattePipeline::Arena &arena)
 {
+	LatteProfiler::Scope recordScope(LatteProfiler::Slot::DrawOther);
 	m_pipeline.CheckBack();
 	UpdatePipelineProfile();
 	switch (packet.kind)
@@ -3295,8 +3297,7 @@ void D3D12Renderer::AcceptCompletion(const LattePipeline::Completion &completion
 	auto &front = LatteProfiler::s_state;
 	// Counters from both actors describe the same command stream. Wall-time
 	// slots/covered remain exclusively front; the back collector is separate.
-	for (size_t i = 0; i < front.counters.size(); ++i)
-		front.counters[i] += back.counters[i];
+	LatteProfiler::AcceptBackProfile(back);
 	const auto now = LatteProfiler::Clock::now();
 	const auto timing = m_operations.Metrics();
 	const auto stall = timing.backpressureNs - m_profilePipelineTiming.backpressureNs;

@@ -137,7 +137,7 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 	constexpr std::array<const char *, count> names{
 		"draw-other", "shader-pipeline", "texture-bind", "texture-load", "buffer-sync", "indices",
 		"uniforms", "descriptors", "render-targets", "submit", "pm4",
-		"draw-state", "pipeline-bind", "vertex-buffers", "root-signature", "render-state", "draw-call"};
+		"draw-state", "pipeline-bind", "vertex-buffers", "root-signature", "render-state", "draw-call", "root-cbv", "barriers"};
 	std::array<size_t, count> order{};
 	int64_t coveredNs = 0;
 	for (size_t i = 0; i < count; ++i)
@@ -150,6 +150,12 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 	});
 	const double msPerNsPerFrame = 1.0 / (1e6 * frames);
 	const auto ms = [&](Slot slot) { return s_state.timeNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };
+	const auto backMs = [&](Slot slot) { return s_state.backTimeNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };
+	int64_t backCategorizedNs = 0;
+	for (const auto slot : {Slot::Descriptors, Slot::RootCBV, Slot::VertexBuffers, Slot::RenderState, Slot::Barriers,
+							Slot::DrawCall, Slot::Submit, Slot::Uniforms, Slot::RenderTargets, Slot::PipelineBind, Slot::RootSignature})
+		backCategorizedNs += s_state.backTimeNs[static_cast<size_t>(slot)];
+	const double backOtherMs = std::max<int64_t>(0, int64_t(s_state.backRecordWallNs) - backCategorizedNs) * msPerNsPerFrame;
 	const auto perFrame = [&](Counter counter) { return (double)s_state.counters[static_cast<size_t>(counter)] / frames; };
 	const double covered = std::clamp(coveredNs / (seconds * 1e9), 0.0, 1.0);
 	cemuLog_log(LogType::Force,
@@ -166,7 +172,7 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				"texture-stage-hit/frame {:.1f}, texture-stage-miss/frame {:.1f}, texture-lookup-hit/frame {:.1f}, texture-lookup-miss/frame {:.1f}, texture-check/frame {:.1f}, texture-alias/frame {:.1f}, sequence/frame {:.1f}; "
 				"register-packet/frame {:.1f}, register-word/frame {:.1f}, register-changed/frame {:.1f}, ring-word/frame {:.1f}, ring-refill/frame {:.1f}; "
 				"submit-wait/frame {:.2f}, submit-limit/frame {:.2f}, submit-readback/frame {:.2f}, submit-overflow/frame {:.2f}; "
-				"sequence-end/frame {:.1f}, create-reply/frame {:.1f}, forced-readback/frame {:.1f}, query-wait/frame {:.1f}, upload {:.0f} B/frame (index {:.0f}, uniform {:.0f}); operation {}, source-frame {}, recorded/submitted/completed {}/{}/{}; front-busy {:.3f}, back-busy {:.3f}, back-record-wall {:.3f}, front-backpressure {:.3f}, front-reply-wait {:.3f}, back-idle {:.3f} ms/frame, ring-high-water {}; front/back CPU {:.1f}/{:.1f}%",
+				"sequence-end/frame {:.1f}, create-reply/frame {:.1f}, forced-readback/frame {:.1f}, query-wait/frame {:.1f}, upload {:.0f} B/frame (index {:.0f}, uniform {:.0f}); operation {}, source-frame {}, recorded/submitted/completed {}/{}/{}; front-busy {:.3f}, back-busy {:.3f}, back-record-wall {:.3f}, front-backpressure {:.3f}, front-reply-wait {:.3f}, back-idle {:.3f} ms/frame, ring-high-water {}; front/back CPU {:.1f}/{:.1f}%; back ms/frame: descriptors {:.3f}, root-cbv {:.3f}, vertex-buffers {:.3f}, render-state {:.3f}, barriers {:.3f}, draw-call {:.3f}, submit {:.3f}, uniforms {:.3f}, render-targets {:.3f}, pipeline-bind {:.3f}, root-signature {:.3f}, other {:.3f}",
 				seconds, frames, perFrame(Counter::Draws), s_state.drawTotalNs * msPerNsPerFrame,
 				ms(Slot::DrawOther), ms(Slot::ShaderPipeline), ms(Slot::TextureBinding), ms(Slot::TextureLoad), ms(Slot::BufferSync),
 				ms(Slot::Indices), ms(Slot::Uniforms), ms(Slot::Descriptors), ms(Slot::RenderTargets), ms(Slot::Submit), ms(Slot::Pm4),
@@ -188,7 +194,11 @@ void LatteProfiler::Report(Clock::time_point now, double seconds, uint64_t frame
 				s_state.frontBusyNs * msPerNsPerFrame, s_state.backBusyNs * msPerNsPerFrame, s_state.backRecordWallNs * msPerNsPerFrame,
 				s_state.frontStallNs * msPerNsPerFrame, s_state.frontReplyNs * msPerNsPerFrame,
 				s_state.backIdleNs * msPerNsPerFrame, s_state.ringHighWater,
-				s_state.frontCpuNs / (seconds * 1e7), s_state.backCpuNs / (seconds * 1e7));
+				s_state.frontCpuNs / (seconds * 1e7), s_state.backCpuNs / (seconds * 1e7),
+				backMs(Slot::Descriptors), backMs(Slot::RootCBV), backMs(Slot::VertexBuffers), backMs(Slot::RenderState),
+				backMs(Slot::Barriers), backMs(Slot::DrawCall), backMs(Slot::Submit), backMs(Slot::Uniforms),
+				backMs(Slot::RenderTargets), backMs(Slot::PipelineBind), backMs(Slot::RootSignature),
+				backOtherMs);
 	if (s_state.detailEnabled)
 	{
 		const auto detail = [&](Detail slot) { return s_state.detailNs[static_cast<size_t>(slot)] * msPerNsPerFrame; };

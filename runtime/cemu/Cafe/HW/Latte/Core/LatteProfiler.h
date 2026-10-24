@@ -29,6 +29,8 @@ enum class Slot : size_t
 	RootSignature,
 	RenderState,
 	DrawCall,
+	RootCBV,
+	Barriers,
 	Count,
 	Unaccounted = Count,
 };
@@ -119,6 +121,7 @@ enum class Detail : size_t
 struct State
 {
 	std::array<int64_t, static_cast<size_t>(Slot::Count)> timeNs{};
+	std::array<int64_t, static_cast<size_t>(Slot::Count)> backTimeNs{};
 	std::array<uint64_t, static_cast<size_t>(Counter::Count)> counters{};
 	Clock::time_point last{};
 	int64_t drawTotalNs = 0;
@@ -290,12 +293,22 @@ inline void CheckpointDetails(Clock::time_point now)
 	}
 }
 
+// Only the front accepts a completed worker window. Never fold worker wall
+// slots into front coverage: both threads run during the same interval.
+inline void AcceptBackProfile(const State &back)
+{
+	s_state.backTimeNs = back.timeNs;
+	for (size_t i = 0; i < s_state.counters.size(); ++i)
+		s_state.counters[i] += back.counters[i];
+}
+
 // Reset counters at a present boundary while preserving any live scopes.
 inline void Reset(Clock::time_point now)
 {
 	if (!s_state.enabled)
 		return;
 	s_state.timeNs.fill(0);
+	s_state.backTimeNs.fill(0);
 	s_state.detailNs.fill(0);
 	s_state.detailStart.fill(now);
 	s_state.counters.fill(0);

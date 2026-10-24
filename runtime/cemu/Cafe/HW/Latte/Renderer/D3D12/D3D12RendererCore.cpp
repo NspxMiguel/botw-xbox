@@ -390,6 +390,7 @@ void D3D12Renderer::draw_buildSamplerDesc(LatteDecompilerShader *shader, uint32 
 
 void D3D12Renderer::BindStageRootCBVs(const D3D12StageTableDesc &bindings, D3D12Const::Stage stage)
 {
+	LatteProfiler::Scope profileScope(LatteProfiler::Slot::RootCBV);
 	for (uint32 i = 0; i < D3D12Const::RootCBVCount(stage); ++i)
 	{
 		// Always replace unused registers with a permanent 64-KiB zero buffer. Keeping
@@ -1197,6 +1198,7 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 
 void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const LattePipeline::Arena &arena)
 {
+	LatteProfiler::Scope recordScope(LatteProfiler::Slot::DrawOther);
 	m_pipeline.CheckBack();
 	const auto &block = m_drawBlocks.Get(packet.state);
 	auto *pipeline = m_resources.Get<D3D12PipelineInfo>(packet.pipeline);
@@ -1214,22 +1216,25 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 		m_state.scissor = packet.scissor;
 		m_state.scissorDirty = true;
 	}
-	const auto baseAddress = m_bufferCache->GetGPUVirtualAddress();
-	for (uint32 i = 0; i < LATTE_MAX_VERTEX_BUFFERS; ++i)
 	{
-		const auto &v = block.vertices[i];
-		D3D12_VERTEX_BUFFER_VIEW view{};
-		// Unbound slots must remain zero, as in the reference recorder.
-		if (v.bound)
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::VertexBuffers);
+		const auto baseAddress = m_bufferCache->GetGPUVirtualAddress();
+		for (uint32 i = 0; i < LATTE_MAX_VERTEX_BUFFERS; ++i)
 		{
-			view.BufferLocation = baseAddress + v.offset;
-			view.SizeInBytes = std::min(v.size, m_bufferCacheSize - v.offset);
-			view.StrideInBytes = v.stride;
-		}
-		if (memcmp(&view, &m_state.vertexBuffers[i], sizeof(view)) != 0)
-		{
-			m_state.vertexBuffers[i] = view;
-			m_state.vertexBufferDirtyMask |= 1u << i;
+			const auto &v = block.vertices[i];
+			D3D12_VERTEX_BUFFER_VIEW view{};
+			// Unbound slots must remain zero, as in the reference recorder.
+			if (v.bound)
+			{
+				view.BufferLocation = baseAddress + v.offset;
+				view.SizeInBytes = std::min(v.size, m_bufferCacheSize - v.offset);
+				view.StrideInBytes = v.stride;
+			}
+			if (memcmp(&view, &m_state.vertexBuffers[i], sizeof(view)) != 0)
+			{
+				m_state.vertexBuffers[i] = view;
+				m_state.vertexBufferDirtyMask |= 1u << i;
+			}
 		}
 	}
 	const uint32 baseVertex = packet.baseVertex, baseInstance = packet.baseInstance;
@@ -1237,42 +1242,45 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 	const auto hostIndexType = static_cast<INDEX_TYPE>(packet.indexType);
 	const uint32 stageBindingCount = block.stageCount;
 	PreparedStageBindings stageBindings[3]{};
-	for (uint32 i = 0; i < stageBindingCount; ++i)
 	{
-		const auto &source = block.stages[i];
-		auto &out = stageBindings[i];
-		out.stage = source.stage;
-		out.samplerCount = source.samplerCount;
-		memcpy(out.samplers, source.samplers, out.samplerCount * sizeof(*out.samplers));
-		for (uint32 reg = 0; reg < D3D12Const::kMaxCBVsPerStage; ++reg)
+		LatteProfiler::Scope profileScope(LatteProfiler::Slot::Descriptors);
+		for (uint32 i = 0; i < stageBindingCount; ++i)
 		{
-			const auto &range = source.uniforms[reg];
-			if (!range.size)
-				continue;
-			out.tableDesc.cbvAddress[reg] = GetAlignedUniformBufferAddress(range.offset, range.size);
-			out.tableDesc.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
-		}
-		for (uint32 j = 0; j < source.textureCount; ++j)
-		{
-			const auto &binding = source.textures[j];
-			if (binding.reg == -1)
-				continue;
-			if (binding.reg < -1)
+			const auto &source = block.stages[i];
+			auto &out = stageBindings[i];
+			out.stage = source.stage;
+			out.samplerCount = source.samplerCount;
+			memcpy(out.samplers, source.samplers, out.samplerCount * sizeof(*out.samplers));
+			for (uint32 reg = 0; reg < D3D12Const::kMaxCBVsPerStage; ++reg)
 			{
-				out.tableDesc.srv[-2 - binding.reg] = GetNullSRV(binding.nullDimension);
-				continue;
+				const auto &range = source.uniforms[reg];
+				if (!range.size)
+					continue;
+				out.tableDesc.cbvAddress[reg] = GetAlignedUniformBufferAddress(range.offset, range.size);
+				out.tableDesc.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
 			}
-			out.tableDesc.srv[binding.reg] = binding.view ? m_resources.Get<LatteTextureViewD3D12>(binding.view)->GetSRV(binding.swizzle) : GetNullSRV(binding.nullDimension);
+			for (uint32 j = 0; j < source.textureCount; ++j)
+			{
+				const auto &binding = source.textures[j];
+				if (binding.reg == -1)
+					continue;
+				if (binding.reg < -1)
+				{
+					out.tableDesc.srv[-2 - binding.reg] = GetNullSRV(binding.nullDimension);
+					continue;
+				}
+				out.tableDesc.srv[binding.reg] = binding.view ? m_resources.Get<LatteTextureViewD3D12>(binding.view)->GetSRV(binding.swizzle) : GetNullSRV(binding.nullDimension);
+			}
+			if (source.streamout)
+			{
+				out.tableDesc.uavResource = m_xfbRingBuffer.Get();
+				out.tableDesc.uavSize = m_xfbRingBufferSize;
+			}
 		}
-		if (source.streamout)
-		{
-			out.tableDesc.uavResource = m_xfbRingBuffer.Get();
-			out.tableDesc.uavSize = m_xfbRingBufferSize;
-		}
+		// Rollover can submit/reset/retire. No transient uniform GPU allocation is
+		// created until every sampler table belongs to the current heap generation.
+		draw_acquireSamplerTables(stageBindings, stageBindingCount);
 	}
-	// Rollover can submit/reset/retire. No transient uniform GPU allocation is
-	// created until every sampler table belongs to the current heap generation.
-	draw_acquireSamplerTables(stageBindings, stageBindingCount);
 	for (uint32 i = 0; i < stageBindingCount; ++i)
 	{
 		const auto &source = block.stages[i];
