@@ -37,17 +37,18 @@ int main()
 		LatteIndices_invalidateAll(g_renderer.get());
 	}
 	// Shift the guest address every call while keeping complete contents equal.
-	std::vector<std::array<uint16, 8>> relocated(1024);
-	for (auto &input : relocated)
-		input.fill(_swapEndianU16(123));
-	size_t next = 0;
-	const auto uploads = g_renderer->uploads;
-	const auto relocatedNs = NanosecondsPerCall([&] {
-		Decode(relocated[next++ % relocated.size()].data(), 8);
-	},
-												100000);
-	std::cout << "Host relocated 16-byte indices: " << relocatedNs << " ns/call; uploads " << g_renderer->uploads - uploads << "/100000 calls\n";
-	LatteIndices_invalidateAll(g_renderer.get());
+	for (const uint32 count : {8u, 512u, 32768u})
+	{
+		std::vector<std::vector<uint16>> relocated(64, std::vector<uint16>(count, _swapEndianU16(123)));
+		size_t next = 0;
+		const auto uploads = g_renderer->uploads;
+		const auto relocatedNs = NanosecondsPerCall([&] {
+			Decode(relocated[next++ % relocated.size()].data(), count);
+		}, 100000);
+		std::cout << "Host relocated " << count * 2 << "-byte indices: " << relocatedNs << " ns/call; uploads " << g_renderer->uploads - uploads << "/100000 calls\n";
+		assert(g_renderer->uploads == uploads + 1);
+		LatteIndices_invalidateAll(g_renderer.get());
+	}
 	g_renderer.reset();
 
 	using namespace LatteProfiler;

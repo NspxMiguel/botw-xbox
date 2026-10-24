@@ -45,6 +45,15 @@ struct
 	std::array<CacheEntry, kPersistentEntries + 8> entry;
 	uint64 currentUsageCounter{0};
 	LatteDrawCache::ContentIndex<> contentIndex;
+	// Relocated addresses keep a non-owning hint. Full shape and byte validation
+	// make stale hints safe even after slot eviction, mutation or invalidation.
+	struct AddressHint
+	{
+		LatteDrawCache::IndexKey key{};
+		size_t slot = 0;
+		bool valid = false;
+	};
+	std::array<AddressHint, 4096> addressHints{};
 }LatteIndexCache{};
 
 void LatteIndices_invalidate(const void* memPtr, uint32 size)
@@ -82,6 +91,8 @@ void LatteIndices_invalidateOnWait()
 void LatteIndices_invalidateAll(Renderer *renderer)
 {
 	LatteIndexCache.contentIndex.Clear();
+	for (auto &hint : LatteIndexCache.addressHints)
+		hint.valid = false;
 	if (!renderer)
 		renderer = g_renderer.get();
 	for(auto& entry : LatteIndexCache.entry)
@@ -673,26 +684,31 @@ void LatteIndices_decode(const void* indexData, LatteIndexType indexType, uint32
 	});
 	bool cacheHit = cacheEntry != end;
 	uint64 contentHash = 0;
-	if (cacheEntry == end && persistent && inputSize)
+	auto tryCandidate = [&](size_t slot) {
+		auto candidate = LatteIndexCache.entry.begin() + slot;
+		if (!candidate->lastPtr || candidate->key.count != key.count || candidate->key.type != key.type || candidate->key.primitive != key.primitive)
+			return false;
+		LatteProfiler::Add(LatteProfiler::Counter::IndexComparedBytes, inputSize);
+		if (!candidate->content.Matches(indexData, inputSize))
+			return false;
+		cacheEntry = candidate;
+		LatteProfiler::Add(LatteProfiler::Counter::IndexRelocatedHits);
+		return true;
+	};
+	if (!cacheHit && persistent && inputSize)
 	{
-		contentHash = LatteDrawCache::IndexContentHash(indexData, inputSize, count, (uint32)indexType, (uint32)primitiveMode);
-		LatteProfiler::Add(LatteProfiler::Counter::IndexHashedBytes, inputSize);
-		if (const auto *slot = LatteIndexCache.contentIndex.Find(contentHash))
+		auto &hint = LatteIndexCache.addressHints[key.Slot(LatteIndexCache.addressHints.size())];
+		if (hint.valid && hint.key == key)
+			cacheHit = tryCandidate(hint.slot);
+		if (!cacheHit)
 		{
-			auto candidate = LatteIndexCache.entry.begin() + *slot;
-			// A stale hint or hash collision cannot make recycled output a hit.
-			if (candidate->lastPtr && candidate->contentHash == contentHash &&
-				candidate->key.count == key.count && candidate->key.type == key.type && candidate->key.primitive == key.primitive)
-			{
-				LatteProfiler::Add(LatteProfiler::Counter::IndexComparedBytes, inputSize);
-				if (candidate->content.Matches(indexData, inputSize))
-				{
-					cacheEntry = candidate;
-					cacheHit = true;
-					LatteProfiler::Add(LatteProfiler::Counter::IndexRelocatedHits);
-				}
-			}
+			contentHash = LatteDrawCache::IndexContentHash(indexData, inputSize, count, (uint32)indexType, (uint32)primitiveMode);
+			LatteProfiler::Add(LatteProfiler::Counter::IndexHashedBytes, std::min<size_t>(inputSize, 32));
+			if (const auto *slot = LatteIndexCache.contentIndex.Find(contentHash))
+				cacheHit = tryCandidate(*slot);
 		}
+		if (cacheHit)
+			hint = {key, size_t(cacheEntry - LatteIndexCache.entry.begin()), true};
 	}
 	if (cacheHit)
 	{

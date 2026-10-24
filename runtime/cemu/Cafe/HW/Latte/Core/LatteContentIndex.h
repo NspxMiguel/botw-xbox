@@ -46,12 +46,22 @@ class ContentIndex
 	std::array<Entry, Capacity> m_entries{};
 };
 
-// Full-input fingerprint used only after an address-cache miss. Equality always
-// checks the complete CPU shadow too, including deliberate fingerprint collisions.
+// Bounded fingerprint used only to locate a candidate after an address miss.
+// Every hit still checks the complete CPU shadow. Unsampled mutations and
+// deliberate collisions cannot reuse stale output.
 inline uint64_t IndexContentHash(const void *data, size_t bytes, uint32_t count, uint32_t type, uint32_t primitive)
 {
 	uint64_t hash = uint64_t(count) ^ (uint64_t(type) << 32) ^ (uint64_t(primitive) << 48);
 	const auto *input = static_cast<const uint8_t *>(data);
+	std::array<uint64_t, 4> samples;
+	if (bytes > sizeof(samples))
+	{
+		const std::array<size_t, 4> offsets{0, bytes / 3, bytes * 2 / 3, bytes - sizeof(uint64_t)};
+		for (size_t i = 0; i < offsets.size(); ++i)
+			std::memcpy(&samples[i], input + offsets[i], sizeof(uint64_t));
+		input = reinterpret_cast<const uint8_t *>(samples.data());
+		bytes = sizeof(samples);
+	}
 	while (bytes >= sizeof(uint64_t))
 	{
 		uint64_t word;

@@ -63,6 +63,30 @@ int main()
 	}
 	LatteIndices_invalidateAll(g_renderer.get());
 
+	// Repeated relocated large buffers skip fingerprinting after the first hit.
+	// Samples only select candidates: changing an unsampled byte must miss.
+	std::vector<uint16> largeA(32768, _swapEndianU16(77)), largeB = largeA;
+	const auto largeOriginal = Decode(largeA.data(), uint32(largeA.size())).rendererInternal;
+	assert(Decode(largeB.data(), uint32(largeB.size())).rendererInternal == largeOriginal);
+	const auto hashedBefore = LatteProfiler::s_state.counters[size_t(LatteProfiler::Counter::IndexHashedBytes)];
+	for (uint32 i = 0; i < 100; ++i)
+		assert(Decode(largeB.data(), uint32(largeB.size())).rendererInternal == largeOriginal);
+	assert(LatteProfiler::s_state.counters[size_t(LatteProfiler::Counter::IndexHashedBytes)] == hashedBefore);
+	const auto fingerprint = LatteDrawCache::IndexContentHash(largeB.data(), largeB.size() * 2, uint32(largeB.size()), uint32(LatteIndexType::U16_BE), uint32(LattePrimitiveMode::TRIANGLES));
+	largeB[8191] = _swapEndianU16(321);
+	assert(fingerprint == LatteDrawCache::IndexContentHash(largeB.data(), largeB.size() * 2, uint32(largeB.size()), uint32(LatteIndexType::U16_BE), uint32(LattePrimitiveMode::TRIANGLES)));
+	uploads = g_renderer->uploads;
+	const auto largeModified = Decode(largeB.data(), uint32(largeB.size()));
+	assert(g_renderer->uploads == uploads + 1);
+	assert(static_cast<uint16 *>(largeModified.mem)[8191] == 321);
+	assert(Decode(largeA.data(), uint32(largeA.size())).rendererInternal == largeOriginal);
+	LatteIndices_invalidate(largeA.data(), uint32(largeA.size() * 2));
+	largeB = largeA;
+	uploads = g_renderer->uploads;
+	Decode(largeB.data(), uint32(largeB.size()));
+	assert(g_renderer->uploads == uploads + 1);
+	LatteIndices_invalidateAll(g_renderer.get());
+
 	// A thousand distinct small streams survive together. Keep each set below
 	// associativity to test capacity without depending on allocator addresses.
 	std::vector<std::array<uint16, 8>> candidates(32768);

@@ -21,7 +21,11 @@ int main()
 		for (size_t i = 0; i < size; ++i)
 		{
 			bytes[i] = 1;
-			assert(LatteDrawCache::IndexContentHash(bytes.data(), size, 5, 2, 3) != hash);
+			bool sampled = size <= 32;
+			if (!sampled)
+				for (const auto offset : {size_t(0), size / 3, size * 2 / 3, size - sizeof(uint64_t)})
+					sampled = sampled || (i >= offset && i < offset + sizeof(uint64_t));
+			assert((LatteDrawCache::IndexContentHash(bytes.data(), size, 5, 2, 3) != hash) == sampled);
 			bytes[i] = 0;
 		}
 		assert(LatteDrawCache::IndexContentHash(bytes.data(), size, 6, 2, 3) != hash);
