@@ -975,7 +975,7 @@ def install(args):
             raise BuilderError(
                 f"Missing or empty package file: {path}. Run build first, or pass --out."
             )
-    password = args.password
+    password = args.password or os.environ.get("BOTW_XBOX_PASSWORD")
     if args.user and password is None:
         if not sys.stdin.isatty():
             raise BuilderError("Supply --password with --user in noninteractive mode.")
@@ -1049,7 +1049,7 @@ def parser():
     sub.set_defaults(action=install)
     sub.add_argument("--xbox", required=True)
     sub.add_argument("--user")
-    sub.add_argument("--password")
+    sub.add_argument("--password", help="or set BOTW_XBOX_PASSWORD")
     sub.add_argument(
         "--out",
         type=Path,

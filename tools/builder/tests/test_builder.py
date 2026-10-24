@@ -17,6 +17,12 @@ import pytest
 from tools.builder import botw_builder as builder
 
 
+@pytest.fixture(autouse=True)
+def private_ninja_lock(monkeypatch, tmp_path):
+    # Keep the cross-process ninja lock away from real builders running on this machine.
+    monkeypatch.setattr(builder.tempfile, "gettempdir", lambda: str(tmp_path))
+
+
 @pytest.fixture
 def dump(tmp_path):
     for folder in ("code", "content", "meta"):
