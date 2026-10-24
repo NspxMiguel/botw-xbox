@@ -218,6 +218,37 @@ static void StateBlockTests()
 	Throws([&] { blocks.Get(a); });
 }
 
+static void SequenceLayoutTests()
+{
+	SequenceStageLayouts layouts;
+	uint32_t builds = 0;
+	auto build = [&](StageBlock &block) {
+		++builds;
+		block.stage = D3D12Const::Stage::Vertex;
+		block.textureCount = 1;
+		block.textures[0].view = {7, 9};
+		block.textures[0].swizzle = builds;
+		block.samplerCount = 1;
+		block.samplers[0].words[12] = float(builds);
+		block.uniformReg = 1;
+	};
+	layouts.BeginSequence();
+	for (uint32_t draw = 0; draw < 4; ++draw)
+	{
+		auto dynamic = layouts.Get(D3D12Const::Stage::Vertex, 123, build);
+		assert(builds == 1 && dynamic.textures[0].swizzle == 1);
+		assert(dynamic.uniforms[0].size == 0 && dynamic.uniformBytes.size == 0);
+		dynamic.uniforms[0] = {draw * 256, 512};
+		dynamic.uniformBytes = {draw * 16, 16};
+	}
+	// Shader identity includes its immutable mapping. Sequence boundaries discard
+	// all prior texture/sampler inputs; dynamic draw patches never alter the memo.
+	assert(layouts.Get(D3D12Const::Stage::Vertex, 124, build).samplers[0].words[12] == 2);
+	layouts.BeginSequence();
+	assert(layouts.Get(D3D12Const::Stage::Vertex, 124, build).textures[0].swizzle == 3);
+	assert(layouts.Get(D3D12Const::Stage::Pixel, 124, build).textures[0].swizzle == 4);
+}
+
 static void LifetimeTests()
 {
 	Registry registry;
@@ -730,6 +761,7 @@ int main()
 	RegistryPublicationTest();
 	ArenaPublicationTest();
 	StateBlockTests();
+	SequenceLayoutTests();
 	LifetimeTests();
 	ArenaTests();
 	const auto directDraws = DrawRoundTrip(false, 1);

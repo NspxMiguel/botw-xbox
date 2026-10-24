@@ -357,6 +357,8 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	LattePipeline::ResourceId m_pinnedFramebuffer;
 	uint64 m_pinnedDrawFence = 0;
 	LattePipeline::StateBlocks<LattePipeline::DrawBlock, 1024, LattePipeline::DrawBlockEqual> m_drawBlocks;
+	LattePipeline::SequenceStageLayouts m_frontStageLayouts;
+	LattePipeline::DrawBlock m_frontDrawBlock{};
 	struct IndexResource
 	{
 		D3D12UploadHeapAllocator::Allocation *native = nullptr;

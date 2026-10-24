@@ -28,6 +28,34 @@ struct StageBlock
 	uint32_t samplerCount = 1, textureCount = 0;
 	bool streamout = false;
 };
+// The PM4 processor ends a sequence on texture/sampler/context changes. Only
+// stable translation lives here; uniform ranges and bytes are refreshed per draw.
+class SequenceStageLayouts
+{
+  public:
+	void BeginSequence()
+	{
+		m_valid.fill(false);
+	}
+	template <class Build>
+	const StageBlock &Get(D3D12Const::Stage stage, uint64_t shaderId, Build build)
+	{
+		const auto index = static_cast<size_t>(stage);
+		if (!m_valid[index] || m_shaderIds[index] != shaderId)
+		{
+			m_blocks[index] = {};
+			build(m_blocks[index]);
+			m_shaderIds[index] = shaderId;
+			m_valid[index] = true;
+		}
+		return m_blocks[index];
+	}
+
+  private:
+	std::array<StageBlock, 3> m_blocks{};
+	std::array<uint64_t, 3> m_shaderIds{};
+	std::array<bool, 3> m_valid{};
+};
 struct VertexRange
 {
 	uint32_t offset = 0, size = 0, stride = 0;

@@ -162,6 +162,56 @@ static Timing Run(bool queued, bool churn, uint64_t &commands)
 	return {std::chrono::duration<double, std::milli>(Clock::now() - start).count() / frames, (ThreadMilliseconds() - cpuStart) / frames};
 }
 
+// Exercise the production sequence memo with synthetic sampler translation.
+// This isolates construction/copy work and does not time the D3D12 driver.
+__attribute__((noinline)) static void BuildLayout(StageBlock &block, uint32_t seed)
+{
+	block = {};
+	block.stage = D3D12Const::Stage::Vertex;
+	block.textureCount = block.samplerCount = 8;
+	for (uint32_t unit = 0; unit < 8; ++unit)
+	{
+		block.textures[unit].view = {unit + 1, 1};
+		block.textures[unit].reg = unit;
+		block.textures[unit].swizzle = seed;
+		auto &sampler = block.samplers[unit];
+		sampler.words[0] = 0;
+		sampler.words[1] = sampler.words[2] = sampler.words[3] = 1;
+		sampler.words[5] = 1;
+		sampler.words[11] = std::bit_cast<uint32_t>(float(seed & 63) / 64);
+		sampler.words[12] = std::bit_cast<uint32_t>(float((seed >> 6) & 1023) / 64);
+	}
+}
+static void LayoutBenchmark()
+{
+	std::array<double, 2> time{};
+	std::array<uint64_t, 2> checksum{};
+	constexpr uint32_t frames = 200, draws = 5000;
+	for (const bool cached : {false, true})
+	{
+		SequenceStageLayouts layouts;
+		const auto start = Clock::now();
+		for (uint32_t frame = 0; frame < frames; ++frame)
+			for (uint32_t draw = 0; draw < draws; ++draw)
+			{
+				if (draw % 4 == 0)
+					layouts.BeginSequence();
+				const uint32_t seed = draw / 4;
+				StageBlock block;
+				if (cached)
+					block = layouts.Get(D3D12Const::Stage::Vertex, 1, [&](StageBlock &out) { BuildLayout(out, seed); });
+				else
+					BuildLayout(block, seed);
+				block.uniforms[0] = {draw * 256, 512};
+				checksum[cached] += block.textures[0].swizzle + block.uniforms[0].offset;
+				asm volatile("" : : "r"(&block) : "memory");
+			}
+		time[cached] = std::chrono::duration<double, std::milli>(Clock::now() - start).count() / frames;
+	}
+	assert(checksum[0] == checksum[1]);
+	std::cout << "Synthetic stage translation, production sequence memo: rebuild " << time[0] << " ms/5000 stages; cached " << time[1] << " ms/5000 stages; identical dynamic bindings\n";
+}
+
 int main()
 {
 #ifdef __APPLE__
@@ -170,6 +220,7 @@ int main()
 	if (pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0) != 0)
 		return 3;
 #endif
+	LayoutBenchmark();
 	bool passed = true;
 	for (const bool churn : {false, true})
 	{
