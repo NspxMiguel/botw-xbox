@@ -599,6 +599,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                 number(L"wallpaper", -1, 3);
                 number(L"renderScalePercent", 0, 300);
                 number(L"upscaler", 0, 3);
+                number(L"visuals", 0, 1);
                 number(L"fsrQuality", 0, 4);
                 number(L"frameGeneration", 0, 2);
             } catch (...) {
@@ -686,6 +687,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         preferences.volume = std::clamp(number(L"volume", 100), 0, 100);
         preferences.layout = number(L"buttonLayout", 1) == 1 ? 1 : 0;  // Xbox labels unless the player picked Nintendo
         preferences.render_scale_percent = std::clamp(number(L"renderScalePercent", 0), 0, 300);
+        preferences.visuals = packs::parse_visuals(number(L"visuals", 0));
         preferences.upscaler = std::clamp(number(L"upscaler", 0), 0, 3);
         preferences.fsr_quality = std::clamp(number(L"fsrQuality", 0), 0, 4);
         preferences.frame_generation = std::clamp(number(L"frameGeneration", 0), 0, 2);
@@ -702,10 +704,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
         if (wallpaper >= 0)
             values.Insert(L"wallpaper", box_value(wallpaper));
         values.Insert(L"renderScalePercent", box_value(preferences.render_scale_percent));
+        values.Insert(L"visuals", box_value(static_cast<int>(preferences.visuals)));
         values.Insert(L"upscaler", box_value(preferences.upscaler));
         values.Insert(L"fsrQuality", box_value(preferences.fsr_quality));
         values.Insert(L"frameGeneration", box_value(preferences.frame_generation));
         Settings s = settings::get();
+        s.visuals = preferences.visuals;
         s.fps = preferences.fps;
         s.volume = preferences.volume;
         s.layout = preferences.layout;
@@ -1479,6 +1483,12 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                               "Remove existing imported copy before importing");
     }
 
+    std::wstring visuals_row() {
+        return setup_label(uwp::Text::visuals) + L": " +
+               setup_label(preferences.visuals == packs::Visuals::Original ? uwp::Text::visuals_original
+                                                                           : uwp::Text::visuals_remaster) +
+               L" — " + setup_label(uwp::Text::scale_restart);
+    }
     IAsyncAction configure() {
         for (;;) {
             if (!running && !home.shown) {
@@ -1487,10 +1497,17 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
             }
             auto choice = co_await choose(label(uwp::Text::settings), label(uwp::Text::controls),
                                           {label(uwp::Text::wallpaper), label(uwp::Text::automatic),
-                                           label(uwp::Text::settings_more), label(uwp::Text::back)});
-            if (choice == 3)
+                                           label(uwp::Text::settings_more), hstring(visuals_row()),
+                                           label(uwp::Text::back)});
+            if (choice == 4)
                 break;
-            if (choice == 0) {
+            if (choice == 3) {
+                auto selected = co_await choose(label(uwp::Text::visuals), label(uwp::Text::visuals_limits),
+                                                {label(uwp::Text::visuals_remaster),
+                                                 label(uwp::Text::visuals_original), label(uwp::Text::back)});
+                if (selected < 2)
+                    preferences.visuals = packs::parse_visuals(selected);
+            } else if (choice == 0) {
                 auto selected =
                     co_await choose(label(uwp::Text::wallpaper), L"",
                                     {label(uwp::Text::wallpaper_game), label(uwp::Text::wallpaper_plateau),
@@ -2336,6 +2353,7 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                            ? std::wstring(L"FSR 3.1")
                            : setup_label(uwp::Text::upscaler_off)) +
                       L" — " + setup_label(uwp::Text::scale_restart),
+                  visuals_row(),
                   setup_label(uwp::Text::fps) + L": " + std::to_wstring(preferences.fps),
                   setup_label(uwp::Text::mods),
                   setup_label(uwp::Text::volume) + L": " + std::to_wstring(preferences.volume) + L"%",
@@ -2428,19 +2446,22 @@ struct App : implements<App, IFrameworkViewSource, IFrameworkView> {
                                                                                           : int(fsr::Upscaler::Spatial);
             save_preferences();
         } else if (focus == 4) {
+            preferences.visuals = packs::next_visuals(preferences.visuals);
+            save_preferences();
+        } else if (focus == 5) {
             preferences.fps = preferences.fps == 30 ? 60 : 30;
             save_preferences();
-        } else if (focus == 5 && activate)
+        } else if (focus == 6 && activate)
             return_home(true);
-        else if (focus == 6) {
+        else if (focus == 7) {
             preferences.volume = std::clamp(preferences.volume + (pressed & uwp::left ? -10 : 10), 0, 100);
             save_preferences();
-        } else if (focus == 7) {
+        } else if (focus == 8) {
             uwp::gamepad_screen =
                 uwp::next_gamepad_screen(uwp::gamepad_screen.load(), pressed & uwp::left ? -1 : 1);
-        } else if (focus == 8 && activate) {
-            capture_screenshot();
         } else if (focus == 9 && activate) {
+            capture_screenshot();
+        } else if (focus == 10 && activate) {
             quit = true;
             uwp::quick_menu.requested = false;
             CoreApplication::Exit();

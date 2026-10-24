@@ -42,6 +42,12 @@ python3 -I tools/packs/recompile.py /external/game/code/U-King.rpx generated \
 
 ## Remaster selection
 
+UWP builds offer **Visuals: Remaster / Original** in Settings and the quick menu,
+applied at the next launch. Original suppresses compiled shader replacements and
+texture rules while retaining FPS++ and all static PPC patches. See
+[Visuals toggle](../../docs/visuals-toggle.md) for the exact categories, build
+alternatives and binary size measurement.
+
 Generate a console-specific selection from a player-supplied
 `graphicPacks/BreathOfTheWild` directory:
 
@@ -195,7 +201,7 @@ active after FPS++'s replacement call: it handles UWP pause and CPU telemetry,
 and its host delta/scaling path is gated off for a compiled timing pack. Other
 hooks on instructions replaced by packs are omitted. The compiled pack owns guest timing and physics. Host `g_target_fps` controls
 presentation; it does not restore omitted physics hooks. There is no runtime
-PPC patch toggle. Selection changes require recompilation on the Mac/build host; Xbox
+PPC patch toggle. Code-patch selection changes require recompilation on the Mac/build host; Xbox
 only executes the resulting static code. No JIT or on-console compilation is involved.
 
 ## Runtime handoff to loader/host and W2
