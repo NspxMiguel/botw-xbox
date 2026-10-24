@@ -63,7 +63,8 @@ identity texture rules do not override it. Shadow maps use the pack's explicit
 a 3× host scale: explicit pack dimensions take precedence, obscuring the policy.
 
 Automatic Series X scale is **2× on a 4K TV (2560×1440 internal)**, and **1.5× on
-a 1080p TV (1920×1080 internal)**. Series S retains its 1.5× cap. This is a
+a 1080p TV (1920×1080 internal)**. Series S now starts at 1.25× (1600×900),
+with a 1440p output cap; see [Series S policy](series-s.md). This is a
 conservative memory default, not a claim that 1440p is a measured GPU limit.
 The final output filter presents to the full physical swapchain; FSR is disabled
 unless selected. Explicit quick-menu/helper scale choices still win, up to 3×
