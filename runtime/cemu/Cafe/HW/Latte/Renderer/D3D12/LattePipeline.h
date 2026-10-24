@@ -349,7 +349,15 @@ struct ByteEqual
 		return std::memcmp(&a, &b, sizeof(T)) == 0;
 	}
 };
-template <class T, size_t Capacity = 4, class Equal = ByteEqual<T>>
+template <class T>
+struct ValueCopy
+{
+	void operator()(T &destination, const T &source) const
+	{
+		destination = source;
+	}
+};
+template <class T, size_t Capacity = 4, class Equal = ByteEqual<T>, class Copy = ValueCopy<T>>
 class StateBlocks
 {
 	struct Entry
@@ -375,7 +383,7 @@ class StateBlocks
 			auto &entry = m_entries[i];
 			if (entry.sequence <= consumed && entry.generation != UINT64_MAX / Capacity)
 			{
-				entry.value = value;
+				Copy{}(entry.value, value);
 				entry.sequence = sequence;
 				++entry.generation;
 				m_last = i;
@@ -383,6 +391,17 @@ class StateBlocks
 			}
 		}
 		return {};
+	}
+	// The producer may extend a known immutable block after observing no source
+	// mutation. Its sequence must still cover every draw before slot replacement.
+	BlockId Reuse(BlockId id, uint64_t sequence)
+	{
+		Get(id);
+		auto &entry = m_entries[id.value % Capacity];
+		if (sequence < entry.sequence)
+			throw std::logic_error("Non-monotonic Latte block reuse");
+		entry.sequence = sequence;
+		return id;
 	}
 	const T &Get(BlockId id) const
 	{

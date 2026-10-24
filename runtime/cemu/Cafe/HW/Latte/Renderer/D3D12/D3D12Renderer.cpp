@@ -1860,7 +1860,13 @@ LatteTexture *D3D12Renderer::texture_createTextureEx(Latte::E_DIM dim, MPTR phys
 void D3D12Renderer::texture_setLatteTexture(LatteTextureView *textureView, uint32 textureUnit)
 {
 	cemu_assert_debug(textureUnit < std::size(m_frontState.boundTexture));
-	m_frontState.boundTexture[textureUnit] = static_cast<LatteTextureViewD3D12 *>(textureView);
+	auto &current = m_frontState.boundTexture[textureUnit];
+	if (current != textureView)
+	{
+		current = static_cast<LatteTextureViewD3D12 *>(textureView);
+		m_frontStageLayouts.BeginSequence();
+		m_frontDrawBlockReusable = false;
+	}
 }
 
 void D3D12Renderer::texture_loadSlice(LatteTexture *hostTexture, sint32 width, sint32 height, sint32 depth, void *pixelData, sint32 sliceIndex, sint32 mipIndex, uint32 compressedImageSize)
@@ -2309,7 +2315,14 @@ void D3D12Renderer::buffer_bindVertexBuffers(std::span<BindBufferParam> bindings
 		return;
 	}
 	for (const auto &b : bindings)
-		m_frontBindings.vertices[b.index] = {b.bindOffset, b.bindSize, b.stride, true};
+	{
+		auto &current = m_frontBindings.vertices[b.index];
+		if (!current.bound || current.offset != b.bindOffset || current.size != b.bindSize || current.stride != b.stride)
+		{
+			current = {b.bindOffset, b.bindSize, b.stride, true};
+			m_frontDrawBlockReusable = false;
+		}
+	}
 }
 
 void D3D12Renderer::buffer_bindVertexBuffers_record(std::span<const BindBufferParam> bindings)
@@ -2339,7 +2352,14 @@ void D3D12Renderer::buffer_bindUniformBuffer(LatteConst::ShaderType shaderType, 
 	if (!m_pipeline.Queued())
 		buffer_bindUniformBuffer_record(stage, bufferIndex, offset, size);
 	else
-		m_frontBindings.uniforms[stage][bufferIndex] = {offset, size};
+	{
+		auto &current = m_frontBindings.uniforms[stage][bufferIndex];
+		if (current.offset != offset || current.size != size)
+		{
+			current = {offset, size};
+			m_frontDrawBlockReusable = false;
+		}
+	}
 }
 
 void D3D12Renderer::buffer_bindUniformBuffer_record(uint32 stageIndex, uint32 bufferIndex, uint32 offset, uint32 size)
@@ -3149,7 +3169,11 @@ void D3D12Renderer::ReleaseView(LattePipeline::ResourceId id)
 {
 	for (auto &view : m_frontState.boundTexture)
 		if (view && view->recordingId == id)
+		{
 			view = nullptr;
+			m_frontStageLayouts.BeginSequence();
+			m_frontDrawBlockReusable = false;
+		}
 	BackendPacket packet{};
 	packet.kind = BackendPacket::Kind::ViewRelease;
 	packet.resources[0] = id;

@@ -216,6 +216,33 @@ static void StateBlockTests()
 	assert(c != a);
 	assert(blocks.Get(c) == 3 && blocks.Get(b) == 2);
 	Throws([&] { blocks.Get(a); });
+	StateBlocks<uint64_t, 1> reused;
+	const auto original = reused.Intern(7, 1, 0);
+	assert(reused.Reuse(original, 10) == original);
+	assert(!reused.Intern(8, 11, 9));
+	Throws([&] { reused.Reuse(original, 9); });
+	assert(reused.Intern(8, 11, 10));
+	Throws([&] { reused.Reuse(original, 12); });
+	// Copying active spans is equivalent even after a slot previously held more
+	// stages and bindings. Inactive tails are not part of equality/recording.
+	DrawBlock source{}, destination{};
+	for (const uint32_t stages : {3u, 1u, 2u, 3u})
+	{
+		source.stageCount = stages;
+		for (uint32_t i = 0; i < stages; ++i)
+		{
+			auto &stage = source.stages[i];
+			stage.textureCount = stages + i;
+			stage.samplerCount = stages;
+			stage.textures[stage.textureCount - 1].view = {i + 1, stages};
+			stage.samplers[stage.samplerCount - 1].words[0] = stages;
+			stage.uniforms[0] = {stages * 256, 512};
+			stage.uniformReg = i;
+			stage.streamout = (i & 1) != 0;
+		}
+		DrawBlockCopy{}(destination, source);
+		assert(DrawBlockEqual{}(destination, source));
+	}
 }
 
 static void SequenceLayoutTests()

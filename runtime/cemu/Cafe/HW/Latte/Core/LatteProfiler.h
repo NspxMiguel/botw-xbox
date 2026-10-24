@@ -87,6 +87,7 @@ enum class Counter : size_t
 	SubmissionDrawLimit,
 	SubmissionReadback,
 	SubmissionOverflow,
+	DrawBlockReuses,
 	Count,
 };
 

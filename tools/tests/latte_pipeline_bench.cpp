@@ -35,7 +35,7 @@ struct Recorder
 			ids[i] = resources.Insert(&objects[i]);
 		}
 	}
-	StateBlocks<DrawBlock, 4, DrawBlockEqual> blocks;
+	StateBlocks<DrawBlock, 4, DrawBlockEqual, DrawBlockCopy> blocks;
 	std::array<std::byte, sizeof(DrawBlock)> state{};
 	std::array<std::byte, 1024> lastUniform{};
 	__attribute__((noinline)) void Commands(const DrawPacket &packet, const DrawBlock &block, std::span<const std::byte> uniform, bool native = false)
@@ -143,7 +143,7 @@ static Timing Run(bool queued, bool churn, uint64_t &commands)
 					std::abort();
 				if (!stream.Staging().Copy(uniform, packet.uniformBytes[0]))
 					std::abort();
-				packet.state = recorder.blocks.Intern(block, context.Sequence() + 1, stream.Progress().recorded);
+				packet.state = churn || !packet.state ? recorder.blocks.Intern(block, context.Sequence() + 1, stream.Progress().recorded) : recorder.blocks.Reuse(packet.state, context.Sequence() + 1);
 				if (!packet.state)
 					std::abort();
 				stream.Execute<DrawPacket, &Recorder::Record>(context, Opcode::Draw, packet, recorder);

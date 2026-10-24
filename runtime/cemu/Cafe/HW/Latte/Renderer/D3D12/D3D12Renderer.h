@@ -356,9 +356,12 @@ class D3D12Renderer : public Renderer, public D3D12SubmissionTracker
 	LattePipeline::BlockId m_pinnedDrawBlock;
 	LattePipeline::ResourceId m_pinnedFramebuffer;
 	uint64 m_pinnedDrawFence = 0;
-	LattePipeline::StateBlocks<LattePipeline::DrawBlock, 1024, LattePipeline::DrawBlockEqual> m_drawBlocks;
+	LattePipeline::StateBlocks<LattePipeline::DrawBlock, 1024, LattePipeline::DrawBlockEqual, LattePipeline::DrawBlockCopy> m_drawBlocks;
 	LattePipeline::SequenceStageLayouts m_frontStageLayouts;
 	LattePipeline::DrawBlock m_frontDrawBlock{};
+	LattePipeline::BlockId m_frontDrawBlockId;
+	bool m_frontDrawBlockReusable = false;
+	std::array<LatteDecompilerShader *, 3> m_frontDrawShaders{};
 	struct IndexResource
 	{
 		D3D12UploadHeapAllocator::Allocation *native = nullptr;

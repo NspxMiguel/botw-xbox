@@ -67,6 +67,30 @@ struct DrawBlock
 	VertexRange vertices[LATTE_MAX_VERTEX_BUFFERS]{};
 	uint32_t stageCount = 0;
 };
+// Unused stage/texture/sampler slots are outside the immutable value. Copy the
+// same active fields that equality and recording read, without clearing tails.
+struct DrawBlockCopy
+{
+	void operator()(DrawBlock &destination, const DrawBlock &source) const
+	{
+		destination.stageCount = source.stageCount;
+		std::memcpy(destination.vertices, source.vertices, sizeof(source.vertices));
+		for (uint32_t i = 0; i < source.stageCount; ++i)
+		{
+			const auto &s = source.stages[i];
+			auto &d = destination.stages[i];
+			d.stage = s.stage;
+			d.uniformReg = s.uniformReg;
+			d.samplerCount = s.samplerCount;
+			d.textureCount = s.textureCount;
+			d.streamout = s.streamout;
+			d.uniformBytes = s.uniformBytes;
+			std::memcpy(d.uniforms, s.uniforms, sizeof(s.uniforms));
+			std::memcpy(d.textures, s.textures, s.textureCount * sizeof(*s.textures));
+			std::memcpy(d.samplers, s.samplers, s.samplerCount * sizeof(*s.samplers));
+		}
+	}
+};
 struct DrawBlockEqual
 {
 	bool operator()(const DrawBlock &a, const DrawBlock &b) const

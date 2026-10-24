@@ -48,6 +48,7 @@ void D3D12Renderer::draw_beginSequence()
 {
 	m_pipeline.BeginOperation();
 	m_frontStageLayouts.BeginSequence();
+	m_frontDrawBlockReusable = false;
 	LatteProfiler::DetailScope detailScope(LatteProfiler::Detail::Sequence);
 	if (!m_pipeline.Queued())
 		ServicePendingPresent(false);
@@ -1171,31 +1172,58 @@ void D3D12Renderer::draw_execute(uint32 baseVertex, uint32 baseInstance, uint32 
 		}
 	}
 	packet.runtime = StageBytes(runtimeDwords, sizeof(runtimeDwords));
-	auto &block = m_frontDrawBlock;
-	block.stageCount = 0;
-	memcpy(block.vertices, m_frontBindings.vertices, sizeof(block.vertices));
 	packet.viewport = m_frontState.viewport;
 	packet.scissor = m_frontState.scissor;
 	memcpy(packet.blendFactor, LatteGPUState.contextRegister + Latte::REGADDR::CB_BLEND_RED, sizeof(packet.blendFactor));
 	packet.stencilRef = LatteGPUState.contextNew.DB_STENCILREFMASK.get_STENCILREF_F();
+	const std::array<LatteDecompilerShader *, 3> drawShaders{vs, ps, gs};
+	if (m_frontDrawShaders != drawShaders)
 	{
-		LatteProfiler::DetailScope detail(LatteProfiler::Detail::BindingsPrepare);
-		draw_prepareStage(vs, block.stages[block.stageCount++]);
-		if (ps)
-			draw_prepareStage(ps, block.stages[block.stageCount++]);
-		if (gs)
-			draw_prepareStage(gs, block.stages[block.stageCount++]);
+		m_frontDrawBlockReusable = false;
+		m_frontStageLayouts.BeginSequence();
+		m_frontDrawShaders = drawShaders;
 	}
-	for (uint32 i = 0; i < block.stageCount; ++i)
+	auto &block = m_frontDrawBlock;
+	if (!m_frontDrawBlockReusable)
 	{
-		packet.uniformBytes[i] = block.stages[i].uniformBytes;
-		block.stages[i].uniformBytes = {};
-	}
-	packet.state = m_drawBlocks.Intern(block, m_pipeline.Sequence() + 1, m_operations.Progress().recorded);
-	while (!packet.state)
-	{
-		m_operations.WaitCapacity(m_operations.Progress().recorded + 1);
+		block.stageCount = 0;
+		memcpy(block.vertices, m_frontBindings.vertices, sizeof(block.vertices));
+		{
+			LatteProfiler::DetailScope detail(LatteProfiler::Detail::BindingsPrepare);
+			draw_prepareStage(vs, block.stages[block.stageCount++]);
+			if (ps)
+				draw_prepareStage(ps, block.stages[block.stageCount++]);
+			if (gs)
+				draw_prepareStage(gs, block.stages[block.stageCount++]);
+		}
+		for (uint32 i = 0; i < block.stageCount; ++i)
+		{
+			packet.uniformBytes[i] = block.stages[i].uniformBytes;
+			block.stages[i].uniformBytes = {};
+		}
 		packet.state = m_drawBlocks.Intern(block, m_pipeline.Sequence() + 1, m_operations.Progress().recorded);
+		while (!packet.state)
+		{
+			m_operations.WaitCapacity(m_operations.Progress().recorded + 1);
+			packet.state = m_drawBlocks.Intern(block, m_pipeline.Sequence() + 1, m_operations.Progress().recorded);
+		}
+		m_frontDrawBlockId = packet.state;
+		m_frontDrawBlockReusable = true;
+	}
+	else
+	{
+		// Texture/sampler/context changes start a new sequence; binding methods
+		// invalidate this path on every changed vertex or uniform range.
+		uint32 stageIndex = 0;
+		for (auto *shader : {vs, ps, gs})
+			if (shader)
+			{
+				if (block.stages[stageIndex].uniformReg >= 0)
+					packet.uniformBytes[stageIndex] = draw_snapshotUniformVars(shader);
+				++stageIndex;
+			}
+		packet.state = m_drawBlocks.Reuse(m_frontDrawBlockId, m_pipeline.Sequence() + 1);
+		LatteProfiler::Add(LatteProfiler::Counter::DrawBlockReuses);
 	}
 	m_operations.Execute<LattePipeline::DrawPacket, &D3D12Renderer::draw_record>(m_pipeline, LattePipeline::Opcode::Draw, packet, *this);
 	ApplyFrontCompletions();
