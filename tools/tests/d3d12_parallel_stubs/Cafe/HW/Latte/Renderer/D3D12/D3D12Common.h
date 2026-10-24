@@ -1,0 +1,110 @@
+#pragma once
+
+// Minimal device stand-in for testing production descriptor heap bookkeeping on
+// a host without D3D12. It checks allocation/copy counts and handle reuse; it
+// does not emulate rendering.
+#include <array>
+#include <atomic>
+#include <cassert>
+#include <cstdint>
+#include <cstring>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
+using uint8 = uint8_t;
+using sint8 = int8_t;
+using sint32 = int32_t;
+using uint32 = uint32_t;
+using uint64 = uint64_t;
+using SIZE_T = size_t;
+using UINT64 = uint64_t;
+using D3D12_GPU_VIRTUAL_ADDRESS = uint64_t;
+struct ID3D12Resource;
+using UINT = unsigned;
+using HRESULT = int;
+using INT = int;
+using D3D_PRIMITIVE_TOPOLOGY = uint32;
+struct D3D12_VIEWPORT;
+struct D3D12_RECT;
+namespace Latte {
+enum class E_DIM : uint32_t { DIM_2D };
+}
+#define LATTE_MAX_VERTEX_BUFFERS 16
+#include "Cafe/HW/Latte/Renderer/D3D12/D3D12BindingModel.h"
+struct D3D12_CPU_DESCRIPTOR_HANDLE {
+  size_t ptr = 0;
+};
+struct D3D12_GPU_DESCRIPTOR_HANDLE {
+  uint64 ptr = 0;
+};
+enum D3D12_DESCRIPTOR_HEAP_TYPE {
+  D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+  D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER
+};
+constexpr int D3D12_DESCRIPTOR_HEAP_FLAG_NONE = 0;
+constexpr int D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE = 1;
+struct D3D12_DESCRIPTOR_HEAP_DESC {
+  D3D12_DESCRIPTOR_HEAP_TYPE Type;
+  uint32 NumDescriptors;
+  int Flags;
+};
+struct D3D12_SAMPLER_DESC {
+  uint32 words[13]{};
+};
+struct ID3D12DescriptorHeap {
+  size_t cpu;
+  uint64 gpu;
+  D3D12_CPU_DESCRIPTOR_HANDLE GetCPUDescriptorHandleForHeapStart() {
+    return {cpu};
+  }
+  D3D12_GPU_DESCRIPTOR_HANDLE GetGPUDescriptorHandleForHeapStart() {
+    return {gpu};
+  }
+};
+template <class T> struct ComPtr {
+  T *ptr = nullptr;
+  ComPtr() = default;
+  ~ComPtr() { delete ptr; }
+  ComPtr(ComPtr &&other) noexcept : ptr(other.ptr) { other.ptr = nullptr; }
+  ComPtr &operator=(ComPtr &&other) noexcept {
+    delete ptr;
+    ptr = other.ptr;
+    other.ptr = nullptr;
+    return *this;
+  }
+  T **operator&() { return &ptr; }
+  T *operator->() const { return ptr; }
+  T *Get() const { return ptr; }
+};
+struct D3D12_VIEWPORT {
+  float TopLeftX, TopLeftY, Width, Height, MinDepth, MaxDepth;
+};
+struct D3D12_RECT {
+  int32_t left, top, right, bottom;
+};
+
+#include "ParallelNativeTypes.h"
+#define IID_PPV_ARGS(p) p
+#define cemu_assert(x) assert(x)
+#define cemu_assert_debug(x) assert(x)
+namespace fmt {
+template <class... T> std::string format(const char *, T...) { return {}; }
+} // namespace fmt
+namespace LogType {
+constexpr int Force = 0;
+}
+template <class... T> void cemuLog_log(T...) {}
+inline void D3D12_ThrowIfFailed(HRESULT hr, const char *) { assert(hr == 0); }
+inline void D3D12_SetDebugName(ID3D12DescriptorHeap *, const std::string &) {}
+
+#include <algorithm>
+template <class T> T AlignUp(T value, T alignment) {
+  return (value + alignment - 1) / alignment * alignment;
+}
+namespace D3D12Const {
+inline constexpr uint32 kCBVAlignment = 256;
+inline constexpr uint32 kGpuSamplerHeapSize = 2048;
+} // namespace D3D12Const
