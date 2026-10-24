@@ -1313,9 +1313,7 @@ void D3D12Renderer::draw_record(const LattePipeline::DrawPacket &packet, const L
 				out.tableDesc.cbvAddress[reg] = GetAlignedUniformBufferAddress(range.offset, range.size);
 				out.tableDesc.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
 			}
-			LattePipeline::ResolveTextureDescriptors(source, out.tableDesc,
-				[&](LattePipeline::ResourceId id, uint32 swizzle) { return m_resources.Get<LatteTextureViewD3D12>(id)->GetSRV(swizzle); },
-				[&](Latte::E_DIM dimension) { return GetNullSRV(dimension); });
+			LattePipeline::ResolveTextureDescriptors(source, out.tableDesc, [&](LattePipeline::ResourceId id, uint32 swizzle) { return m_resources.Get<LatteTextureViewD3D12>(id)->GetSRV(swizzle); }, [&](Latte::E_DIM dimension) { return GetNullSRV(dimension); });
 			if (source.streamout)
 			{
 				out.tableDesc.uavResource = m_xfbRingBuffer.Get();
@@ -1607,9 +1605,7 @@ bool D3D12Renderer::draw_captureParallel(const LattePipeline::DrawPacket &packet
 				native.cbvAddress[reg] = m_bufferCacheAddress + range.offset;
 				native.cbvSize[reg] = std::min<uint32>(range.size, D3D12_REQ_CONSTANT_BUFFER_ELEMENT_COUNT * 16);
 			}
-		LattePipeline::ResolveTextureDescriptors(stage, native,
-			[&](LattePipeline::ResourceId id, uint32 swizzle) { return m_resources.Get<LatteTextureViewD3D12>(id)->GetSRV(swizzle); },
-			[&](Latte::E_DIM dimension) { return GetNullSRV(dimension); });
+		LattePipeline::ResolveTextureDescriptors(stage, native, [&](LattePipeline::ResourceId id, uint32 swizzle) { return m_resources.Get<LatteTextureViewD3D12>(id)->GetSRV(swizzle); }, [&](Latte::E_DIM dimension) { return GetNullSRV(dimension); });
 		for (uint32 j = 0; j < stage.textureCount; ++j)
 		{
 			const auto &binding = stage.textures[j];

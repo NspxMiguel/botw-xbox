@@ -29,7 +29,8 @@ static std::vector<D3D12ResolvedDraw> Capture(size_t count) {
       for (uint32 reg = 0; reg < stage.textureCount; ++reg) {
         auto &binding = stage.textures[reg];
         binding.reg = stage.textureCount - reg - 1;
-        binding.view = reg % 5 ? LattePipeline::ResourceId{1, 1} : LattePipeline::ResourceId{};
+        binding.view = reg % 5 ? LattePipeline::ResourceId{1, 1}
+                               : LattePipeline::ResourceId{};
         binding.swizzle = (i + j + reg) % 17;
         if (reg % 7 == 0)
           binding.reg = -2 - binding.reg; // dimensional mismatch selects null
@@ -59,8 +60,11 @@ static std::vector<D3D12ResolvedDraw> Capture(size_t count) {
     for (uint32 j = 0; j < 3; ++j) {
       draw.stages[j].cbvAddress[4] = 0x10000 + i * 256 + j * 0x100000;
       draw.stages[j].cbvSize[4] = 256;
-      LattePipeline::ResolveTextureDescriptors(block.stages[j], draw.stages[j],
-          [&](LattePipeline::ResourceId, uint32 swizzle) { return texture.GetSRV(swizzle); },
+      LattePipeline::ResolveTextureDescriptors(
+          block.stages[j], draw.stages[j],
+          [&](LattePipeline::ResourceId, uint32 swizzle) {
+            return texture.GetSRV(swizzle);
+          },
           [](Latte::E_DIM) { return D3D12_CPU_DESCRIPTOR_HANDLE{2}; });
     }
     draws.push_back(std::move(draw));
@@ -104,7 +108,8 @@ static void Check(ID3D12Device &device,
       for (auto value : recorded.blend)
         assert(value == float(i));
       for (uint32 j = 0; j < 3; ++j) {
-        const auto stageIndex = static_cast<uint32>(expected.source.block.stages[j].stage);
+        const auto stageIndex =
+            static_cast<uint32>(expected.source.block.stages[j].stage);
         const auto address = recorded.cbvs[stageIndex * 4];
         assert(address != 0);
         assert(memcmp(reinterpret_cast<const void *>(address),
@@ -121,15 +126,19 @@ static void Check(ID3D12Device &device,
           // Independent mode-2 rule: reverse register mapping, absent views,
           // dimensional nulls, and the original captured swizzle.
           const auto &binding = stage.textures[stage.textureCount - reg - 1];
-          const auto srv = binding.reg < -1 || !binding.view
-              ? D3D12_CPU_DESCRIPTOR_HANDLE{2}
-              : D3D12_CPU_DESCRIPTOR_HANDLE{0x400 + binding.swizzle * 32};
-          assert(device.descriptors.at(table +
-                     (D3D12Const::StageTableOffsetSRV(expected.source.block.stages[j].stage) + reg) * 32) ==
-                 device.descriptors.at(srv.ptr));
+          const auto srv =
+              binding.reg < -1 || !binding.view
+                  ? D3D12_CPU_DESCRIPTOR_HANDLE{2}
+                  : D3D12_CPU_DESCRIPTOR_HANDLE{0x400 + binding.swizzle * 32};
+          assert(device.descriptors.at(
+                     table + (D3D12Const::StageTableOffsetSRV(
+                                  expected.source.block.stages[j].stage) +
+                              reg) *
+                                 32) == device.descriptors.at(srv.ptr));
         }
         const auto sampler = recorded.tables[stageIndex * 2 + 1] - 0x100000000;
-        for (uint32 reg = 0; reg < expected.source.block.stages[j].samplerCount; ++reg)
+        for (uint32 reg = 0; reg < expected.source.block.stages[j].samplerCount;
+             ++reg)
           assert(device.descriptors.at(sampler + reg * 32) ==
                  expected.source.block.stages[j].samplers[reg].words[0]);
       }

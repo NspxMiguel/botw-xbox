@@ -35,18 +35,18 @@ struct StageBlock
 // Workers receive native handles, never a second interpretation of the bindings.
 template <class ResolveView, class ResolveNull>
 void ResolveTextureDescriptors(const StageBlock &source, D3D12StageTableDesc &table,
-                               ResolveView resolveView, ResolveNull resolveNull)
+							   ResolveView resolveView, ResolveNull resolveNull)
 {
-  for (uint32_t i = 0; i < source.textureCount; ++i)
-  {
-    const auto &binding = source.textures[i];
-    if (binding.reg == -1)
-      continue;
-    const auto reg = binding.reg < -1 ? -2 - binding.reg : binding.reg;
-    table.srv[reg] = binding.reg < -1 || !binding.view
-        ? resolveNull(binding.nullDimension)
-        : resolveView(binding.view, binding.swizzle);
-  }
+	for (uint32_t i = 0; i < source.textureCount; ++i)
+	{
+		const auto &binding = source.textures[i];
+		if (binding.reg == -1)
+			continue;
+		const auto reg = binding.reg < -1 ? -2 - binding.reg : binding.reg;
+		table.srv[reg] = binding.reg < -1 || !binding.view
+							 ? resolveNull(binding.nullDimension)
+							 : resolveView(binding.view, binding.swizzle);
+	}
 }
 // The PM4 processor ends a sequence on texture/sampler/context changes. Only
 // stable translation lives here; uniform ranges and bytes are refreshed per draw.
